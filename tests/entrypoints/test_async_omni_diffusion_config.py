@@ -69,6 +69,17 @@ def test_default_stage_config_propagates_ulysses_mode():
     assert parallel_config.ulysses_mode == "advanced_uaa"
 
 
+def test_default_stage_config_marks_audiox_as_audio_output():
+    """Ensure AudioX default diffusion config reports audio final output."""
+    stage_cfg = AsyncOmniEngine._create_default_diffusion_stage_cfg(
+        {
+            "model_class_name": "AudioXPipeline",
+        }
+    )[0]
+
+    assert stage_cfg["final_output_type"] == "audio"
+
+
 def test_serve_cli_accepts_ulysses_mode():
     """Ensure diffusion serve CLI exposes ulysses_mode and wires it to parallel_config."""
     parser = FlexibleArgumentParser()

@@ -847,6 +847,8 @@ class AsyncOmniEngine:
 
         num_devices = max(1, int(parallel_config.world_size))
         devices = ",".join(str(i) for i in range(num_devices))
+        model_class_name = kwargs.get("model_class_name", None)
+        final_output_type = "audio" if model_class_name == "AudioXPipeline" else "image"
 
         default_stage_cfg = [
             {
@@ -859,7 +861,7 @@ class AsyncOmniEngine:
                 "engine_args": {
                     "max_num_seqs": 1,
                     "parallel_config": parallel_config,
-                    "model_class_name": kwargs.get("model_class_name", None),
+                    "model_class_name": model_class_name,
                     "vae_use_slicing": kwargs.get("vae_use_slicing", False),
                     "vae_use_tiling": kwargs.get("vae_use_tiling", False),
                     "cache_backend": cache_backend,
@@ -888,7 +890,7 @@ class AsyncOmniEngine:
                     ),
                 },
                 "final_output": True,
-                "final_output_type": "image",
+                "final_output_type": final_output_type,
             }
         ]
         default_stage_cfg[0]["engine_args"]["model_stage"] = "diffusion"
