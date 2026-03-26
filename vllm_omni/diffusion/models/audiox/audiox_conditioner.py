@@ -13,8 +13,18 @@ from torchvision import transforms
 from transformers import CLIPVisionModelWithProjection
 
 from vllm_omni.diffusion.attention.layer import Attention
-from vllm_omni.diffusion.models.audiox.audiox_generation import set_audio_channels
 from vllm_omni.diffusion.models.audiox.audiox_pretransform import create_pretransform_from_config
+
+
+def set_audio_channels(audio: torch.Tensor, target_channels: int) -> torch.Tensor:
+    if target_channels == 1:
+        audio = audio.mean(1, keepdim=True)
+    elif target_channels == 2:
+        if audio.shape[1] == 1:
+            audio = audio.repeat(1, 2, 1)
+        elif audio.shape[1] > 2:
+            audio = audio[:, :2, :]
+    return audio
 
 
 class SA_PreNorm(nn.Module):
@@ -425,6 +435,13 @@ def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, t
     # Video conditioner is fixed-shape in AudioX; keep only supported keys.
     video_cfg = {k: v for k, v in video_cfg.items() if k in {"output_dim", "project_out"}}
     pretransform = _build_pretransform(audio_cfg)
+    # Keep only kwargs accepted by AudioAutoencoderConditionerv2; ignore legacy
+    # training/loading keys (e.g. pretransform_ckpt_path) from upstream configs.
+    audio_cfg = {
+        k: v
+        for k, v in audio_cfg.items()
+        if k in {"output_dim", "latent_seq_len", "mask_ratio_start", "mask_ratio_end"}
+    }
 
     conditioners: dict[str, Conditioner] = {
         "video_prompt": CLIPWithSyncWithEmptyFeatureConditioner(**video_cfg),

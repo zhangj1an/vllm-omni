@@ -65,7 +65,7 @@ def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], samp
             f"AudioX HKUST weights only use pretransform type 'autoencoder'; got {pretransform_type!r}"
         )
 
-    from vllm_omni.diffusion.models.audiox.audiox_loader import (
+    from vllm_omni.diffusion.models.audiox.audiox_weights import (
         audiox_oobleck_ae_config_supported,
     )
 

@@ -16,12 +16,12 @@ from vllm.logger import init_logger
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
-from vllm_omni.diffusion.models.audiox.audiox_loader import load_audiox_weights
+from vllm_omni.diffusion.models.audiox.audiox_weights import load_audiox_weights
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
     encode_audiox_conditioning_tensors,
 )
-from vllm_omni.diffusion.models.audiox.audiox_model_builder import create_model_from_config
-from vllm_omni.diffusion.models.audiox.sharded_weights import (
+from vllm_omni.diffusion.models.audiox.audiox_runtime import create_model_from_config
+from vllm_omni.diffusion.models.audiox.audiox_weights import (
     build_sharded_component_sources,
     load_audiox_bundle_config,
 )
@@ -402,10 +402,10 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
     ``transformer/diffusion_pytorch_model.safetensors`` and
     ``conditioners/diffusion_pytorch_model.safetensors`` (and ``vae/`` when the config includes a
     pretransform). Produce this layout from a Hugging Face ``config.json`` + ``model.ckpt`` bundle via
-    ``python -m vllm_omni.diffusion.models.audiox.convert_to_sharded_layout``. Also requires
+    ``python -m vllm_omni.diffusion.models.audiox.audiox_weights``. Also requires
     third-party Python deps used by the inlined AudioX modules under this package
     (``inference/``, ``models/``, ``data/``). VAE weights are remapped onto Hugging Face
-    :class:`~diffusers.AutoencoderOobleck` (see :mod:`vllm_omni.diffusion.models.audiox.audiox_loader`).
+    :class:`~diffusers.AutoencoderOobleck` (see :mod:`vllm_omni.diffusion.models.audiox.audiox_weights`).
     """
 
     support_audio_output: ClassVar[bool] = True
@@ -435,14 +435,14 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         if od_config.model is None:
             raise ValueError(
                 "AudioXPipeline requires od_config.model (directory with component-sharded safetensors; "
-                "see convert_to_sharded_layout)."
+                "see audiox_weights)."
             )
 
         self._model_root = os.path.abspath(od_config.model)
         config_path, self._model_config, _ = load_audiox_bundle_config(self._model_root)
 
         try:
-            from vllm_omni.diffusion.models.audiox.audiox_generation import generate_diffusion_cond
+            from vllm_omni.diffusion.models.audiox.audiox_runtime import generate_diffusion_cond
         except ImportError as e:
             raise RuntimeError(
                 "Failed to import inlined AudioX modules under vllm_omni.diffusion.models.audiox "

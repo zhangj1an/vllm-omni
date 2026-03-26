@@ -3,7 +3,7 @@
 # Upstream: https://github.com/ZeyueT/AudioX/tree/main/audiox/models (MAF.py)
 #
 # Structure matches published HKUST MAF checkpoints, but attention uses vLLM-Omni
-# :class:`~vllm_omni.diffusion.attention.layer.Attention` (see remap helpers in ``audiox_loader``).
+# :class:`~vllm_omni.diffusion.attention.layer.Attention` (see remap helpers in ``audiox_weights``).
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ class MAF_Block(nn.Module):
     DIM = 768
     NUM_EXPERTS_PER_MODALITY = 64
     NUM_HEADS = 12
-    NUM_FUSION_LAYERS = 4
+    NUM_FUSION_LAYERS = 8
     MLP_RATIO = 4.0
 
     def __init__(self):
