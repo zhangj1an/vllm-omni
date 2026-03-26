@@ -725,7 +725,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         if neg is not None and guidance_scale > 1.0:
             negative_conditioning_batch = [
                 _conditioning_item(
-                    text=nprompt,
+                    text=self._text_for_task(task_norm, nprompt),
                     video_tensor=video_tensors_list[i],
                     audio_tensor=audio_prompt_list[i],
                     sync_features=sync_features,
