@@ -670,7 +670,10 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             guidance_scale = sampling_params.guidance_scale
         else:
             guidance_scale = float(extra_args.get("cfg_scale", 6.0))
-        batch_size = len(prompts)
+        num_outputs_per_prompt = (
+            int(sampling_params.num_outputs_per_prompt) if sampling_params.num_outputs_per_prompt > 0 else 1
+        )
+        batch_size = len(prompts) * num_outputs_per_prompt
 
         seconds_start = float(extra_args.get("seconds_start", 0.0))
         seconds_model = self._sample_size / self._sample_rate
@@ -710,30 +713,33 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
         conditioning_batch: list[dict[str, Any]] = []
         for i, prompt in enumerate(prompts):
-            conditioning_batch.append(
-                _conditioning_item(
-                    text=self._text_for_task(task_norm, prompt),
-                    video_tensor=video_tensors_list[i],
-                    audio_tensor=audio_prompt_list[i],
-                    sync_features=sync_features,
-                    seconds_start=seconds_start,
-                    seconds_model=seconds_model,
+            for _ in range(num_outputs_per_prompt):
+                conditioning_batch.append(
+                    _conditioning_item(
+                        text=self._text_for_task(task_norm, prompt),
+                        video_tensor=video_tensors_list[i],
+                        audio_tensor=audio_prompt_list[i],
+                        sync_features=sync_features,
+                        seconds_start=seconds_start,
+                        seconds_model=seconds_model,
+                    )
                 )
-            )
 
         negative_conditioning_batch: list[dict[str, Any]] | None = None
         if neg is not None and guidance_scale > 1.0:
-            negative_conditioning_batch = [
-                _conditioning_item(
-                    text=self._text_for_task(task_norm, nprompt),
-                    video_tensor=video_tensors_list[i],
-                    audio_tensor=audio_prompt_list[i],
-                    sync_features=sync_features,
-                    seconds_start=seconds_start,
-                    seconds_model=seconds_model,
-                )
-                for i, nprompt in enumerate(neg)
-            ]
+            negative_conditioning_batch = []
+            for i, nprompt in enumerate(neg):
+                for _ in range(num_outputs_per_prompt):
+                    negative_conditioning_batch.append(
+                        _conditioning_item(
+                            text=self._text_for_task(task_norm, nprompt),
+                            video_tensor=video_tensors_list[i],
+                            audio_tensor=audio_prompt_list[i],
+                            sync_features=sync_features,
+                            seconds_start=seconds_start,
+                            seconds_model=seconds_model,
+                        )
+                    )
 
         conditioning_tensors = self._encode_conditioning_tensors(conditioning_batch)
         negative_conditioning_tensors: dict[str, Any] | None = None
