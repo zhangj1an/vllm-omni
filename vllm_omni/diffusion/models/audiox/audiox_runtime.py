@@ -300,9 +300,13 @@ def sample_k(
 
     with torch.cuda.amp.autocast():
         if sampler_type == "dpmpp-2m-sde":
-            return K.sampling.sample_dpmpp_2m_sde(denoiser, x, sigmas, disable=False, callback=callback, extra_args=extra_args)
+            return K.sampling.sample_dpmpp_2m_sde(
+                denoiser, x, sigmas, disable=False, callback=callback, extra_args=extra_args
+            )
         if sampler_type == "dpmpp-3m-sde":
-            return K.sampling.sample_dpmpp_3m_sde(denoiser, x, sigmas, disable=False, callback=callback, extra_args=extra_args)
+            return K.sampling.sample_dpmpp_3m_sde(
+                denoiser, x, sigmas, disable=False, callback=callback, extra_args=extra_args
+            )
     raise ValueError(
         f"Unsupported sampler_type={sampler_type!r} for inference-only AudioX path. "
         "Supported: 'dpmpp-2m-sde', 'dpmpp-3m-sde'."
@@ -362,8 +366,7 @@ def generate_diffusion_cond(
         )
     else:
         raise ValueError(
-            f"Unsupported diffusion objective for inference-only AudioX path: {diff_objective!r}. "
-            "Expected 'v'."
+            f"Unsupported diffusion objective for inference-only AudioX path: {diff_objective!r}. Expected 'v'."
         )
     del noise
     del conditioning_tensors

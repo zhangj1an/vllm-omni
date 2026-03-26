@@ -125,10 +125,7 @@ class MAF_Block(nn.Module):
         self.cross_block = _MAFCrossAttentionBlock(dim, num_heads)
         self.norm1 = nn.LayerNorm(dim)
         self.fusion_blocks = nn.ModuleList(
-            [
-                _MAFFusionBlock(dim, num_heads, self.MLP_RATIO)
-                for _ in range(self.NUM_FUSION_LAYERS)
-            ]
+            [_MAFFusionBlock(dim, num_heads, self.MLP_RATIO) for _ in range(self.NUM_FUSION_LAYERS)]
         )
 
         self.norm_v2 = nn.LayerNorm(dim)
@@ -186,4 +183,3 @@ class MAF_Block(nn.Module):
             "text": final_t,
             "audio": final_a,
         }
-

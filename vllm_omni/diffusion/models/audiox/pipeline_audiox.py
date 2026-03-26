@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
-import os
 import math
+import os
 from collections.abc import Iterable
 from typing import Any, ClassVar
 
@@ -16,7 +16,6 @@ from vllm.logger import init_logger
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
-from vllm_omni.diffusion.models.audiox.audiox_weights import load_audiox_weights
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
     encode_audiox_conditioning_tensors,
 )
@@ -24,6 +23,7 @@ from vllm_omni.diffusion.models.audiox.audiox_runtime import create_model_from_c
 from vllm_omni.diffusion.models.audiox.audiox_weights import (
     build_sharded_component_sources,
     load_audiox_bundle_config,
+    load_audiox_weights,
 )
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
@@ -128,8 +128,8 @@ def prepare_video_reference(
         ext = os.path.splitext(source)[1].lower()
 
         if ext in {".jpg", ".jpeg", ".png"}:
-            from PIL import Image
             import numpy as np
+            from PIL import Image
 
             img = Image.open(source).convert("RGB")
             frame = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0)
@@ -217,6 +217,7 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
     loaded when a source path or tensor is present (including ``OmniDiffusionConfig`` /
     sampling-params fallbacks used by the pipeline).
     """
+
     def _noop(request: OmniDiffusionRequest) -> OmniDiffusionRequest:
         return request
 
@@ -290,6 +291,8 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
         return request
 
     return pre_process_func
+
+
 def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int | None:
     """Waveform length (per channel) so ``AudioAutoencoderConditionerv2`` encode matches ``latent_seq_len``.
 

@@ -27,7 +27,7 @@ This folder runs [AudioX](https://github.com/ZeyueT/AudioX) through the `AudioXP
 
 ## Weight layout
 
-`AudioXPipeline` loads **only** vLLM-Omni **component-sharded** weights (`transformer/diffusion_pytorch_model.safetensors` and `conditioners/diffusion_pytorch_model.safetensors`, plus `vae/` when the config has a pretransform). Hugging Face repos ship a flat `model.ckpt`; **`end2end.py` converts that checkpoint in place** after download (or on first `infer` / `run` if you copied `model.ckpt` yourself). Manual conversion: `python -m vllm_omni.diffusion.models.audiox.convert_to_sharded_layout --input-dir DIR --output-dir DIR`.
+`AudioXPipeline` loads **only** vLLM-Omni **component-sharded** weights (`transformer/diffusion_pytorch_model.safetensors` and `conditioners/diffusion_pytorch_model.safetensors`, plus `vae/` when the config has a pretransform). Hugging Face repos ship a flat `model.ckpt`; **`end2end.py` converts that checkpoint in place** after download (or on first `infer` / `run` if you copied `model.ckpt` yourself). Manual conversion: `python -m vllm_omni.diffusion.models.audiox.audiox_weights --input-dir DIR --output-dir DIR`.
 
 ## Quick start
 

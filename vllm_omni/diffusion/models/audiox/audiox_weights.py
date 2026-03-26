@@ -73,7 +73,9 @@ def resolve_audiox_bundle_paths(model_root: str) -> tuple[str, dict[str, Any]]:
         raise ValueError(f"AudioX model_index.json must set transformer_weights={TRANSFORMER_SAFETENSORS!r}.")
     if idx.get("conditioners_weights") != CONDITIONERS_SAFETENSORS:
         raise ValueError(f"AudioX model_index.json must set conditioners_weights={CONDITIONERS_SAFETENSORS!r}.")
-    if not _model_root_has_file(root, TRANSFORMER_SAFETENSORS) or not _model_root_has_file(root, CONDITIONERS_SAFETENSORS):
+    if not _model_root_has_file(root, TRANSFORMER_SAFETENSORS) or not _model_root_has_file(
+        root, CONDITIONERS_SAFETENSORS
+    ):
         raise FileNotFoundError(
             f"AudioX sharded layout missing required files under {root}: "
             f"{TRANSFORMER_SAFETENSORS!r}, {CONDITIONERS_SAFETENSORS!r}."

@@ -222,7 +222,7 @@ def test_audiox_v2_tasks_require_video_path_or_mm(task: str):
 
 
 def test_resolve_audiox_bundle_paths_requires_default_config_name(tmp_path):
-    from vllm_omni.diffusion.models.audiox.sharded_weights import resolve_audiox_bundle_paths
+    from vllm_omni.diffusion.models.audiox.audiox_weights import resolve_audiox_bundle_paths
 
     (tmp_path / "custom.json").write_text("{}", encoding="utf-8")
     _write_minimal_audiox_sharded_stub(tmp_path)

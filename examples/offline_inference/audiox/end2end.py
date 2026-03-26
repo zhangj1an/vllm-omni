@@ -106,7 +106,7 @@ def _ensure_transformer_stub_config(output_dir: Path) -> None:
 
 
 def _audiox_bundle_is_sharded(weights_dir: Path) -> bool:
-    from vllm_omni.diffusion.models.audiox.sharded_weights import resolve_audiox_bundle_paths
+    from vllm_omni.diffusion.models.audiox.audiox_weights import resolve_audiox_bundle_paths
 
     try:
         resolve_audiox_bundle_paths(str(weights_dir.resolve()))
@@ -117,7 +117,7 @@ def _audiox_bundle_is_sharded(weights_dir: Path) -> bool:
 
 def _ensure_audiox_sharded_weights(weights_dir: Path) -> None:
     """vLLM-Omni loads only component safetensors; convert ``model.ckpt`` in place when needed."""
-    from vllm_omni.diffusion.models.audiox.convert_to_sharded_layout import convert_audiox_bundle
+    from vllm_omni.diffusion.models.audiox.audiox_weights import convert_audiox_bundle
 
     if _audiox_bundle_is_sharded(weights_dir):
         return
@@ -125,7 +125,7 @@ def _ensure_audiox_sharded_weights(weights_dir: Path) -> None:
     if not ckpt.is_file():
         raise FileNotFoundError(
             f"No sharded weights and no model.ckpt under {weights_dir} "
-            "(download HF bundle or run convert_to_sharded_layout on a checkpoint directory)."
+            "(download HF bundle or run audiox_weights conversion on a checkpoint directory)."
         )
     print(f"Converting {ckpt.name} to vLLM-Omni sharded safetensors under {weights_dir} …")
     convert_audiox_bundle(str(weights_dir.resolve()), str(weights_dir.resolve()), copy_config=True)
@@ -142,9 +142,7 @@ def download_weights(
 ) -> None:
     """Download checkpoint bundle from Hugging Face and write vLLM-Omni index files."""
     if hf_model != DEFAULT_HF_MODEL_KEY:
-        raise SystemExit(
-            f"Unsupported hf_model={hf_model!r}. This example only supports {DEFAULT_HF_MODEL_KEY!r}."
-        )
+        raise SystemExit(f"Unsupported hf_model={hf_model!r}. This example only supports {DEFAULT_HF_MODEL_KEY!r}.")
     repo_id = repo_id or REPO_BY_MODEL.get(hf_model, hf_model)
     output_dir.mkdir(parents=True, exist_ok=True)
     allow = ["config.json", "model.ckpt", "README.md", ".gitattributes"]
@@ -364,16 +362,12 @@ def cmd_run(args: argparse.Namespace) -> None:
     variant = os.environ.get("AUDIOX_MODEL_VARIANT", "").strip().lower()
     if variant and not model_override:
         if variant != DEFAULT_HF_MODEL_KEY:
-            raise SystemExit(
-                f"AUDIOX_MODEL_VARIANT={variant!r} is not supported. Use {DEFAULT_HF_MODEL_KEY!r}."
-            )
+            raise SystemExit(f"AUDIOX_MODEL_VARIANT={variant!r} is not supported. Use {DEFAULT_HF_MODEL_KEY!r}.")
         hf_model = DEFAULT_HF_MODEL_KEY
         weights_dir = ROOT / "audiox_weights"
 
     if hf_model != DEFAULT_HF_MODEL_KEY:
-        raise SystemExit(
-            f"weights.hf_model={hf_model!r} is not supported. Use {DEFAULT_HF_MODEL_KEY!r}."
-        )
+        raise SystemExit(f"weights.hf_model={hf_model!r} is not supported. Use {DEFAULT_HF_MODEL_KEY!r}.")
 
     assets_dir = Path(a.get("local_dir", "assets"))
     if not assets_dir.is_absolute():

@@ -141,9 +141,7 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
         hidden_scale = 4
         in_features = self.CLIP_PATCH_TOKENS * self.VIDEO_FPS * self.DURATION_SECONDS
 
-        self.empty_visual_feat = nn.Parameter(
-            torch.zeros(1, self.OUT_FEATURES, self.TEMPORAL_DIM), requires_grad=True
-        )
+        self.empty_visual_feat = nn.Parameter(torch.zeros(1, self.OUT_FEATURES, self.TEMPORAL_DIM), requires_grad=True)
         nn.init.constant_(self.empty_visual_feat, 0)
         self.visual_encoder_model = CLIPVisionModelWithProjection.from_pretrained(self.CLIP_MODEL_NAME)
         self.proj = nn.Linear(in_features=in_features, out_features=self.OUT_FEATURES)
@@ -345,28 +343,24 @@ def _build_pretransform(conditioner_config: dict[str, tp.Any]) -> tp.Any:
     sample_rate = conditioner_config.pop("sample_rate", None)
     assert sample_rate is not None, "Sample rate must be specified for pretransform conditioners"
 
-    pretransform = create_pretransform_from_config(conditioner_config.pop("pretransform_config"), sample_rate=sample_rate)
+    pretransform = create_pretransform_from_config(
+        conditioner_config.pop("pretransform_config"), sample_rate=sample_rate
+    )
     return pretransform
 
 
-def _get_source_key(
-    item: dict[str, tp.Any], key: str, default_keys: dict[str, str]
-) -> str:
+def _get_source_key(item: dict[str, tp.Any], key: str, default_keys: dict[str, str]) -> str:
     source_key = key if key in item else default_keys.get(key)
     if source_key is None or source_key not in item:
         raise ValueError(f"Conditioner key {key} not found in batch metadata")
     return source_key
 
 
-def _normalize_condition_value(
-    value: tp.Any, *, source_key: str, require_single_item_sequence: bool
-) -> tp.Any:
+def _normalize_condition_value(value: tp.Any, *, source_key: str, require_single_item_sequence: bool) -> tp.Any:
     if isinstance(value, (list, tuple)):
         if require_single_item_sequence:
             if len(value) != 1:
-                raise ValueError(
-                    f"Conditioner input for key {source_key!r} must be scalar or single-item list/tuple."
-                )
+                raise ValueError(f"Conditioner input for key {source_key!r} must be scalar or single-item list/tuple.")
             return value[0]
         if len(value) == 1:
             return value[0]
@@ -474,4 +468,3 @@ def encode_audiox_conditioning_tensors(
         output[key] = conditioner(conditioner_inputs, device)
 
     return output
-
