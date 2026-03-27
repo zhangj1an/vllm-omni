@@ -327,8 +327,13 @@ def generate_diffusion_cond(
     **sampler_kwargs,
 ) -> torch.Tensor:
     """Generate audio in inference-only mode (no variation/inpainting)."""
-    if model.pretransform is not None:
-        sample_size = sample_size // model.pretransform.downsampling_ratio
+    pt = model.pretransform
+    if pt is None:
+        raise RuntimeError("AudioX inference-only path requires an AudioX pretransform.")
+    if not isinstance(pt, AudioXVAE):
+        raise RuntimeError(f"Expected AudioXVAE pretransform, got {type(pt)!r}.")
+
+    sample_size = sample_size // pt.downsampling_ratio
 
     if generator is None:
         raise ValueError("AudioX generation requires a torch.Generator; seed/random fallback is disabled.")
@@ -350,43 +355,33 @@ def generate_diffusion_cond(
     noise = noise.type(model_dtype)
     conditioning_inputs = {k: v.type(model_dtype) if v is not None else v for k, v in conditioning_inputs.items()}
 
-    diff_objective = model.diffusion_objective
-    if diff_objective == "v":
-        sampled = sample_k(
-            model.model,
-            noise,
-            steps,
-            **sampler_kwargs,
-            **conditioning_inputs,
-            **negative_conditioning_tensors,
-            cfg_scale=cfg_scale,
-            batch_cfg=True,
-            rescale_cfg=True,
-            device=device,
-        )
-    else:
+    if model.diffusion_objective != "v":
         raise ValueError(
-            f"Unsupported diffusion objective for inference-only AudioX path: {diff_objective!r}. Expected 'v'."
+            f"Unsupported diffusion objective for inference-only AudioX path: {model.diffusion_objective!r}. "
+            "Expected 'v'."
         )
+    sampled = sample_k(
+        model.model,
+        noise,
+        steps,
+        **sampler_kwargs,
+        **conditioning_inputs,
+        **negative_conditioning_tensors,
+        cfg_scale=cfg_scale,
+        batch_cfg=True,
+        rescale_cfg=True,
+        device=device,
+    )
     del noise
     del conditioning_tensors
     del conditioning_inputs
     torch.cuda.empty_cache()
 
-    if model.pretransform is not None and not return_latents:
-        sampled = sampled.to(next(model.pretransform.parameters()).dtype)
-
-        model.pretransform = model.pretransform.to(dtype=torch.float32).eval()
+    if not return_latents:
+        sampled = sampled.to(next(pt.parameters()).dtype)
+        model.pretransform = pt.to(dtype=torch.float32).eval()
         with torch.cuda.amp.autocast(enabled=False):
-            pt = model.pretransform
-            if hasattr(pt, "decode_scaled"):
-                sampled = pt.decode_scaled(sampled.to(dtype=torch.float32))
-            else:
-                scale = getattr(getattr(pt, "config", None), "scaling_factor", None)
-                if scale is None:
-                    scale = getattr(pt, "scaling_factor", 1.0)
-                sampled = sampled * float(scale)
-                sampled = model.pretransform.decode(sampled.to(dtype=torch.float32))
+            sampled = model.pretransform.decode_scaled(sampled.to(dtype=torch.float32))
 
     return sampled
 
