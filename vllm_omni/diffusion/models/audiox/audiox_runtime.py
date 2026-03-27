@@ -5,7 +5,6 @@ import typing as tp
 import k_diffusion as K
 import torch
 from torch import nn
-from tqdm.auto import trange
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
@@ -17,6 +16,7 @@ from vllm_omni.diffusion.models.audiox.audiox_pretransform import (
     create_pretransform_from_config,
 )
 from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
+from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
 
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
@@ -25,6 +25,7 @@ torch.backends.cudnn.allow_tf32 = False
 torch.set_float32_matmul_precision("highest")  # FP32
 
 _PATCH_ATTR = "_vllm_omni_dpmpp_3m_sde_fixed"
+_PROGRESS = ProgressBarMixin()
 
 
 def create_model_from_config(model_config, od_config: OmniDiffusionConfig | None = None):
@@ -214,46 +215,49 @@ def _sample_dpmpp_3m_sde_fixed(
     denoised_1, denoised_2 = None, None
     h_1, h_2 = None, None
 
-    for i in trange(len(sigmas) - 1, disable=disable):
-        denoised = model(x, sigmas[i] * s_in, **extra_args)
-        if callback is not None:
-            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
-        if sigmas[i + 1] == 0:
-            x = denoised
-        else:
-            t, s = -sigmas[i].log(), -sigmas[i + 1].log()
-            h = s - t
-            h_eta = h * (eta + 1)
+    _PROGRESS.set_progress_bar_config(disable=disable)
+    with _PROGRESS.progress_bar(total=len(sigmas) - 1) as pbar:
+        for i in range(len(sigmas) - 1):
+            denoised = model(x, sigmas[i] * s_in, **extra_args)
+            if callback is not None:
+                callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
+            if sigmas[i + 1] == 0:
+                x = denoised
+            else:
+                t, s = -sigmas[i].log(), -sigmas[i + 1].log()
+                h = s - t
+                h_eta = h * (eta + 1)
 
-            x = torch.exp(-h_eta) * x + (-h_eta).expm1().neg() * denoised
+                x = torch.exp(-h_eta) * x + (-h_eta).expm1().neg() * denoised
 
-            if h_2 is not None:
-                r0 = h_1 / h
-                r1 = h_2 / h
-                d1_0 = (denoised - denoised_1) / r0
-                d1_1 = (denoised_1 - denoised_2) / r1
-                d1 = d1_0 + (d1_0 - d1_1) * r0 / (r0 + r1)
-                d2 = (d1_0 - d1_1) / (r0 + r1)
-                phi_2 = h_eta.neg().expm1() / h_eta + 1
-                phi_3 = phi_2 / h_eta - 0.5
-                x = x + phi_2 * d1 - phi_3 * d2
-            elif h_1 is not None:
-                r = h_1 / h
-                d = (denoised - denoised_1) / r
-                phi_2 = h_eta.neg().expm1() / h_eta + 1
-                x = x + phi_2 * d
+                if h_2 is not None:
+                    r0 = h_1 / h
+                    r1 = h_2 / h
+                    d1_0 = (denoised - denoised_1) / r0
+                    d1_1 = (denoised_1 - denoised_2) / r1
+                    d1 = d1_0 + (d1_0 - d1_1) * r0 / (r0 + r1)
+                    d2 = (d1_0 - d1_1) / (r0 + r1)
+                    phi_2 = h_eta.neg().expm1() / h_eta + 1
+                    phi_3 = phi_2 / h_eta - 0.5
+                    x = x + phi_2 * d1 - phi_3 * d2
+                elif h_1 is not None:
+                    r = h_1 / h
+                    d = (denoised - denoised_1) / r
+                    phi_2 = h_eta.neg().expm1() / h_eta + 1
+                    x = x + phi_2 * d
 
-            if eta:
-                x = (
-                    x
-                    + noise_sampler(sigmas[i], sigmas[i + 1])
-                    * sigmas[i + 1]
-                    * (-2 * h * eta).expm1().neg().sqrt()
-                    * s_noise
-                )
+                if eta:
+                    x = (
+                        x
+                        + noise_sampler(sigmas[i], sigmas[i + 1])
+                        * sigmas[i + 1]
+                        * (-2 * h * eta).expm1().neg().sqrt()
+                        * s_noise
+                    )
 
-            denoised_1, denoised_2 = denoised, denoised_1
-            h_1, h_2 = h, h_1
+                denoised_1, denoised_2 = denoised, denoised_1
+                h_1, h_2 = h, h_1
+            pbar.update()
     return x
 
 
