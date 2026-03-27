@@ -3,7 +3,7 @@ from __future__ import annotations
 import typing as tp
 from typing import Any
 
-from vllm_omni.diffusion.models.audio.oobleck_vae_base import OobleckVAEBase
+from vllm_omni.diffusion.layers.oobleck_vae_base import OobleckVAEBase
 
 # Identity by default for HKUST AudioX; set ``"scale"`` in pretransform config if training used another factor.
 DEFAULT_AUDIOX_VAE_SCALING_FACTOR: float = 1.0

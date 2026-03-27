@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import typing as tp
 
 import torch
@@ -15,6 +14,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from vllm_omni.diffusion.attention.layer import Attention as DiffusionAttention
 from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 
 __all__ = [
@@ -28,15 +28,15 @@ __all__ = [
 ]
 
 
-class FourierFeatures(nn.Module):
+class FourierFeatures(GaussianFourierProjection):
     def __init__(self, in_features, out_features, std=1.0):
-        super().__init__()
         assert out_features % 2 == 0
-        self.weight = nn.Parameter(torch.randn([out_features // 2, in_features]) * std)
-
-    def forward(self, input):
-        f = 2 * math.pi * input @ self.weight.T
-        return torch.cat([f.cos(), f.sin()], dim=-1)
+        super().__init__(
+            in_features=in_features,
+            embedding_size=out_features // 2,
+            scale=std,
+            trainable=True,
+        )
 
 
 class AudioXMMChannelLastConv1d(nn.Conv1d):

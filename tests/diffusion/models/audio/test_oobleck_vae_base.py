@@ -6,7 +6,7 @@
 import torch
 from torch import nn
 
-from vllm_omni.diffusion.models.audio.oobleck_vae_base import OobleckVAEBase
+from vllm_omni.diffusion.layers.oobleck_vae_base import OobleckVAEBase
 
 
 class _FakeLatentDist:
