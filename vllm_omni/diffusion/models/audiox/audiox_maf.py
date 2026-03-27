@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Upstream: https://github.com/ZeyueT/AudioX/tree/main/audiox/models (MAF.py)
-#
-# Structure matches published HKUST MAF checkpoints, but attention uses vLLM-Omni
-# :class:`~vllm_omni.diffusion.attention.layer.Attention` (see remap helpers in ``audiox_weights``).
-
 from __future__ import annotations
 
 import torch
@@ -12,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from vllm_omni.diffusion.attention.layer import Attention as DiffusionAttention
+from vllm_omni.diffusion.attention.layer import Attention
 
 
 class _MAFCrossAttentionBlock(nn.Module):
@@ -58,7 +53,7 @@ class _MAFFusionBlock(nn.Module):
         hidden = int(dim * mlp_ratio)
         self.norm1 = nn.LayerNorm(dim)
         self.to_qkv = nn.Linear(dim, dim * 3, bias=True)
-        self.self_attn = DiffusionAttention(
+        self.self_attn = Attention(
             num_heads=num_heads,
             head_size=head_dim,
             softmax_scale=head_dim**-0.5,
@@ -95,11 +90,7 @@ class _MAFFusionBlock(nn.Module):
 
 
 class MAF_Block(nn.Module):
-    """Compatibility-first AudioX MAF with fixed official dimensions.
-
-    This block intentionally avoids runtime configurability to reduce
-    maintenance surface while preserving checkpoint key compatibility.
-    """
+    """AudioX MAF block with fixed official dimensions."""
 
     DIM = 768
     NUM_EXPERTS_PER_MODALITY = 64

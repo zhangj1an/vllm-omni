@@ -9,17 +9,11 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 import torch
+from safetensors.torch import save_file as safetensors_save_file
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
-
-try:
-    from safetensors.torch import save_file as safetensors_save_file
-except ImportError as e:  # pragma: no cover
-    raise ImportError(
-        "The `safetensors` package is required for this script. Install it (e.g. `pip install safetensors`)."
-    ) from e
 
 AUDIOX_WEIGHT_LAYOUT_SHARDED = "vllm_omni_component_sharded"
 
@@ -261,9 +255,7 @@ def audiox_oobleck_ae_config_supported(cfg: dict[str, Any]) -> bool:
     return True
 
 
-def should_remap_audiox_vae_to_diffusers(model_config: dict[str, Any] | None) -> bool:
-    if model_config is None:
-        return False
+def should_remap_audiox_vae_to_diffusers(model_config: dict[str, Any]) -> bool:
     m = model_config.get("model")
     if not isinstance(m, dict):
         return False
@@ -369,14 +361,13 @@ def _map_encoder_decoder_suffix(
 def remap_audiox_oobleck_weights_for_diffusers(
     weights: Iterable[tuple[str, torch.Tensor]],
     *,
-    model_config: dict[str, Any] | None = None,
+    model_config: dict[str, Any],
 ) -> list[tuple[str, torch.Tensor]]:
     d: dict[str, torch.Tensor] = dict(weights)
     if not should_remap_audiox_vae_to_diffusers(model_config):
         return list(d.items())
 
-    m = model_config or {}
-    inner_model = m.get("model") if isinstance(m, dict) else None
+    inner_model = model_config["model"]
     pt = inner_model.get("pretransform") if isinstance(inner_model, dict) else None
     ptc = pt.get("config") if isinstance(pt, dict) else None
     strides = (ptc.get("encoder", {}).get("config") or {}).get("strides") if isinstance(ptc, dict) else None
@@ -422,7 +413,7 @@ def remap_audiox_oobleck_weights_for_diffusers(
 def remap_audiox_state_dict(
     weights: Iterable[tuple[str, torch.Tensor]],
     *,
-    model_config: dict | None = None,
+    model_config: dict[str, Any],
 ) -> list[tuple[str, torch.Tensor]]:
     remapped = remap_audiox_maf_weights(weights)
     normalized: list[tuple[str, torch.Tensor]] = []
@@ -446,7 +437,7 @@ def load_audiox_weights(
     pipeline: torch.nn.Module,
     weights: Iterable[tuple[str, torch.Tensor]],
     *,
-    model_config: dict | None = None,
+    model_config: dict[str, Any],
 ) -> None:
     loader = AutoWeightsLoader(pipeline)
     remapped = remap_audiox_state_dict(weights, model_config=model_config)
@@ -488,12 +479,13 @@ def _resolve_ckpt_path(input_dir: str) -> str:
     raise FileNotFoundError(f"No checkpoint found under {input_dir} (expected model.ckpt).")
 
 
-def _load_legacy_checkpoint_state_dict(ckpt_path: str) -> dict[str, torch.Tensor]:
+def _load_checkpoint_state_dict(ckpt_path: str) -> dict[str, torch.Tensor]:
     loaded = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-    if isinstance(loaded, Mapping) and "state_dict" in loaded and isinstance(loaded["state_dict"], Mapping):
-        loaded = loaded["state_dict"]
-    if not isinstance(loaded, Mapping):
-        raise RuntimeError(f"Expected dict checkpoint at {ckpt_path}, got {type(loaded)}")
+    if not isinstance(loaded, Mapping) or "state_dict" not in loaded or not isinstance(loaded["state_dict"], Mapping):
+        raise RuntimeError(
+            "AudioX inference conversion expects model.ckpt to contain a top-level 'state_dict' mapping."
+        )
+    loaded = loaded["state_dict"]
 
     out: dict[str, torch.Tensor] = {}
     for name, tensor in loaded.items():
@@ -516,7 +508,7 @@ def convert_audiox_bundle(input_dir: str, output_dir: str, *, copy_config: bool 
             shutil.copy2(cfg_src, cfg_dst)
 
     ckpt_path = _resolve_ckpt_path(input_dir)
-    state = _load_legacy_checkpoint_state_dict(ckpt_path)
+    state = _load_checkpoint_state_dict(ckpt_path)
     transformer_sd, conditioners_sd, vae_sd = _partition_keys(state)
 
     os.makedirs(os.path.join(output_dir, "transformer"), exist_ok=True)

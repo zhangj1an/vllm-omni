@@ -3,10 +3,12 @@ from __future__ import annotations
 import typing as tp
 from typing import Any
 
-from vllm_omni.diffusion.layers.oobleck_vae_base import OobleckVAEBase
+from diffusers import AutoencoderOobleck
 
-# Identity by default for HKUST AudioX; set ``"scale"`` in pretransform config if training used another factor.
-DEFAULT_AUDIOX_VAE_SCALING_FACTOR: float = 1.0
+from vllm_omni.diffusion.layers.oobleck_vae_base import OobleckVAEBase
+from vllm_omni.diffusion.models.audiox.audiox_weights import (
+    audiox_oobleck_ae_config_supported,
+)
 
 
 def ae_cfg_to_diffusers_init_kwargs(ae_cfg: dict[str, Any], sample_rate: int) -> dict[str, Any]:
@@ -33,45 +35,32 @@ class AudioXVAE(OobleckVAEBase):
 
 
 def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], sample_rate: int):
-    pretransform_type = pretransform_config.get("type", None)
-    assert pretransform_type is not None, "type must be specified in pretransform config"
+    pretransform_type = pretransform_config["type"]
 
     if pretransform_type != "autoencoder":
         raise NotImplementedError(
             f"AudioX HKUST weights only use pretransform type 'autoencoder'; got {pretransform_type!r}"
         )
 
-    from vllm_omni.diffusion.models.audiox.audiox_weights import (
-        audiox_oobleck_ae_config_supported,
-    )
-
     ae_inner = pretransform_config["config"]
     if not audiox_oobleck_ae_config_supported(ae_inner):
         raise NotImplementedError(
             "AudioX pretransform must match official HKUSTAudio checkpoints (Oobleck encoder/decoder, "
-            "VAE bottleneck, use_snake=true, no use_nearest_upsample). Custom autoencoder layouts are "
-            "no longer supported."
+            "VAE bottleneck, use_snake=true, no use_nearest_upsample)."
         )
 
-    scaling_factor = float(pretransform_config.get("scale", DEFAULT_AUDIOX_VAE_SCALING_FACTOR))
-    try:
-        from diffusers import AutoencoderOobleck
+    scaling_factor = float(pretransform_config["scale"])
 
-        inner = AutoencoderOobleck(**ae_cfg_to_diffusers_init_kwargs(ae_inner, sample_rate))
-        pretransform = AudioXVAE(
-            inner,
-            scaling_factor=scaling_factor,
-            io_channels=int(ae_inner["io_channels"]),
-            latent_dim=int(ae_inner["latent_dim"]),
-            sample_rate=int(sample_rate),
-        )
-    except Exception as e:
-        raise RuntimeError(
-            "AudioX VAE requires Hugging Face diffusers with AutoencoderOobleck "
-            "(see requirements/common.txt). Import or construction failed."
-        ) from e
+    inner = AutoencoderOobleck(**ae_cfg_to_diffusers_init_kwargs(ae_inner, sample_rate))
+    pretransform = AudioXVAE(
+        inner,
+        scaling_factor=scaling_factor,
+        io_channels=int(ae_inner["io_channels"]),
+        latent_dim=int(ae_inner["latent_dim"]),
+        sample_rate=int(sample_rate),
+    )
 
-    enable_grad = pretransform_config.get("enable_grad", False)
+    enable_grad = bool(pretransform_config["enable_grad"])
     pretransform.enable_grad = enable_grad
     pretransform.eval().requires_grad_(pretransform.enable_grad)
     return pretransform

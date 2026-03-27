@@ -19,7 +19,10 @@ from vllm_omni.diffusion.media.video import prepare_video_reference
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
     encode_audiox_conditioning_tensors,
 )
-from vllm_omni.diffusion.models.audiox.audiox_runtime import create_model_from_config
+from vllm_omni.diffusion.models.audiox.audiox_runtime import (
+    create_model_from_config,
+    generate_diffusion_cond,
+)
 from vllm_omni.diffusion.models.audiox.audiox_weights import (
     build_sharded_component_sources,
     load_audiox_bundle_config,
@@ -42,27 +45,19 @@ def get_audiox_post_process_func(_od_config: OmniDiffusionConfig):
 
     Separates final tensor handling from ``AudioXPipeline.forward``: converts denoised
     waveforms to CPU float numpy for saving, unless ``output_type`` requests tensors.
-    ``_od_config`` is reserved for future use (e.g. bundle-specific output normalization).
     """
 
     return build_audio_post_process_func()
 
 
-def _resolve_audio_ref_for_preprocess(
+def _resolve_audio_source(
     raw_prompt: Any,
     extra: dict[str, Any],
     batch_index: int,
-    od_config: OmniDiffusionConfig,
 ) -> Any:
-    src = _mm_path_lookup(
+    return _mm_path_lookup(
         raw_prompt, extra, batch_index, mm_key="audio", paths_key="audio_paths", single_key="audio_path"
     )
-    if src is not None:
-        return src
-    ap = extra.get("audio_path")
-    if ap:
-        return ap
-    return od_config.audiox_reference_audio_path
 
 
 def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
@@ -74,22 +69,14 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
     so ``AudioXPipeline.forward`` only moves data to the inference device.
 
     Video loading is skipped for text-only tasks (``t2a`` / ``t2m``). Reference audio is
-    loaded when a source path or tensor is present (including ``OmniDiffusionConfig`` /
-    sampling-params fallbacks used by the pipeline).
+    loaded when a source path or tensor is present.
     """
 
-    def _noop(request: OmniDiffusionRequest) -> OmniDiffusionRequest:
-        return request
-
     if od_config.model is None:
-        return _noop
+        raise ValueError("AudioX pre-process requires od_config.model.")
 
     model_root = os.path.abspath(od_config.model)
-    try:
-        _, model_cfg, _ = load_audiox_bundle_config(model_root)
-    except FileNotFoundError as e:
-        logger.warning("AudioX pre-process: %s; skipping media preload.", e)
-        return _noop
+    _, model_cfg, _ = load_audiox_bundle_config(model_root)
 
     sample_rate = int(model_cfg.get("sample_rate", 48000))
     sample_size = int(model_cfg.get("sample_size", sample_rate * 10))
@@ -105,10 +92,9 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
         sp = request.sampling_params
         extra = sp.extra_args or {}
         seconds_start = float(extra.get("seconds_start", 0.0))
-        user_seconds_total = extra.get("seconds_total")
-        if user_seconds_total is None:
-            user_seconds_total = sample_size / sample_rate
-        user_seconds_total = float(user_seconds_total)
+        if "seconds_total" not in extra:
+            raise ValueError("AudioX pre-process requires extra_args['seconds_total'].")
+        user_seconds_total = float(extra["seconds_total"])
         cond_seconds = float(audio_conditioning_samples) / float(sample_rate)
 
         task_norm = AudioXPipeline._normalize_task(extra.get("audiox_task"))
@@ -129,7 +115,7 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
                         seek_time=seconds_start,
                     ).to(device=cpu, dtype=torch.float32)
 
-            asrc = _resolve_audio_ref_for_preprocess(p, extra, i, od_config)
+            asrc = _resolve_audio_source(p, extra, i)
             if asrc is not None:
                 mm["audio"] = prepare_audio_reference(
                     asrc,
@@ -259,7 +245,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
     Video: ``extra_args["video_path"]`` / ``["video_paths"]`` or ``multi_modal_data["video"]``.
 
     Reference audio: ``extra_args["audio_path"]`` / ``["audio_paths"]`` or
-    ``OmniDiffusionConfig.audiox_reference_audio_path`` provided via stage config.
+    ``multi_modal_data["audio"]``.
 
     Requires ``od_config.model`` to be a **vLLM-Omni sharded** tree: ``config.json`` plus
     ``transformer/diffusion_pytorch_model.safetensors`` and
@@ -273,15 +259,10 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
     support_audio_output: ClassVar[bool] = True
     _PROFILER_TARGETS: ClassVar[list[str]] = ["diffuse"]
-    # ``CLIPWithSyncWithEmptyFeatureConditioner`` hard-codes ``duration = 10`` (seconds) and a positional
-    # embedding of length ``duration * video_fps`` (see ``audiox/models/conditioners.py``). Video tensors
-    # must match that length or forward fails (e.g. ``video_hidden += Temp_pos_embedding``).
-    # If future checkpoints use a different duration, read from model config.
+    # ``CLIPWithSyncWithEmptyFeatureConditioner`` hard-codes ``duration = 10`` (seconds) and
+    # positional embeddings of length ``duration * video_fps``.
     _CLIP_SYNC_DURATION_SEC: ClassVar[float] = 10.0
-    # Sync placeholder shape is fixed in AudioX: ``proj_sync = Linear(240, out_features)`` and
-    # ``video_sync_frames.view(-1, 240)`` (see ``conditioners.py``). The middle dim must be 240, not
-    # ``duration * video_fps``; otherwise the view yields the wrong last dim (e.g. 160 vs 768) when added
-    # to ``video_hidden``. Matches upstream Gradio ``torch.zeros(1, 240, 768)``.
+    # Sync placeholder shape is fixed in AudioX: ``proj_sync`` consumes 240-frame features.
     _VIDEO_SYNC_FRAME_COUNT: ClassVar[int] = 240
 
     def __init__(
@@ -303,14 +284,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
         self._model_root = os.path.abspath(od_config.model)
         config_path, self._model_config, _ = load_audiox_bundle_config(self._model_root)
-
-        try:
-            from vllm_omni.diffusion.models.audiox.audiox_runtime import generate_diffusion_cond
-        except ImportError as e:
-            raise RuntimeError(
-                "Failed to import inlined AudioX modules under vllm_omni.diffusion.models.audiox "
-                "(missing files or unsatisfied optional dependencies?)."
-            ) from e
 
         self._generate_diffusion_cond = generate_diffusion_cond
         self._model = create_model_from_config(self._model_config, od_config=od_config)
@@ -351,14 +324,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         return names
 
     def _conditioning_dtype(self) -> torch.dtype:
-        """Dtype of the inner model's floating-point parameters (forced to float32 after ``load_weights``)."""
-        model = getattr(self, "_model", None)
-        if model is None:
-            return torch.float32
-        try:
-            p = next(model.parameters())
-        except StopIteration:
-            return torch.float32
+        """Dtype of the inner model's floating-point parameters."""
+        p = next(self._model.parameters())
         return p.dtype if p.dtype.is_floating_point else torch.float32
 
     @staticmethod
@@ -385,17 +352,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
                     "use v2a/v2m for video-only generation."
                 )
 
-    def _resolve_audio_source(self, raw_prompt: Any, extra: dict[str, Any], batch_index: int) -> Any:
-        src = _mm_path_lookup(
-            raw_prompt, extra, batch_index, mm_key="audio", paths_key="audio_paths", single_key="audio_path"
-        )
-        if src is not None:
-            return src
-        ap = extra.get("audio_path")
-        if ap:
-            return ap
-        return self.od_config.audiox_reference_audio_path
-
     def _audio_prompt_tensors(
         self,
         *,
@@ -410,7 +366,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         target_len = self._audio_conditioning_samples
         cond_seconds = float(target_len) / float(sample_rate)
         for i, _raw in enumerate(raw_prompts):
-            src = self._resolve_audio_source(_raw, extra, i)
+            src = _resolve_audio_source(_raw, extra, i)
             if src is None:
                 out.append(torch.zeros(2, target_len, device=device, dtype=cond_dtype))
                 continue
@@ -469,7 +425,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         conditioning_tensors: dict[str, Any],
         negative_conditioning_tensors: dict[str, Any] | None,
         batch_size: int,
-        sampler_type: str,
         sigma_min: float,
         sigma_max: float,
         generator: torch.Generator,
@@ -486,7 +441,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             sample_size=self._sample_size,
             device=self.device,
             generator=generator,
-            sampler_type=sampler_type,
+            sampler_type="dpmpp-3m-sde",
             sigma_min=sigma_min,
             sigma_max=sigma_max,
             scale_phi=cfg_rescale,
@@ -498,6 +453,33 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             batch_metadata=batch_metadata,
             device=self.device,
         )
+
+    def _build_conditioning_batch(
+        self,
+        *,
+        texts: list[str],
+        video_tensors_list: list[torch.Tensor],
+        audio_prompt_list: list[torch.Tensor],
+        sync_features: torch.Tensor,
+        seconds_start: float,
+        seconds_model: float,
+        num_outputs_per_prompt: int,
+        task_norm: str | None,
+    ) -> list[dict[str, Any]]:
+        batch: list[dict[str, Any]] = []
+        for i, text in enumerate(texts):
+            for _ in range(num_outputs_per_prompt):
+                batch.append(
+                    _conditioning_item(
+                        text=self._text_for_task(task_norm, text),
+                        video_tensor=video_tensors_list[i],
+                        audio_tensor=audio_prompt_list[i],
+                        sync_features=sync_features,
+                        seconds_start=seconds_start,
+                        seconds_model=seconds_model,
+                    )
+                )
+        return batch
 
     def forward(self, req: OmniDiffusionRequest) -> DiffusionOutput:
         """Execute one generation request (vLLM-Omni pipeline contract; see contributing guide section 2.3).
@@ -517,9 +499,9 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
         sampling_params = req.sampling_params
         # --- Sampling parameters (OmniDiffusionSamplingParams + extra_args) ---
-        num_inference_steps = (
-            sampling_params.num_inference_steps if sampling_params.num_inference_steps is not None else 100
-        )
+        if sampling_params.num_inference_steps is None:
+            raise ValueError("AudioXPipeline requires sampling_params.num_inference_steps.")
+        num_inference_steps = int(sampling_params.num_inference_steps)
         extra_args = sampling_params.extra_args or {}
         task_norm = self._normalize_task(extra_args.get("audiox_task"))
         self._ensure_text_video_prompts(task_norm, prompts)
@@ -528,25 +510,21 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         if not all(p.get("negative_prompt") is None for p in normalized_prompts):
             neg = [str(p.get("negative_prompt") or "") for p in normalized_prompts]
 
-        if sampling_params.guidance_scale_provided:
-            guidance_scale = sampling_params.guidance_scale
-        else:
-            guidance_scale = float(extra_args.get("cfg_scale", 6.0))
-        num_outputs_per_prompt = (
-            int(sampling_params.num_outputs_per_prompt) if sampling_params.num_outputs_per_prompt > 0 else 1
-        )
+        guidance_scale = float(sampling_params.guidance_scale)
+        if sampling_params.num_outputs_per_prompt <= 0:
+            raise ValueError("AudioXPipeline requires sampling_params.num_outputs_per_prompt > 0.")
+        num_outputs_per_prompt = int(sampling_params.num_outputs_per_prompt)
         batch_size = len(prompts) * num_outputs_per_prompt
 
         seconds_start = float(extra_args.get("seconds_start", 0.0))
         seconds_model = self._sample_size / self._sample_rate
-        sampler_type = extra_args.get("sampler_type", "dpmpp-3m-sde")
         sigma_min = float(extra_args.get("sigma_min", 0.03))
         sigma_max = float(extra_args.get("sigma_max", 1000.0))
         cfg_rescale = float(extra_args.get("cfg_rescale", 0.0))
         device = self.device
         generator = sampling_params.generator
         if generator is None:
-            generator = torch.Generator(device=device).manual_seed(0)
+            raise ValueError("AudioXPipeline requires sampling_params.generator.")
         target_fps = self._target_fps
         sample_rate = self._sample_rate
         cond_dtype = self._conditioning_dtype()
@@ -572,35 +550,29 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             cond_dtype=cond_dtype,
         )
 
-        conditioning_batch: list[dict[str, Any]] = []
-        for i, prompt in enumerate(prompts):
-            for _ in range(num_outputs_per_prompt):
-                conditioning_batch.append(
-                    _conditioning_item(
-                        text=self._text_for_task(task_norm, prompt),
-                        video_tensor=video_tensors_list[i],
-                        audio_tensor=audio_prompt_list[i],
-                        sync_features=sync_features,
-                        seconds_start=seconds_start,
-                        seconds_model=seconds_model,
-                    )
-                )
+        conditioning_batch = self._build_conditioning_batch(
+            texts=prompts,
+            video_tensors_list=video_tensors_list,
+            audio_prompt_list=audio_prompt_list,
+            sync_features=sync_features,
+            seconds_start=seconds_start,
+            seconds_model=seconds_model,
+            num_outputs_per_prompt=num_outputs_per_prompt,
+            task_norm=task_norm,
+        )
 
         negative_conditioning_batch: list[dict[str, Any]] | None = None
         if neg is not None and guidance_scale > 1.0:
-            negative_conditioning_batch = []
-            for i, nprompt in enumerate(neg):
-                for _ in range(num_outputs_per_prompt):
-                    negative_conditioning_batch.append(
-                        _conditioning_item(
-                            text=self._text_for_task(task_norm, nprompt),
-                            video_tensor=video_tensors_list[i],
-                            audio_tensor=audio_prompt_list[i],
-                            sync_features=sync_features,
-                            seconds_start=seconds_start,
-                            seconds_model=seconds_model,
-                        )
-                    )
+            negative_conditioning_batch = self._build_conditioning_batch(
+                texts=neg,
+                video_tensors_list=video_tensors_list,
+                audio_prompt_list=audio_prompt_list,
+                sync_features=sync_features,
+                seconds_start=seconds_start,
+                seconds_model=seconds_model,
+                num_outputs_per_prompt=num_outputs_per_prompt,
+                task_norm=task_norm,
+            )
 
         conditioning_tensors = self._encode_conditioning_tensors(conditioning_batch)
         negative_conditioning_tensors: dict[str, Any] | None = None
@@ -613,7 +585,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             conditioning_tensors=conditioning_tensors,
             negative_conditioning_tensors=negative_conditioning_tensors,
             batch_size=batch_size,
-            sampler_type=sampler_type,
             sigma_min=sigma_min,
             sigma_max=sigma_max,
             generator=generator,

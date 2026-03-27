@@ -10,7 +10,12 @@ import torch
 from einops import rearrange
 from torch import nn
 from torchvision import transforms
-from transformers import CLIPVisionModelWithProjection
+from transformers import (
+    AutoConfig,
+    AutoTokenizer,
+    CLIPVisionModelWithProjection,
+    T5EncoderModel,
+)
 
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.models.audiox.audiox_pretransform import create_pretransform_from_config
@@ -40,7 +45,6 @@ class SA_PreNorm(nn.Module):
 class SA_FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):
         super().__init__()
-        # Match upstream checkpoint keys ``net.0`` … ``net.3`` (Linear, GELU, Dropout, Linear).
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
@@ -69,7 +73,6 @@ class SA_Attention(nn.Module):
             causal=False,
         )
         _ = dropout
-        # Match upstream / checkpoint keys ``to_out.0.*`` (Sequential with one Linear).
         if project_out:
             self.to_out = nn.Sequential(nn.Linear(inner_dim, dim))
         else:
@@ -213,8 +216,6 @@ class T5Conditioner(Conditioner):
         enable_grad: bool = False,
         project_out: bool = False,
     ):
-        from transformers import AutoConfig, AutoTokenizer, T5EncoderModel
-
         hidden_size = AutoConfig.from_pretrained(t5_model_name).hidden_size
         super().__init__(hidden_size, output_dim, project_out=project_out)
 
@@ -257,10 +258,7 @@ class T5Conditioner(Conditioner):
 
 
 def _encode_latents_with_scaling(pretransform: tp.Any, audio: torch.Tensor) -> torch.Tensor:
-    if hasattr(pretransform, "encode_scaled"):
-        return pretransform.encode_scaled(audio)
-    encoded = pretransform.encode(audio)
-    return encoded / float(pretransform.scaling_factor)
+    return pretransform.encode_scaled(audio)
 
 
 class AudioAutoencoderConditionerv2(Conditioner):
@@ -321,10 +319,9 @@ class AudioAutoencoderConditionerv2(Conditioner):
 
 
 class MultiConditioner(nn.Module):
-    def __init__(self, conditioners: dict[str, Conditioner], default_keys: dict[str, str] = {}):
+    def __init__(self, conditioners: dict[str, Conditioner]):
         super().__init__()
         self.conditioners = nn.ModuleDict(conditioners)
-        self.default_keys = default_keys
 
     def forward(self, batch_metadata: list[dict[str, tp.Any]], device: torch.device | str) -> dict[str, tp.Any]:
         output = {}
@@ -332,7 +329,6 @@ class MultiConditioner(nn.Module):
             conditioner_inputs = _gather_conditioner_inputs(
                 batch_metadata=batch_metadata,
                 key=key,
-                default_keys=self.default_keys,
                 require_single_item_sequence=False,
             )
             output[key] = conditioner(conditioner_inputs, device)
@@ -349,9 +345,9 @@ def _build_pretransform(conditioner_config: dict[str, tp.Any]) -> tp.Any:
     return pretransform
 
 
-def _get_source_key(item: dict[str, tp.Any], key: str, default_keys: dict[str, str]) -> str:
-    source_key = key if key in item else default_keys.get(key)
-    if source_key is None or source_key not in item:
+def _get_source_key(item: dict[str, tp.Any], key: str) -> str:
+    source_key = key
+    if source_key not in item:
         raise ValueError(f"Conditioner key {key} not found in batch metadata")
     return source_key
 
@@ -371,12 +367,11 @@ def _gather_conditioner_inputs(
     *,
     batch_metadata: list[dict[str, tp.Any]],
     key: str,
-    default_keys: dict[str, str],
     require_single_item_sequence: bool,
 ) -> list[tp.Any]:
     inputs: list[tp.Any] = []
     for item in batch_metadata:
-        source_key = _get_source_key(item, key, default_keys)
+        source_key = _get_source_key(item, key)
         value = _normalize_condition_value(
             item[source_key],
             source_key=source_key,
@@ -402,8 +397,7 @@ def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, t
       - ``audio_prompt`` -> ``AudioAutoencoderConditionerv2``
     """
     cond_dim = config["cond_dim"]
-    default_keys = config.get("default_keys", {})
-    configs = config.get("configs", [])
+    configs = config["configs"]
     if len(configs) != 3:
         raise ValueError("AudioX fixed conditioner expects exactly 3 configs: video_prompt/text_prompt/audio_prompt.")
 
@@ -426,43 +420,40 @@ def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, t
     video_cfg = _with_output_dim(cond_dim, by_id["video_prompt"])
     text_cfg = _with_output_dim(cond_dim, by_id["text_prompt"])
     audio_cfg = _with_output_dim(cond_dim, by_id["audio_prompt"])
-    # Video conditioner is fixed-shape in AudioX; keep only supported keys.
-    video_cfg = {k: v for k, v in video_cfg.items() if k in {"output_dim", "project_out"}}
+    video_allowed = {"output_dim", "project_out"}
+    video_extra = set(video_cfg) - video_allowed
+    if video_extra:
+        raise ValueError(f"Unsupported video_prompt config keys for AudioX inference: {sorted(video_extra)}")
+    video_cfg = {k: video_cfg[k] for k in video_allowed if k in video_cfg}
+
     pretransform = _build_pretransform(audio_cfg)
-    # Keep only kwargs accepted by AudioAutoencoderConditionerv2; ignore legacy
-    # training/loading keys (e.g. pretransform_ckpt_path) from upstream configs.
-    audio_cfg = {
-        k: v
-        for k, v in audio_cfg.items()
-        if k in {"output_dim", "latent_seq_len", "mask_ratio_start", "mask_ratio_end"}
-    }
+    audio_allowed = {"output_dim", "latent_seq_len", "mask_ratio_start", "mask_ratio_end"}
+    audio_extra = set(audio_cfg) - audio_allowed
+    if audio_extra:
+        raise ValueError(f"Unsupported audio_prompt config keys for AudioX inference: {sorted(audio_extra)}")
+    audio_cfg = {k: audio_cfg[k] for k in audio_allowed if k in audio_cfg}
 
     conditioners: dict[str, Conditioner] = {
         "video_prompt": CLIPWithSyncWithEmptyFeatureConditioner(**video_cfg),
         "text_prompt": T5Conditioner(**text_cfg),
         "audio_prompt": AudioAutoencoderConditionerv2(pretransform, **audio_cfg),
     }
-    return MultiConditioner(conditioners, default_keys=default_keys)
+    return MultiConditioner(conditioners)
 
 
 def encode_audiox_conditioning_tensors(
-    multi_conditioner: MultiConditioner | None,
+    multi_conditioner: MultiConditioner,
     *,
     batch_metadata: list[dict[str, Any]],
     device: torch.device,
 ) -> dict[str, tp.Any]:
     """Encode batch metadata through AudioX conditioners."""
-    if multi_conditioner is None:
-        raise RuntimeError("AudioX model is missing conditioner module.")
-
     output: dict[str, Any] = {}
-    default_keys = getattr(multi_conditioner, "default_keys", {})
 
     for key, conditioner in multi_conditioner.conditioners.items():
         conditioner_inputs = _gather_conditioner_inputs(
             batch_metadata=batch_metadata,
             key=key,
-            default_keys=default_keys,
             require_single_item_sequence=True,
         )
         output[key] = conditioner(conditioner_inputs, device)

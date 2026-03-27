@@ -3,7 +3,9 @@ from __future__ import annotations
 import typing as tp
 
 import k_diffusion as K
+import k_diffusion.sampling as ks
 import torch
+from k_diffusion.sampling import BrownianTreeNoiseSampler
 from torch import nn
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
@@ -11,6 +13,7 @@ from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
     MultiConditioner,
     create_audiox_fixed_conditioner_from_conditioning_config,
 )
+from vllm_omni.diffusion.models.audiox.audiox_maf import MAF_Block
 from vllm_omni.diffusion.models.audiox.audiox_pretransform import (
     AudioXVAE,
     create_pretransform_from_config,
@@ -93,7 +96,6 @@ class ConditionedDiffusionModelWrapper(nn.Module):
         self.cross_attn_cond_ids = cross_attn_cond_ids or []
         self.global_cond_ids = global_cond_ids or []
         self.min_input_length = min_input_length
-        from vllm_omni.diffusion.models.audiox.audiox_maf import MAF_Block
 
         self.maf_block = MAF_Block()
 
@@ -204,9 +206,7 @@ def _sample_dpmpp_3m_sde_fixed(
     s_noise=1.0,
     noise_sampler=None,
 ):
-    """DPM-Solver++(3M) SDE with terminal-sigma fix for upstream k-diffusion bug."""
-    from k_diffusion.sampling import BrownianTreeNoiseSampler
-
+    """DPM-Solver++(3M) SDE with terminal-sigma fix."""
     sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
     noise_sampler = BrownianTreeNoiseSampler(x, sigma_min, sigma_max) if noise_sampler is None else noise_sampler
     extra_args = {} if extra_args is None else extra_args
@@ -263,8 +263,6 @@ def _sample_dpmpp_3m_sde_fixed(
 
 def patch_k_diffusion_sample_dpmpp_3m_sde() -> None:
     """Idempotently replace ``k_diffusion.sampling.sample_dpmpp_3m_sde`` with fixed version."""
-    import k_diffusion.sampling as ks
-
     if getattr(ks, _PATCH_ATTR, False):
         return
     ks.sample_dpmpp_3m_sde = _sample_dpmpp_3m_sde_fixed
@@ -286,7 +284,6 @@ def sample_k(
     model_fn,
     noise,
     steps: int = 100,
-    sampler_type: str = "dpmpp-3m-sde",
     sigma_min: float = 0.5,
     sigma_max: float = 50,
     rho: float = 1.0,
@@ -303,18 +300,9 @@ def sample_k(
     x = noise
 
     with torch.cuda.amp.autocast():
-        if sampler_type == "dpmpp-2m-sde":
-            return K.sampling.sample_dpmpp_2m_sde(
-                denoiser, x, sigmas, disable=False, callback=callback, extra_args=extra_args
-            )
-        if sampler_type == "dpmpp-3m-sde":
-            return K.sampling.sample_dpmpp_3m_sde(
-                denoiser, x, sigmas, disable=False, callback=callback, extra_args=extra_args
-            )
-    raise ValueError(
-        f"Unsupported sampler_type={sampler_type!r} for inference-only AudioX path. "
-        "Supported: 'dpmpp-2m-sde', 'dpmpp-3m-sde'."
-    )
+        return K.sampling.sample_dpmpp_3m_sde(
+            denoiser, x, sigmas, disable=False, callback=callback, extra_args=extra_args
+        )
 
 
 def generate_diffusion_cond(
@@ -340,7 +328,7 @@ def generate_diffusion_cond(
     sample_size = sample_size // pt.downsampling_ratio
 
     if generator is None:
-        raise ValueError("AudioX generation requires a torch.Generator; seed/random fallback is disabled.")
+        raise ValueError("AudioX generation requires a torch.Generator.")
     noise = torch.randn([batch_size, model.io_channels, sample_size], device=device, generator=generator)
 
     torch.backends.cuda.matmul.allow_tf32 = False
