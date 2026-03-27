@@ -249,16 +249,15 @@ def run_single_inference(
         extra["seconds_total"] = float(seconds_total)
     if video_path.strip():
         extra["video_path"] = os.path.abspath(os.path.expanduser(video_path))
+    extra["audiox_task"] = task
+    if reference_audio_path.strip():
+        extra["audio_path"] = os.path.abspath(os.path.expanduser(reference_audio_path))
 
     sampling = OmniDiffusionSamplingParams(
         generator=generator,
         guidance_scale=guidance_scale,
         num_inference_steps=num_inference_steps,
         seed=seed,
-        audiox_task=task,
-        audiox_audio_path=os.path.abspath(os.path.expanduser(reference_audio_path))
-        if reference_audio_path.strip()
-        else None,
         extra_args=extra,
     )
     user_prompt: str | dict

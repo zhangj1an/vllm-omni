@@ -186,7 +186,6 @@ def get_audiox_post_process_func(_od_config: OmniDiffusionConfig):
 def _resolve_audio_ref_for_preprocess(
     raw_prompt: Any,
     extra: dict[str, Any],
-    sp: Any,
     batch_index: int,
     od_config: OmniDiffusionConfig,
 ) -> Any:
@@ -195,7 +194,7 @@ def _resolve_audio_ref_for_preprocess(
     )
     if src is not None:
         return src
-    ap = getattr(sp, "audiox_audio_path", None)
+    ap = extra.get("audio_path")
     if ap:
         return ap
     return od_config.audiox_reference_audio_path
@@ -247,7 +246,7 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
         user_seconds_total = float(user_seconds_total)
         cond_seconds = float(audio_conditioning_samples) / float(sample_rate)
 
-        task_norm = AudioXPipeline._normalize_task(sp.audiox_task)
+        task_norm = AudioXPipeline._normalize_task(extra.get("audiox_task"))
 
         normalized = _normalize_prompts(list(request.prompts))
         new_prompts: list[Any] = []
@@ -265,7 +264,7 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
                         seek_time=seconds_start,
                     ).to(device=cpu, dtype=torch.float32)
 
-            asrc = _resolve_audio_ref_for_preprocess(p, extra, sp, i, od_config)
+            asrc = _resolve_audio_ref_for_preprocess(p, extra, i, od_config)
             if asrc is not None:
                 mm["audio"] = prepare_audio_reference(
                     asrc,
@@ -386,7 +385,7 @@ def _normalize_prompts(prompts: list[Any]) -> list[dict[str, Any]]:
 class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMixin):
     """AudioX conditional diffusion (registry pipeline; weights via ``weights_sources`` + ``load_weights``).
 
-    Tasks (``audiox_task`` on sampling params):
+    Tasks (``extra_args["audiox_task"]`` on sampling params):
 
     - ``t2a`` / ``t2m``: text — zero video and zero reference audio.
     - ``v2a`` / ``v2m``: video — empty text.
@@ -394,8 +393,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
     Video: ``extra_args["video_path"]`` / ``["video_paths"]`` or ``multi_modal_data["video"]``.
 
-    Reference audio: ``extra_args["audio_path"]`` / ``["audio_paths"]``, ``audiox_audio_path`` on sampling
-    params, or ``OmniDiffusionConfig.audiox_reference_audio_path`` (CLI ``--audiox-reference-audio-path``).
+    Reference audio: ``extra_args["audio_path"]`` / ``["audio_paths"]`` or
+    ``OmniDiffusionConfig.audiox_reference_audio_path`` (CLI ``--audiox-reference-audio-path``).
 
     Requires ``od_config.model`` to be a **vLLM-Omni sharded** tree: ``config.json`` plus
     ``transformer/diffusion_pytorch_model.safetensors`` and
@@ -521,13 +520,13 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
                     "use v2a/v2m for video-only generation."
                 )
 
-    def _resolve_audio_source(self, raw_prompt: Any, extra: dict[str, Any], sp: Any, batch_index: int) -> Any:
+    def _resolve_audio_source(self, raw_prompt: Any, extra: dict[str, Any], batch_index: int) -> Any:
         src = _mm_path_lookup(
             raw_prompt, extra, batch_index, mm_key="audio", paths_key="audio_paths", single_key="audio_path"
         )
         if src is not None:
             return src
-        ap = getattr(sp, "audiox_audio_path", None)
+        ap = extra.get("audio_path")
         if ap:
             return ap
         return self.od_config.audiox_reference_audio_path
@@ -537,7 +536,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         *,
         raw_prompts: list[Any],
         extra: dict[str, Any],
-        sp: Any,
         seconds_start: float,
         sample_rate: int,
         device: torch.device,
@@ -547,7 +545,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         target_len = self._audio_conditioning_samples
         cond_seconds = float(target_len) / float(sample_rate)
         for i, _raw in enumerate(raw_prompts):
-            src = self._resolve_audio_source(_raw, extra, sp, i)
+            src = self._resolve_audio_source(_raw, extra, i)
             if src is None:
                 out.append(torch.zeros(2, target_len, device=device, dtype=cond_dtype))
                 continue
@@ -653,18 +651,18 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         prompts = [p["prompt"] for p in normalized_prompts]
 
         sampling_params = req.sampling_params
-        task_norm = self._normalize_task(sampling_params.audiox_task)
+        # --- Sampling parameters (OmniDiffusionSamplingParams + extra_args) ---
+        num_inference_steps = (
+            sampling_params.num_inference_steps if sampling_params.num_inference_steps is not None else 100
+        )
+        extra_args = sampling_params.extra_args or {}
+        task_norm = self._normalize_task(extra_args.get("audiox_task"))
         self._ensure_text_video_prompts(task_norm, prompts)
 
         neg: list[str] | None = None
         if not all(p.get("negative_prompt") is None for p in normalized_prompts):
             neg = [str(p.get("negative_prompt") or "") for p in normalized_prompts]
 
-        # --- Sampling parameters (OmniDiffusionSamplingParams + extra_args) ---
-        num_inference_steps = (
-            sampling_params.num_inference_steps if sampling_params.num_inference_steps is not None else 100
-        )
-        extra_args = sampling_params.extra_args or {}
         if sampling_params.guidance_scale_provided:
             guidance_scale = sampling_params.guidance_scale
         else:
@@ -693,7 +691,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         audio_prompt_list = self._audio_prompt_tensors(
             raw_prompts=normalized_prompts,
             extra=extra_args,
-            sp=sampling_params,
             seconds_start=seconds_start,
             sample_rate=sample_rate,
             device=device,

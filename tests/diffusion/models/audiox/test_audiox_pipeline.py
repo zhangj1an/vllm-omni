@@ -42,15 +42,11 @@ def test_audiox_pipeline_audio_source_resolution_order():
 
     raw = AudioXPipeline.__new__(AudioXPipeline)
     raw.od_config = OmniDiffusionConfig(model="x", audiox_reference_audio_path="/default.wav")
-    sp = OmniDiffusionSamplingParams()
-    assert raw._resolve_audio_source({}, {}, sp, 0) == "/default.wav"
-
-    sp2 = OmniDiffusionSamplingParams(audiox_audio_path="/req.wav")
-    assert raw._resolve_audio_source({}, {}, sp2, 0) == "/req.wav"
-    assert raw._resolve_audio_source({}, {"audio_path": "/extra.wav"}, sp2, 0) == "/extra.wav"
+    assert raw._resolve_audio_source({}, {}, 0) == "/default.wav"
+    assert raw._resolve_audio_source({}, {"audio_path": "/extra.wav"}, 0) == "/extra.wav"
 
     mm_prompt = {"prompt": "p", "multi_modal_data": {"audio": "/mm.wav"}}
-    assert raw._resolve_audio_source(mm_prompt, {"audio_path": "/extra.wav"}, sp2, 0) == "/mm.wav"
+    assert raw._resolve_audio_source(mm_prompt, {"audio_path": "/extra.wav"}, 0) == "/mm.wav"
 
 
 def test_audiox_pipeline_audio_prompt_from_tensor():
@@ -61,12 +57,10 @@ def test_audiox_pipeline_audio_prompt_from_tensor():
     raw = AudioXPipeline.__new__(AudioXPipeline)
     raw.od_config = OmniDiffusionConfig(model="x")
     raw._audio_conditioning_samples = 80
-    sp = OmniDiffusionSamplingParams()
     wav = torch.zeros(2, 80)
     tensors = raw._audio_prompt_tensors(
         raw_prompts=[{"prompt": "x", "multi_modal_data": {"audio": wav}}],
         extra={},
-        sp=sp,
         seconds_start=0.0,
         sample_rate=80,
         device=torch.device("cpu"),
@@ -281,13 +275,8 @@ def test_audiox_forward_all_six_tasks_conditioning_text(task: str, expected_text
         prompts = [{"prompt": expected_text, "multi_modal_data": {"video": vt}}]
         extra = {}
 
-    sp = OmniDiffusionSamplingParams(
-        audiox_task=task,
-        guidance_scale=1.0,
-        num_inference_steps=4,
-        seed=0,
-        extra_args=extra,
-    )
+    extra["audiox_task"] = task
+    sp = OmniDiffusionSamplingParams(guidance_scale=1.0, num_inference_steps=4, seed=0, extra_args=extra)
     req = OmniDiffusionRequest(prompts=prompts, sampling_params=sp, request_ids=["0"])
 
     pipe = _audiox_pipeline_stub_for_forward()
@@ -315,10 +304,9 @@ def test_audiox_forward_negative_conditioning_when_cfg_and_neg_prompt():
         }
     ]
     sp = OmniDiffusionSamplingParams(
-        audiox_task="tv2a",
         guidance_scale=4.0,
         num_inference_steps=2,
-        extra_args={},
+        extra_args={"audiox_task": "tv2a"},
     )
     req = OmniDiffusionRequest(prompts=prompts, sampling_params=sp, request_ids=["0"])
 
@@ -330,12 +318,12 @@ def test_audiox_forward_negative_conditioning_when_cfg_and_neg_prompt():
     assert torch.equal(kwargs["negative_conditioning_tensors"]["dummy"], torch.zeros(1))
 
 
-def test_omni_diffusion_sampling_params_has_audiox_fields():
+def test_omni_diffusion_sampling_params_uses_extra_args_for_audiox():
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
-    sp = OmniDiffusionSamplingParams(audiox_task="t2a", audiox_audio_path="/x.wav")
-    assert sp.audiox_task == "t2a"
-    assert sp.audiox_audio_path == "/x.wav"
+    sp = OmniDiffusionSamplingParams(extra_args={"audiox_task": "t2a", "audio_path": "/x.wav"})
+    assert sp.extra_args["audiox_task"] == "t2a"
+    assert sp.extra_args["audio_path"] == "/x.wav"
 
 
 def test_audiox_pre_process_func_normalizes_str_prompts(tmp_path):
@@ -349,7 +337,7 @@ def test_audiox_pre_process_func_normalizes_str_prompts(tmp_path):
     _write_minimal_audiox_sharded_stub(tmp_path)
     od = OmniDiffusionConfig(model=str(tmp_path), model_class_name="AudioXPipeline")
     pre = get_audiox_pre_process_func(od)
-    sp = OmniDiffusionSamplingParams(audiox_task="t2a")
+    sp = OmniDiffusionSamplingParams(extra_args={"audiox_task": "t2a"})
     req = OmniDiffusionRequest(prompts=["  hi  "], sampling_params=sp, request_ids=["0"])
     out = pre(req)
     assert out.prompts[0]["prompt"] == "hi"

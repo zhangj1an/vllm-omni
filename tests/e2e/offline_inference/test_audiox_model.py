@@ -41,8 +41,8 @@ def test_audiox_model(model_name: str):
             guidance_scale=6.0,
             generator=torch.Generator(current_omni_platform.device_type).manual_seed(42),
             num_outputs_per_prompt=1,
-            audiox_task="t2a",
             extra_args={
+                "audiox_task": "t2a",
                 "seconds_start": 0.0,
                 "seconds_total": seconds_total,
             },

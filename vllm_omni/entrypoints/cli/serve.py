@@ -198,7 +198,7 @@ class OmniServeCommand(CLISubcommand):
             default=None,
             help=(
                 "Optional default path for AudioX reference-audio conditioning (e.g. WAV). "
-                "Override per request via sampling_params.audiox_audio_path or extra_args['audio_path']."
+                "Override per request via extra_args['audio_path']."
             ),
         )
         omni_config_group.add_argument(
