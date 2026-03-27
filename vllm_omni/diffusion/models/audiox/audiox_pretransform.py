@@ -35,7 +35,7 @@ class AudioXVAE(OobleckVAEBase):
 
 
 def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], sample_rate: int):
-    allowed_keys = {"type", "config", "scale"}
+    allowed_keys = {"type", "config", "scale", "iterate_batch"}
     extra_keys = set(pretransform_config) - allowed_keys
     if extra_keys:
         raise ValueError(f"Unsupported pretransform config keys for AudioX inference: {sorted(extra_keys)}")
@@ -54,7 +54,7 @@ def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], samp
             "VAE bottleneck, use_snake=true, no use_nearest_upsample)."
         )
 
-    scaling_factor = float(pretransform_config["scale"])
+    scaling_factor = float(pretransform_config.get("scale", 1.0))
 
     inner = AutoencoderOobleck(**ae_cfg_to_diffusers_init_kwargs(ae_inner, sample_rate))
     pretransform = AudioXVAE(

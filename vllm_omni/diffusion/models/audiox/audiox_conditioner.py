@@ -394,11 +394,12 @@ def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, t
     video_cfg = _with_output_dim(cond_dim, by_id["video_prompt"])
     text_cfg = _with_output_dim(cond_dim, by_id["text_prompt"])
     audio_cfg = _with_output_dim(cond_dim, by_id["audio_prompt"])
-    video_allowed = {"output_dim", "project_out"}
+    # Upstream config may include clip_model_name; not required at inference here.
+    video_allowed = {"output_dim", "project_out", "clip_model_name"}
     video_extra = set(video_cfg) - video_allowed
     if video_extra:
         raise ValueError(f"Unsupported video_prompt config keys for AudioX inference: {sorted(video_extra)}")
-    video_cfg = {k: video_cfg[k] for k in video_allowed if k in video_cfg}
+    video_cfg = {k: video_cfg[k] for k in video_allowed if k in video_cfg and k != "clip_model_name"}
 
     text_allowed = {"output_dim", "t5_model_name", "max_length", "project_out"}
     text_extra = set(text_cfg) - text_allowed
@@ -407,11 +408,22 @@ def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, t
     text_cfg = {k: text_cfg[k] for k in text_allowed if k in text_cfg}
 
     pretransform = _build_pretransform(audio_cfg)
-    audio_allowed = {"output_dim", "latent_seq_len"}
+    # Upstream audio_prompt may include training-only fields not used by inference.
+    audio_allowed = {
+        "output_dim",
+        "latent_seq_len",
+        "pretransform_ckpt_path",
+        "mask_ratio_start",
+        "mask_ratio_end",
+    }
     audio_extra = set(audio_cfg) - audio_allowed
     if audio_extra:
         raise ValueError(f"Unsupported audio_prompt config keys for AudioX inference: {sorted(audio_extra)}")
-    audio_cfg = {k: audio_cfg[k] for k in audio_allowed if k in audio_cfg}
+    audio_cfg = {
+        k: audio_cfg[k]
+        for k in audio_allowed
+        if k in audio_cfg and k not in {"pretransform_ckpt_path", "mask_ratio_start", "mask_ratio_end"}
+    }
 
     conditioners: dict[str, Conditioner] = {
         "video_prompt": CLIPWithSyncWithEmptyFeatureConditioner(**video_cfg),

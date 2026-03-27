@@ -8,6 +8,8 @@ import os
 from collections.abc import Iterable
 from typing import Any, ClassVar
 
+import numpy as np
+from scipy.signal import resample_poly
 import torch
 from torch import nn
 from vllm.logger import init_logger
@@ -38,6 +40,14 @@ _TEXT_VIDEO_TASKS = frozenset({"tv2a", "tv2m"})
 _VIDEO_CONDITIONED_TASKS = _VIDEO_ONLY_TASKS | _TEXT_VIDEO_TASKS
 
 logger = init_logger(__name__)
+
+
+def resample_audiox_waveform_poly(audio_data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Resample waveform with scipy polyphase filtering, preserving duration."""
+    if src_rate == dst_rate:
+        return audio_data
+
+    return resample_poly(audio_data.astype(np.float32), up=int(dst_rate), down=int(src_rate), axis=0)
 
 
 def get_audiox_post_process_func(_od_config: OmniDiffusionConfig):
@@ -92,9 +102,9 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
         sp = request.sampling_params
         extra = sp.extra_args or {}
         seconds_start = float(extra.get("seconds_start", 0.0))
-        if "seconds_total" not in extra:
-            raise ValueError("AudioX pre-process requires extra_args['seconds_total'].")
-        user_seconds_total = float(extra["seconds_total"])
+        # Engine dummy warmup may call pre-process without user-provided seconds_total.
+        # Fall back to model-native duration in that path.
+        user_seconds_total = float(extra.get("seconds_total", seconds_model))
         cond_seconds = float(audio_conditioning_samples) / float(sample_rate)
 
         task_norm = AudioXPipeline._normalize_task(extra.get("audiox_task"))

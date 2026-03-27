@@ -23,7 +23,13 @@ VAE_SAFETENSORS = "vae/diffusion_pytorch_model.safetensors"
 
 _SELF_ATTN_QKV = ".self_attn.to_qkv.weight"
 _CROSS_ATTN_KV = ".cross_attn.to_kv.weight"
-_MODEL_PRETRANSFORM_PREFIX_MAP = (("_model.pretransform.model.", "_model.pretransform."),)
+_MODEL_PRETRANSFORM_PREFIX_MAP = (
+    ("_model.pretransform.model.", "_model.pretransform."),
+    (
+        "_model.conditioner.conditioners.audio_prompt.pretransform.model.",
+        "_model.conditioner.conditioners.audio_prompt.pretransform.",
+    ),
+)
 
 
 def _model_root_has_file(model_root: str, rel: str) -> bool:
@@ -417,9 +423,23 @@ def remap_audiox_state_dict(
     model_config: dict[str, Any],
 ) -> list[tuple[str, torch.Tensor]]:
     remapped = remap_audiox_maf_weights(weights)
+    # Accept legacy prefixes from upstream checkpoints and normalize to inference layout.
+    legacy_prefix_map = {
+        "_model.model.model.": "_model.model.",
+        "model.model.": "_model.model.",
+    }
+    legacy_normalized: list[tuple[str, torch.Tensor]] = []
+    for k, v in remapped:
+        nk = k
+        for prefix, replacement in legacy_prefix_map.items():
+            if nk.startswith(prefix):
+                nk = replacement + nk[len(prefix) :]
+                break
+        legacy_normalized.append((nk, v))
+    remapped = legacy_normalized
     normalized: list[tuple[str, torch.Tensor]] = []
     for k, v in remapped:
-        if k.startswith("_model.model.model.") or k.startswith("model.model."):
+        if k.startswith(tuple(legacy_prefix_map)):
             raise ValueError(
                 "Unsupported legacy AudioX key prefix detected during state-dict remap: "
                 f"{k!r}. Only strict inference layout keys are supported."
@@ -432,7 +452,18 @@ def remap_audiox_state_dict(
 
 
 def filter_unused_keys(weights: Iterable[tuple[str, torch.Tensor]]) -> list[tuple[str, torch.Tensor]]:
-    return list(weights)
+    filtered: list[tuple[str, torch.Tensor]] = []
+    for k, v in weights:
+        # Upstream checkpoints can include decoder-only postprocess conv weights
+        # that are not present in this inference pipeline.
+        if (
+            "postprocess_conv" in k
+            or "preprocess_conv" in k
+            or "timestep_features" in k
+        ):
+            continue
+        filtered.append((k, v))
+    return filtered
 
 
 def load_audiox_weights(

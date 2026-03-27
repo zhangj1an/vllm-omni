@@ -130,6 +130,13 @@ def _audiox_bundle_is_sharded(weights_dir: Path) -> bool:
         return False
 
 
+def _get_audiox_model_sample_rate(weights_dir: Path) -> int:
+    from vllm_omni.diffusion.models.audiox.audiox_weights import load_audiox_bundle_config
+
+    _, model_cfg, _ = load_audiox_bundle_config(str(weights_dir.resolve()))
+    return int(model_cfg.get("sample_rate", 48000))
+
+
 def _ensure_audiox_sharded_weights(weights_dir: Path) -> None:
     """vLLM-Omni loads only component safetensors; convert ``model.ckpt`` in place when needed."""
     from vllm_omni.diffusion.models.audiox.audiox_weights import convert_audiox_bundle
@@ -245,6 +252,7 @@ def run_single_inference(
         raise SystemExit(str(e)) from e
 
     prompt_text = prompt if task in TEXT_TASKS else ""
+    model_sample_rate = _get_audiox_model_sample_rate(wd)
 
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(seed)
     omni = Omni(
@@ -298,6 +306,12 @@ def run_single_inference(
         audio = audio.T
     elif audio.ndim != 2:
         raise RuntimeError(f"Unexpected audio shape {audio.shape}")
+
+    # Preserve duration when output sample rate differs from model-native rate.
+    if model_sample_rate != sample_rate:
+        from vllm_omni.diffusion.models.audiox.pipeline_audiox import resample_audiox_waveform_poly
+
+        audio = resample_audiox_waveform_poly(audio, src_rate=model_sample_rate, dst_rate=sample_rate)
 
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
