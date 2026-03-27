@@ -26,6 +26,7 @@ from vllm_omni.diffusion.models.audiox.audiox_weights import (
     load_audiox_weights,
 )
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
+from vllm_omni.diffusion.postprocess.audio import build_audio_post_process_func
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
@@ -179,12 +180,7 @@ def get_audiox_post_process_func(_od_config: OmniDiffusionConfig):
     ``_od_config`` is reserved for future use (e.g. bundle-specific output normalization).
     """
 
-    def post_process_func(audio: torch.Tensor, output_type: str = "np"):
-        if output_type in ("latent", "pt"):
-            return audio
-        return audio.detach().cpu().float().numpy()
-
-    return post_process_func
+    return build_audio_post_process_func()
 
 
 def _resolve_audio_ref_for_preprocess(

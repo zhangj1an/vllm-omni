@@ -30,6 +30,7 @@ from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineL
 from vllm_omni.diffusion.layers.oobleck_vae_base import OobleckVAEBase
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
 from vllm_omni.diffusion.models.stable_audio.stable_audio_transformer import StableAudioDiTModel
+from vllm_omni.diffusion.postprocess.audio import build_audio_post_process_func
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.utils.tf_utils import get_transformer_config_kwargs
@@ -46,19 +47,7 @@ def get_stable_audio_post_process_func(
     Converts raw audio tensor to numpy array for saving.
     """
 
-    def post_process_func(
-        audio: torch.Tensor,
-        output_type: str = "np",
-    ):
-        if output_type == "latent":
-            return audio
-        if output_type == "pt":
-            return audio
-        # Convert to numpy
-        audio_np = audio.cpu().float().numpy()
-        return audio_np
-
-    return post_process_func
+    return build_audio_post_process_func()
 
 
 class StableAudioPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMixin):
