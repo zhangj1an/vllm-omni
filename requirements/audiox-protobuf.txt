@@ -1,4 +1,0 @@
-# Run after requirements/audiox.txt (or pip install -e ".[audiox]").
-# Restores protobuf compatible with vLLM after descript-audio-codec / descript-audiotools.
-
-protobuf>=5.29.6,<7

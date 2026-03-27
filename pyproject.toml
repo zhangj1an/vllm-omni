@@ -61,7 +61,7 @@ demo = [
     "gradio>=6.7.0",
 ]
 
-# AudioXPipeline (optional): also run `pip install -r requirements/audiox-protobuf.txt` after this extra.
+# AudioXPipeline (optional): protobuf floor is included here so one-command install works.
 audiox = [
     "decord>=0.6.0",
     "k-diffusion>=0.1.1.post1",
@@ -70,6 +70,7 @@ audiox = [
     "vector-quantize-pytorch>=1.0.0",
     "setuptools>=77.0.3,<81.0.0",
     "descript-audio-codec>=1.0.0",
+    "protobuf>=5.29.6,<7",
 ]
 
 docs = [

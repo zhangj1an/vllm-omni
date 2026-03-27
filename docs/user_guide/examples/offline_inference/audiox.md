@@ -13,12 +13,13 @@ This folder runs [AudioX](https://github.com/ZeyueT/AudioX) through the `AudioXP
    ```bash
    # from repository root
    pip install -e ".[audiox]"
-   pip install -r requirements/audiox-protobuf.txt
    ```
 
-   Or: `pip install -r requirements/audiox.txt` then `pip install -r requirements/audiox-protobuf.txt`.
+   Or: `pip install -r requirements/audiox.txt`.
 
-   The second step is required because **descript-audio-codec** pulls **descript-audiotools**, which requests an old **protobuf**, while **vLLM 0.18+** needs `protobuf>=5.29.6`.
+   The protobuf floor is included directly in the AudioX dependency set because
+   **descript-audio-codec** pulls **descript-audiotools** (old protobuf pin), while
+   **vLLM 0.18+** needs `protobuf>=5.29.6`.
 
 3. **Diffusion attention backend** — `end2end.py` defaults to `DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA` if unset, so a plain `python end2end.py …` works on GPUs where **fa3-fwd** / Flash reports errors such as *“This flash attention build does not support FP16”*. To force Flash when your stack supports it:
 
@@ -125,8 +126,8 @@ audiox_task_outputs/<model_slug>/<animal|human>/{t2a,t2m,v2a,v2m,tv2a,tv2m}.wav
 
 ## Troubleshooting
 
-- **Import errors** (`k_diffusion`, `dac`, `einops_exts`, …): install `.[audiox]` and `requirements/audiox-protobuf.txt` as above.
-- **protobuf / vLLM errors** after installing AudioX deps: run `pip install -r requirements/audiox-protobuf.txt` again.
+- **Import errors** (`k_diffusion`, `dac`, `einops_exts`, …): install `.[audiox]` (or `requirements/audiox.txt`) as above.
+- **protobuf / vLLM errors** after installing AudioX deps: re-run `pip install -e ".[audiox]"` (or `pip install -r requirements/audiox.txt`) to enforce the protobuf floor.
 - **Flash attention / FP16 / dummy run failed**: use default `TORCH_SDPA` (already the default in `end2end.py`) or fix your Flash / fa3-fwd build for your GPU.
 - **Missing `transformer/config.json`**: re-run `end2end.py run` with downloads enabled, or add `transformer/config.json` containing `{}` under the weight bundle.
 - **`tv2a` / `tv2m`**: require a **non-empty** prompt. **`v2*` / `tv2*`**: require **`--video-path`** (or a config that supplies a video file).

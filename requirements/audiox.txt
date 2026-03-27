@@ -2,14 +2,13 @@
 #
 # Install (from repo root, after vllm + editable vllm-omni):
 #   pip install -r requirements/audiox.txt
-#   pip install -r requirements/audiox-protobuf.txt
 #
-# Or use the PyPI extra (same two steps for protobuf — see audiox-protobuf.txt):
+# Or use the PyPI extra:
 #   pip install -e ".[audiox]"
-#   pip install -r requirements/audiox-protobuf.txt
 #
 # descript-audio-codec pulls descript-audiotools, which pins protobuf<3.20; vLLM 0.18+
-# requires protobuf>=5.29.6. The second file re-pins protobuf after DAC installs.
+# requires protobuf>=5.29.6. Keep protobuf floor in this same install set so pip resolves
+# the final constraint in a single transaction.
 
 # Video-conditioned tasks (v2a, tv2a, …) require decord for frame loading.
 decord>=0.6.0
@@ -20,3 +19,4 @@ vector-quantize-pytorch>=1.0.0
 # clip (via k-diffusion) imports pkg_resources; setuptools>=81 removed it
 setuptools>=77.0.3,<81.0.0
 descript-audio-codec>=1.0.0
+protobuf>=5.29.6,<7

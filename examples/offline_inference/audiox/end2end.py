@@ -6,8 +6,8 @@ End-to-end AudioX offline example: Hugging Face weight download, sample video as
 Weights are fetched from **Hugging Face** (same repos as ``HKUSTAudio/AudioX*``). Inference code is
 inlined under ``vllm_omni.diffusion.models.audiox`` (no separate AudioX clone).
 
-Install extra Python deps from the repo root: ``pip install -e ".[audiox]"`` then
-``pip install -r requirements/audiox-protobuf.txt`` (see ``README.md``).
+Install extra Python deps from the repo root: ``pip install -e ".[audiox]"``
+(see ``README.md``).
 Unless ``DIFFUSION_ATTENTION_BACKEND`` is set, this script defaults it to ``TORCH_SDPA`` so
 ``infer`` / ``run`` work when Flash / fa3-fwd rejects FP16 on the current GPU.
 
