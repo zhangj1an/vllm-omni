@@ -25,15 +25,27 @@ _SELF_ATTN_QKV = ".self_attn.to_qkv.weight"
 _CROSS_ATTN_KV = ".cross_attn.to_kv.weight"
 _MODEL_PRETRANSFORM_PREFIX_MAP = (
     ("_model.pretransform.model.", "_model.pretransform."),
-    (
-        "_model.conditioner.conditioners.audio_prompt.pretransform.model.",
-        "_model.conditioner.conditioners.audio_prompt.pretransform.",
-    ),
 )
 
 
 def _model_root_has_file(model_root: str, rel: str) -> bool:
     return os.path.isfile(os.path.join(os.path.abspath(model_root), rel))
+
+
+def _require_index_value(index: Mapping[str, Any], key: str, expected: Any) -> None:
+    got = index.get(key)
+    if got != expected:
+        raise ValueError(f"AudioX model_index.json must set {key}={expected!r}; got {got!r}.")
+
+
+def _require_required_files(root: str, rel_paths: Iterable[str]) -> None:
+    missing = [rel for rel in rel_paths if not _model_root_has_file(root, rel)]
+    if missing:
+        raise FileNotFoundError(
+            f"AudioX sharded layout missing required files under {root}: "
+            + ", ".join(repr(rel) for rel in missing)
+            + "."
+        )
 
 
 def load_audiox_model_index(model_root: str) -> dict[str, Any]:
@@ -56,24 +68,11 @@ def model_config_has_pretransform(model_config: dict[str, Any]) -> bool:
 def resolve_audiox_bundle_paths(model_root: str) -> tuple[str, dict[str, Any]]:
     root = os.path.abspath(model_root)
     idx = load_audiox_model_index(root)
-    if idx.get("weight_layout") != AUDIOX_WEIGHT_LAYOUT_SHARDED:
-        raise ValueError(
-            f"AudioX model_index.json must declare weight_layout={AUDIOX_WEIGHT_LAYOUT_SHARDED!r}; "
-            f"got {idx.get('weight_layout')!r}."
-        )
-    if idx.get("config") != "config.json":
-        raise ValueError("AudioX model_index.json must set 'config' to 'config.json'.")
-    if idx.get("transformer_weights") != TRANSFORMER_SAFETENSORS:
-        raise ValueError(f"AudioX model_index.json must set transformer_weights={TRANSFORMER_SAFETENSORS!r}.")
-    if idx.get("conditioners_weights") != CONDITIONERS_SAFETENSORS:
-        raise ValueError(f"AudioX model_index.json must set conditioners_weights={CONDITIONERS_SAFETENSORS!r}.")
-    if not _model_root_has_file(root, TRANSFORMER_SAFETENSORS) or not _model_root_has_file(
-        root, CONDITIONERS_SAFETENSORS
-    ):
-        raise FileNotFoundError(
-            f"AudioX sharded layout missing required files under {root}: "
-            f"{TRANSFORMER_SAFETENSORS!r}, {CONDITIONERS_SAFETENSORS!r}."
-        )
+    _require_index_value(idx, "weight_layout", AUDIOX_WEIGHT_LAYOUT_SHARDED)
+    _require_index_value(idx, "config", "config.json")
+    _require_index_value(idx, "transformer_weights", TRANSFORMER_SAFETENSORS)
+    _require_index_value(idx, "conditioners_weights", CONDITIONERS_SAFETENSORS)
+    _require_required_files(root, (TRANSFORMER_SAFETENSORS, CONDITIONERS_SAFETENSORS))
     return os.path.join(root, "config.json"), idx
 
 
@@ -258,14 +257,19 @@ def audiox_oobleck_ae_config_supported(cfg: dict[str, Any]) -> bool:
 def should_remap_audiox_vae_to_diffusers(model_config: dict[str, Any]) -> bool:
     m = model_config.get("model")
     if not isinstance(m, dict):
-        return False
+        raise ValueError("AudioX model config must contain a dict at key 'model'.")
     pt = m.get("pretransform")
     if not isinstance(pt, dict):
-        return False
+        raise ValueError("AudioX model config must contain a dict at model.pretransform.")
     ptc = pt.get("config")
     if not isinstance(ptc, dict):
-        return False
-    return audiox_oobleck_ae_config_supported(ptc)
+        raise ValueError("AudioX model config must contain a dict at model.pretransform.config.")
+    if not audiox_oobleck_ae_config_supported(ptc):
+        raise ValueError(
+            "AudioX inference-only weights remap requires Oobleck/VAE pretransform config "
+            "(oobleck encoder+decoder, vae bottleneck, use_snake=true, use_nearest_upsample=false)."
+        )
+    return True
 
 
 def _reshape_snake_param(tensor: torch.Tensor, *, target_ndim: int) -> torch.Tensor:
@@ -364,15 +368,14 @@ def remap_audiox_oobleck_weights_for_diffusers(
     model_config: dict[str, Any],
 ) -> list[tuple[str, torch.Tensor]]:
     d: dict[str, torch.Tensor] = dict(weights)
-    if not should_remap_audiox_vae_to_diffusers(model_config):
-        return list(d.items())
+    should_remap_audiox_vae_to_diffusers(model_config)
 
     inner_model = model_config["model"]
     pt = inner_model.get("pretransform") if isinstance(inner_model, dict) else None
     ptc = pt.get("config") if isinstance(pt, dict) else None
     strides = (ptc.get("encoder", {}).get("config") or {}).get("strides") if isinstance(ptc, dict) else None
     if not isinstance(strides, list) or not strides:
-        return list(d.items())
+        raise ValueError("AudioX pretransform encoder strides must be a non-empty list for Oobleck remap.")
     num_blocks = len(strides)
 
     out: dict[str, torch.Tensor] = {}
@@ -418,10 +421,11 @@ def remap_audiox_state_dict(
     remapped = remap_audiox_maf_weights(weights)
     normalized: list[tuple[str, torch.Tensor]] = []
     for k, v in remapped:
-        if k.startswith("_model.model.model."):
-            k = "_model.model." + k[len("_model.model.model.") :]
-        elif k.startswith("model.model."):
-            k = "model." + k[len("model.model.") :]
+        if k.startswith("_model.model.model.") or k.startswith("model.model."):
+            raise ValueError(
+                "Unsupported legacy AudioX key prefix detected during state-dict remap: "
+                f"{k!r}. Only strict inference layout keys are supported."
+            )
         normalized.append((k, v))
     remapped = normalized
     remapped = remap_audiox_oobleck_weights_for_diffusers(remapped, model_config=model_config)
@@ -472,6 +476,12 @@ def _contiguous_state_dict(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tenso
     return {k: v.contiguous() if isinstance(v, torch.Tensor) else v for k, v in sd.items()}
 
 
+def _save_safetensor_shard(output_dir: str, rel_path: str, state_dict: dict[str, torch.Tensor]) -> None:
+    shard_dir = os.path.join(output_dir, os.path.dirname(rel_path))
+    os.makedirs(shard_dir, exist_ok=True)
+    safetensors_save_file(_contiguous_state_dict(state_dict), os.path.join(output_dir, rel_path))
+
+
 def _resolve_ckpt_path(input_dir: str) -> str:
     ckpt = os.path.join(os.path.abspath(input_dir), "model.ckpt")
     if os.path.isfile(ckpt):
@@ -511,14 +521,10 @@ def convert_audiox_bundle(input_dir: str, output_dir: str, *, copy_config: bool 
     state = _load_checkpoint_state_dict(ckpt_path)
     transformer_sd, conditioners_sd, vae_sd = _partition_keys(state)
 
-    os.makedirs(os.path.join(output_dir, "transformer"), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, "conditioners"), exist_ok=True)
-
-    safetensors_save_file(_contiguous_state_dict(transformer_sd), os.path.join(output_dir, TRANSFORMER_SAFETENSORS))
-    safetensors_save_file(_contiguous_state_dict(conditioners_sd), os.path.join(output_dir, CONDITIONERS_SAFETENSORS))
+    _save_safetensor_shard(output_dir, TRANSFORMER_SAFETENSORS, transformer_sd)
+    _save_safetensor_shard(output_dir, CONDITIONERS_SAFETENSORS, conditioners_sd)
     if vae_sd:
-        os.makedirs(os.path.join(output_dir, "vae"), exist_ok=True)
-        safetensors_save_file(_contiguous_state_dict(vae_sd), os.path.join(output_dir, VAE_SAFETENSORS))
+        _save_safetensor_shard(output_dir, VAE_SAFETENSORS, vae_sd)
 
     index: dict[str, Any] = {
         "_class_name": "AudioXPipeline",

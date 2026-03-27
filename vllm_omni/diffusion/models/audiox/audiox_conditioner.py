@@ -213,14 +213,12 @@ class T5Conditioner(Conditioner):
         output_dim: int,
         t5_model_name: str = "t5-base",
         max_length: int = 128,
-        enable_grad: bool = False,
         project_out: bool = False,
     ):
         hidden_size = AutoConfig.from_pretrained(t5_model_name).hidden_size
         super().__init__(hidden_size, output_dim, project_out=project_out)
 
         self.max_length = max_length
-        self.enable_grad = enable_grad
 
         previous_level = logging.root.manager.disable
         logging.disable(logging.ERROR)
@@ -228,11 +226,9 @@ class T5Conditioner(Conditioner):
             warnings.simplefilter("ignore")
             try:
                 self.tokenizer = AutoTokenizer.from_pretrained(t5_model_name)
-                self.model = T5EncoderModel.from_pretrained(t5_model_name).requires_grad_(enable_grad)
+                self.model = T5EncoderModel.from_pretrained(t5_model_name).eval().requires_grad_(False)
             finally:
                 logging.disable(previous_level)
-
-        self.model.train(enable_grad)
 
     def forward(self, texts: list[str], device: torch.device | str) -> list[torch.Tensor]:
         self.model.to(device)
@@ -248,8 +244,7 @@ class T5Conditioner(Conditioner):
         input_ids = encoded["input_ids"].to(device)
         attention_mask = encoded["attention_mask"].to(device).to(torch.bool)
 
-        self.model.train(self.enable_grad)
-        with torch.set_grad_enabled(self.enable_grad):
+        with torch.inference_mode():
             embeddings = self.model(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
 
         embeddings = self.proj_out(embeddings)
@@ -267,30 +262,11 @@ class AudioAutoencoderConditionerv2(Conditioner):
         pretransform: tp.Any,
         output_dim: int,
         latent_seq_len: int = 237,
-        mask_ratio_start: float = 0,
-        mask_ratio_end: float = 0,
     ):
         super().__init__(pretransform.encoded_channels, output_dim)
         self.pretransform = pretransform
         self.latent_seq_len = latent_seq_len
-        self.mask_ratio_start = mask_ratio_start
-        self.mask_ratio_end = mask_ratio_end
         self.proj_features_128 = nn.Linear(in_features=self.latent_seq_len, out_features=128)
-
-    def mask_audio(self, audio: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size, _, seq_len = audio.shape
-        device = audio.device
-        mask_ratios = (
-            torch.rand(batch_size, device=device) * (self.mask_ratio_end - self.mask_ratio_start)
-            + self.mask_ratio_start
-        )
-
-        masked_audio = audio.clone()
-        for i in range(batch_size):
-            mask_len = int(seq_len * mask_ratios[i])
-            start_pos = torch.randint(0, seq_len - mask_len + 1, (1,), device=device)
-            masked_audio[i, :, start_pos : start_pos + mask_len] = 0
-        return masked_audio, mask_ratios
 
     def forward(
         self, audio: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor], device: torch.device | str
@@ -308,8 +284,6 @@ class AudioAutoencoderConditionerv2(Conditioner):
 
         audio = torch.cat(audio, dim=0)
         audio = set_audio_channels(audio, self.pretransform.io_channels)
-        if self.mask_ratio_start < self.mask_ratio_end:
-            audio, _ = self.mask_audio(audio)
 
         latents = _encode_latents_with_scaling(self.pretransform, audio)
         latents = self.proj_features_128(latents)
@@ -426,8 +400,14 @@ def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, t
         raise ValueError(f"Unsupported video_prompt config keys for AudioX inference: {sorted(video_extra)}")
     video_cfg = {k: video_cfg[k] for k in video_allowed if k in video_cfg}
 
+    text_allowed = {"output_dim", "t5_model_name", "max_length", "project_out"}
+    text_extra = set(text_cfg) - text_allowed
+    if text_extra:
+        raise ValueError(f"Unsupported text_prompt config keys for AudioX inference: {sorted(text_extra)}")
+    text_cfg = {k: text_cfg[k] for k in text_allowed if k in text_cfg}
+
     pretransform = _build_pretransform(audio_cfg)
-    audio_allowed = {"output_dim", "latent_seq_len", "mask_ratio_start", "mask_ratio_end"}
+    audio_allowed = {"output_dim", "latent_seq_len"}
     audio_extra = set(audio_cfg) - audio_allowed
     if audio_extra:
         raise ValueError(f"Unsupported audio_prompt config keys for AudioX inference: {sorted(audio_extra)}")

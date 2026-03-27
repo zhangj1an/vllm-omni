@@ -35,6 +35,11 @@ class AudioXVAE(OobleckVAEBase):
 
 
 def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], sample_rate: int):
+    allowed_keys = {"type", "config", "scale"}
+    extra_keys = set(pretransform_config) - allowed_keys
+    if extra_keys:
+        raise ValueError(f"Unsupported pretransform config keys for AudioX inference: {sorted(extra_keys)}")
+
     pretransform_type = pretransform_config["type"]
 
     if pretransform_type != "autoencoder":
@@ -60,7 +65,5 @@ def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], samp
         sample_rate=int(sample_rate),
     )
 
-    enable_grad = bool(pretransform_config["enable_grad"])
-    pretransform.enable_grad = enable_grad
-    pretransform.eval().requires_grad_(pretransform.enable_grad)
+    pretransform.eval().requires_grad_(False)
     return pretransform
