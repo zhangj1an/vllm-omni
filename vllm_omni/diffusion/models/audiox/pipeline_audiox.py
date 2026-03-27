@@ -394,7 +394,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
     Video: ``extra_args["video_path"]`` / ``["video_paths"]`` or ``multi_modal_data["video"]``.
 
     Reference audio: ``extra_args["audio_path"]`` / ``["audio_paths"]`` or
-    ``OmniDiffusionConfig.audiox_reference_audio_path`` (CLI ``--audiox-reference-audio-path``).
+    ``OmniDiffusionConfig.audiox_reference_audio_path`` provided via stage config.
 
     Requires ``od_config.model`` to be a **vLLM-Omni sharded** tree: ``config.json`` plus
     ``transformer/diffusion_pytorch_model.safetensors`` and
