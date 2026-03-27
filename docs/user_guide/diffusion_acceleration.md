@@ -89,6 +89,7 @@ The following table shows which models are currently supported by each accelerat
 | Model | Model Identifier | TeaCache | Cache-DiT | Ulysses-SP | Ring-Attention | CFG-Parallel | HSDP | VAE-Patch-Parallel |
 |-------|------------------|:--------:|:---------:|:----------:|:--------------:|:------------:|:----:|:------------------:|
 | **AudioX** | `HKUSTAudio/AudioX-MAF-MMDiT` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Stable-Audio-Open** | `stabilityai/stable-audio-open-1.0` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 ### Quantization
 
@@ -99,12 +100,6 @@ The following table shows which models are currently supported by each accelerat
 | **Z-Image** | `Tongyi-MAI/Z-Image-Turbo` | ✅ | ✅ |
 | **AudioX** | `HKUSTAudio/AudioX-MAF-MMDiT` | ❌ | ❌ |
 
-
-### AudioGen
-
-| Model                  | Model Identifier                         | TeaCache | Cache-DiT | Ulysses-SP | Ring-Attention | CFG-Parallel |
-|------------------------|------------------------------------------|:--------:|:---------:|:----------:|:--------------:|:------------:|
-| **Stable-Audio-Open**  | `stabilityai/stable-audio-open-1.0`      |    ✅    |           |            |                |              |
 
 ## Performance Benchmarks
 

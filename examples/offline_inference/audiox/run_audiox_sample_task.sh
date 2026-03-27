@@ -3,7 +3,7 @@
 #
 # Prerequisites:
 #   - vLLM-Omni with diffusion (AudioX code is vendored under vllm_omni)
-#   - pip install -r requirements/audiox.txt
+#   - pip install -e ".[audiox]"
 #   - ffmpeg (system) for video tasks / Pexels asset download in run
 #
 # Diffusion attention: defaults to TORCH_SDPA inside end2end.py if DIFFUSION_ATTENTION_BACKEND is unset

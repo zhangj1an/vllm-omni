@@ -27,8 +27,6 @@ python end2end.py run
 pip install -e ".[audiox]"
 ```
 
-Or: `pip install -r requirements/audiox.txt`.
-
 3. `ffmpeg` on `PATH` for sample video download and video tasks (`v2*`, `tv2*`).
 
 ## Commands

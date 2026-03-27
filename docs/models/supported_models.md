@@ -59,5 +59,3 @@ th {
 | `VoxtralTTSForConditionalGeneration` | Voxtral TTS | `mistralai/Voxtral-4B-TTS-2603` | ✅︎ | ✅︎ | | |
 
 ✅︎ indicates the model is supported on that backend. Empty cells mean not listed as supported on that backend.
-
-**AudioX (`AudioXPipeline`)** - install optional Python packages with `pip install -e ".[audiox]"` from the vLLM-Omni repo (see `requirements/audiox.txt`). The protobuf floor is included in the same dependency set for one-command install. The example under `examples/offline_inference/audiox/` defaults diffusion attention to **TORCH_SDPA** when unset so end-to-end runs succeed on GPUs where Flash/**fa3-fwd** rejects FP16.

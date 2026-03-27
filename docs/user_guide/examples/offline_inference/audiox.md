@@ -15,8 +15,6 @@ This folder runs [AudioX](https://github.com/ZeyueT/AudioX) through the `AudioXP
    pip install -e ".[audiox]"
    ```
 
-   Or: `pip install -r requirements/audiox.txt`.
-
    The protobuf floor is included directly in the AudioX dependency set because
    **descript-audio-codec** pulls **descript-audiotools** (old protobuf pin), while
    **vLLM 0.18+** needs `protobuf>=5.29.6`.
@@ -47,29 +45,29 @@ cd examples/offline_inference/audiox
 Equivalent without the shell helper:
 
 ```bash
-python end2end.py run --config configs/animal.json
+python end2end.py run
 ```
 
 ## `end2end.py`
 
 | Subcommand | Purpose |
 |------------|---------|
-| `run --config PATH` | Load JSON config; download weights/assets when configured and missing; run the task list. |
+| `run` | Use inlined default config in `end2end.py`; download weights/assets when missing; run task list. |
 | `infer …` | Single-task inference (CLI flags for task, prompt, video, steps, etc.). |
 
 Examples:
 
 ```bash
-# Config-driven batch (animal clip bundle)
-python end2end.py run --config configs/animal.json
+# Built-in sample batch
+python end2end.py run
 
-# Human clip, custom HF bundle directory (skips download)
+# Use custom local weight bundle (skip HF download)
 export AUDIOX_MODEL=/data/audiox_weights
-python end2end.py run --config configs/human.json
+python end2end.py run
 
 # Subset of tasks
 export AUDIOX_TASKS="t2a tv2a"
-python end2end.py run --config configs/animal.json
+python end2end.py run
 
 # Single-shot debugging
 python end2end.py infer --model ./audiox_weights --task t2a \
@@ -79,19 +77,19 @@ python end2end.py infer --model ./audiox_weights --task t2a \
 Skip downloads (you already have weights and videos):
 
 ```bash
-python end2end.py run --config configs/animal.json \
+python end2end.py run \
   --skip-download-weights --skip-download-assets
 ```
 
-## JSON config
+## Built-in run config
 
-See `configs/animal.json` and `configs/human.json`. Main sections:
+`end2end.py run` uses an inlined default config (`DEFAULT_RUN_CONFIG`) with:
 
-- **`weights`**: `hf_model` (`maf-mmdit`), `local_dir`, `full` (VAE + synchformer), `download_if_missing`, optional `repo_id` (full Hugging Face id).
+- **`weights`**: `hf_model` (`maf-mmdit`), `local_dir`, `full`, `download_if_missing`, optional `repo_id`.
 - **`assets`**: `local_dir`, `trim_seconds`, `download_if_missing`.
-- **`run`**: `clip` (`animal` \| `human`), optional `tasks` list, `output_root`, `num_inference_steps`, `seconds_total`, etc.
+- **`run`**: task list, `output_root`, `num_inference_steps`, `seconds_total`, `guidance_scale`, etc.
 
-Paths in the config are relative to this directory unless absolute.
+Use environment variables below to override these defaults without editing code.
 
 ## Environment variables
 
@@ -126,8 +124,8 @@ audiox_task_outputs/<model_slug>/<animal|human>/{t2a,t2m,v2a,v2m,tv2a,tv2m}.wav
 
 ## Troubleshooting
 
-- **Import errors** (`k_diffusion`, `dac`, `einops_exts`, …): install `.[audiox]` (or `requirements/audiox.txt`) as above.
-- **protobuf / vLLM errors** after installing AudioX deps: re-run `pip install -e ".[audiox]"` (or `pip install -r requirements/audiox.txt`) to enforce the protobuf floor.
+- **Import errors** (`k_diffusion`, `dac`, `einops_exts`, …): install `.[audiox]` as above.
+- **protobuf / vLLM errors** after installing AudioX deps: re-run `pip install -e ".[audiox]"` to enforce the protobuf floor.
 - **Flash attention / FP16 / dummy run failed**: use default `TORCH_SDPA` (already the default in `end2end.py`) or fix your Flash / fa3-fwd build for your GPU.
 - **Missing `transformer/config.json`**: re-run `end2end.py run` with downloads enabled, or add `transformer/config.json` containing `{}` under the weight bundle.
 - **`tv2a` / `tv2m`**: require a **non-empty** prompt. **`v2*` / `tv2*`**: require **`--video-path`** (or a config that supplies a video file).
@@ -139,14 +137,6 @@ Sample videos are fetched from [Pexels](https://www.pexels.com/license/) downloa
 
 ## Example materials
 
-??? abstract "configs/animal.json"
-    ``````json
-    --8<-- "examples/offline_inference/audiox/configs/animal.json"
-    ``````
-??? abstract "configs/human.json"
-    ``````json
-    --8<-- "examples/offline_inference/audiox/configs/human.json"
-    ``````
 ??? abstract "end2end.py"
     ``````py
     --8<-- "examples/offline_inference/audiox/end2end.py"
