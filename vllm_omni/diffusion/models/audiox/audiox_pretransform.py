@@ -3,8 +3,7 @@ from __future__ import annotations
 import typing as tp
 from typing import Any
 
-import torch
-from torch import nn
+from vllm_omni.diffusion.models.audio.oobleck_vae_base import OobleckVAEBase
 
 # Identity by default for HKUST AudioX; set ``"scale"`` in pretransform config if training used another factor.
 DEFAULT_AUDIOX_VAE_SCALING_FACTOR: float = 1.0
@@ -29,31 +28,8 @@ def ae_cfg_to_diffusers_init_kwargs(ae_cfg: dict[str, Any], sample_rate: int) ->
     }
 
 
-class AudioXVAE(nn.Module):
+class AudioXVAE(OobleckVAEBase):
     """Minimal AudioX adapter around Diffusers AutoencoderOobleck."""
-
-    def __init__(
-        self,
-        inner: nn.Module,
-        *,
-        scaling_factor: float = DEFAULT_AUDIOX_VAE_SCALING_FACTOR,
-        io_channels: int,
-        latent_dim: int,
-        sample_rate: int,
-    ) -> None:
-        super().__init__()
-        self.inner = inner
-        self.scaling_factor = float(scaling_factor)
-        self.io_channels = int(io_channels)
-        self.encoded_channels = int(latent_dim)
-        self.downsampling_ratio = int(inner.hop_length)
-        self.sample_rate = int(sample_rate)
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        return self.inner.encode(x, return_dict=True).latent_dist.sample()
-
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
-        return self.inner.decode(z, return_dict=True).sample
 
 
 def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], sample_rate: int):

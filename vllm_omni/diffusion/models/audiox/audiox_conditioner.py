@@ -257,10 +257,10 @@ class T5Conditioner(Conditioner):
 
 
 def _encode_latents_with_scaling(pretransform: tp.Any, audio: torch.Tensor) -> torch.Tensor:
+    if hasattr(pretransform, "encode_scaled"):
+        return pretransform.encode_scaled(audio)
     encoded = pretransform.encode(audio)
-    latents = encoded
-    scaling_factor = float(pretransform.scaling_factor)
-    return latents / scaling_factor
+    return encoded / float(pretransform.scaling_factor)
 
 
 class AudioAutoencoderConditionerv2(Conditioner):

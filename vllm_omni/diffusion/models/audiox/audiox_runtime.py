@@ -379,11 +379,14 @@ def generate_diffusion_cond(
         model.pretransform = model.pretransform.to(dtype=torch.float32).eval()
         with torch.cuda.amp.autocast(enabled=False):
             pt = model.pretransform
-            scale = getattr(getattr(pt, "config", None), "scaling_factor", None)
-            if scale is None:
-                scale = getattr(pt, "scaling_factor", 1.0)
-            sampled = sampled * float(scale)
-            sampled = model.pretransform.decode(sampled.to(dtype=torch.float32))
+            if hasattr(pt, "decode_scaled"):
+                sampled = pt.decode_scaled(sampled.to(dtype=torch.float32))
+            else:
+                scale = getattr(getattr(pt, "config", None), "scaling_factor", None)
+                if scale is None:
+                    scale = getattr(pt, "scaling_factor", 1.0)
+                sampled = sampled * float(scale)
+                sampled = model.pretransform.decode(sampled.to(dtype=torch.float32))
 
     return sampled
 

@@ -27,6 +27,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
+from vllm_omni.diffusion.models.audio.oobleck_vae_base import OobleckVAEBase
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
 from vllm_omni.diffusion.models.stable_audio.stable_audio_transformer import StableAudioDiTModel
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
@@ -114,12 +115,25 @@ class StableAudioPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfil
         ).to(self.device)
 
         # Load VAE (AutoencoderOobleck for audio)
-        self.vae = AutoencoderOobleck.from_pretrained(
+        vae_inner = AutoencoderOobleck.from_pretrained(
             model,
             subfolder="vae",
             torch_dtype=torch.float32,
             local_files_only=local_files_only,
         ).to(self.device)
+        self.vae = OobleckVAEBase(
+            vae_inner,
+            scaling_factor=float(getattr(vae_inner.config, "scaling_factor", 1.0)),
+            io_channels=int(getattr(vae_inner.config, "audio_channels", 2)),
+            latent_dim=int(
+                getattr(
+                    vae_inner.config,
+                    "latent_channels",
+                    getattr(vae_inner.config, "decoder_input_channels", 1),
+                )
+            ),
+            sample_rate=int(vae_inner.config.sampling_rate),
+        )
 
         # Load projection model (using diffusers implementation)
         self.projection_model = StableAudioProjectionModel.from_pretrained(
@@ -568,7 +582,7 @@ class StableAudioPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfil
         else:
             # Convert latents to VAE dtype (VAE may use float32)
             latents_for_vae = latents.to(dtype=self.vae.dtype)
-            audio = self.vae.decode(latents_for_vae).sample
+            audio = self.vae.decode(latents_for_vae)
 
         # Trim to requested length
         audio = audio[:, :, waveform_start:waveform_end]
