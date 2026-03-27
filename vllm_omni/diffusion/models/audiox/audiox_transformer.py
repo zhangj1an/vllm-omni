@@ -573,7 +573,7 @@ class ContinuousMMDiTTransformer(nn.Module):
             pos = torch.arange(self._latent_seq_len, dtype=torch.float32, device=self.device)
             freqs = 1.0 / (10000 ** (torch.arange(0, rope_dim, 2, dtype=torch.float32, device=self.device) / rope_dim))
             freqs *= base_freq
-            angles = torch.einsum("n,d->and", pos, freqs)
+            angles = torch.einsum("n,d->nd", pos, freqs)
             self.register_buffer("latent_cos", torch.cos(angles), persistent=False)
             self.register_buffer("latent_sin", torch.sin(angles), persistent=False)
 
