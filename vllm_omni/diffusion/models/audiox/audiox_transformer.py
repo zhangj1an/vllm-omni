@@ -12,7 +12,7 @@ from torch.nn import functional as F
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
-from vllm_omni.diffusion.attention.layer import Attention as DiffusionAttention
+from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
@@ -82,7 +82,7 @@ class AudioXMMDiTSelfAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.q_norm = RMSNorm(head_dim, eps=1e-6, has_weight=False)
         self.k_norm = RMSNorm(head_dim, eps=1e-6, has_weight=False)
-        self._diffusion_attn = DiffusionAttention(
+        self._diffusion_attn = Attention(
             num_heads=nheads,
             head_size=head_dim,
             softmax_scale=head_dim**-0.5,
@@ -136,7 +136,7 @@ class AudioXMMDiTCrossAttention(nn.Module):
         self.to_v = ReplicatedLinear(dim, dim, bias=False, disable_tp=True)
         self.q_norm = RMSNorm(head_dim, eps=1e-6, has_weight=False)
         self.k_norm = RMSNorm(head_dim, eps=1e-6, has_weight=False)
-        self._diffusion_attn = DiffusionAttention(
+        self._diffusion_attn = Attention(
             num_heads=nheads,
             head_size=head_dim,
             softmax_scale=head_dim**-0.5,
