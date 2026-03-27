@@ -14,9 +14,9 @@ Unless ``DIFFUSION_ATTENTION_BACKEND`` is set, this script defaults it to ``TORC
 Typical flow::
 
     cd examples/offline_inference/audiox
-    python end2end.py run --config configs/animal.json
+    python end2end.py run
 
-Or use ``./run_audiox_sample_task.sh`` (sets ``PYTHONPATH``, picks ``configs/<clip>.json``).
+Or use ``./run_audiox_sample_task.sh`` (sets ``PYTHONPATH`` and runs the same command).
 
 Single-task debugging::
 
@@ -26,7 +26,6 @@ Single-task debugging::
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import time
@@ -46,30 +45,46 @@ REPO_BY_MODEL: dict[str, str] = {
 
 # --- Sample videos (Pexels); see https://www.pexels.com/license/ ---
 PEXELS_SAMPLE_ANIMAL_URL = "https://www.pexels.com/download/video/5871756/"
-PEXELS_SAMPLE_HUMAN_URL = "https://www.pexels.com/download/video/6299180/"
 _FFMPEG_PEXELS_HEADERS = (
     "Referer: https://www.pexels.com/\r\n"
     "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36\r\n"
 )
 
-# --- Prompts for bundled animal/human clip runs (also used when env tasks are unset) ---
-SAMPLE_PROMPTS_BY_CLIP: dict[str, dict[str, str]] = {
-    "animal": {
-        "t2a": "Soft indoor room tone, faint fabric rustle, and gentle cat breathing or purr in a quiet home",
-        "t2m": "Playful light acoustic or piano motif for an intimate close-up of a curious tabby cat indoors",
-        "v2a": "",
-        "v2m": "",
-        "tv2a": "Quiet domestic ambience—upholstery, subtle shifts, and close-up foley matching a tabby cat on soft grey fabric",
-        "tv2m": "Warm whimsical instrumental for a cute tabby cat close-up with playful upside-down framing",
+# --- Prompts for bundled animal clip runs ---
+SAMPLE_PROMPTS: dict[str, str] = {
+    "t2a": "Soft indoor room tone, faint fabric rustle, and gentle cat breathing or purr in a quiet home",
+    "t2m": "Playful light acoustic or piano motif for an intimate close-up of a curious tabby cat indoors",
+    "v2a": "",
+    "v2m": "",
+    "tv2a": "Quiet domestic ambience—upholstery, subtle shifts, and close-up foley matching a tabby cat on soft grey fabric",
+    "tv2m": "Warm whimsical instrumental for a cute tabby cat close-up with playful upside-down framing",
+}
+
+# --- Inlined default run config (previously configs/animal.json) ---
+DEFAULT_RUN_CONFIG: dict[str, Any] = {
+    "weights": {
+        "hf_model": DEFAULT_HF_MODEL_KEY,
+        "local_dir": "audiox_weights",
+        "full": True,
+        "download_if_missing": True,
     },
-    "human": {
-        "t2a": "Park ambience: birds, breeze in trees, distant voices, and open-air footsteps on a sunny afternoon",
-        "t2m": "Uplifting acoustic or light orchestral bed for a happy child smiling outdoors in golden-hour light",
-        "v2a": "",
-        "v2m": "",
-        "tv2a": "Sunny park soundscape—birds, rustling leaves, and soft background bustle matching grass, trees, and paths",
-        "tv2m": "Bright family-friendly score for a joyful child at the camera in a sunlit public park",
+    "assets": {
+        "local_dir": "assets",
+        "trim_seconds": 5,
+        "download_if_missing": True,
+    },
+    "run": {
+        "tasks": None,
+        "output_root": "audiox_task_outputs",
+        "model_slug": None,
+        "num_inference_steps": 50,
+        "seconds_total": 2.0,
+        "guidance_scale": 6.0,
+        "seed": 42,
+        "sample_rate": 48000,
+        "enable_cpu_offload": False,
+        "enable_diffusion_pipeline_profiler": False,
     },
 }
 
@@ -157,7 +172,6 @@ def download_sample_assets(output_dir: Path, *, trim_seconds: int) -> None:
     """Stream Pexels clips via ffmpeg and trim to ``trim_seconds``."""
     pairs = [
         (PEXELS_SAMPLE_ANIMAL_URL, output_dir / "sample_animal.mp4"),
-        (PEXELS_SAMPLE_HUMAN_URL, output_dir / "sample_human.mp4"),
     ]
     for url, dest in pairs:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -180,11 +194,6 @@ def download_sample_assets(output_dir: Path, *, trim_seconds: int) -> None:
             print(proc.stderr or proc.stdout, end="")
             proc.check_returncode()
         print(f"Saved {dest} ({dest.stat().st_size / (1024 * 1024):.2f} MB)")
-
-
-def load_run_config(path: Path) -> dict[str, Any]:
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
 
 
 def _save_audio(audio_data: np.ndarray, output_path: str, sample_rate: int) -> None:
@@ -340,10 +349,7 @@ def _parse_requested_tasks_from_env() -> list[str] | None:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    cfg_path = Path(args.config).resolve()
-    if not cfg_path.is_file():
-        raise SystemExit(f"Config not found: {cfg_path}")
-    cfg = load_run_config(cfg_path)
+    cfg = DEFAULT_RUN_CONFIG
 
     w = cfg.get("weights") or {}
     a = cfg.get("assets") or {}
@@ -374,11 +380,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     trim_sec = int(a.get("trim_seconds", 5))
     dl_a = bool(a.get("download_if_missing", True)) and not args.skip_download_assets
 
-    clip = os.environ.get("AUDIOX_CLIP", r.get("clip", "animal")).strip().lower()
-    if clip not in SAMPLE_PROMPTS_BY_CLIP:
-        raise SystemExit(f"clip must be 'animal' or 'human', got: {clip}")
-
-    bundle = SAMPLE_PROMPTS_BY_CLIP[clip]
+    clip = "animal"
     video_path = os.environ.get("AUDIOX_VIDEO", "").strip()
     if not video_path:
         video_path = str(assets_dir / f"sample_{clip}.mp4")
@@ -465,7 +467,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     for task in run_tasks:
         print(f"=== {task} ===", flush=True)
-        prompt = bundle.get(task, "")
+        prompt = SAMPLE_PROMPTS.get(task, "")
         vid_arg = video_path if task in VIDEO_TASKS else ""
         run_single_inference(
             model_dir=str(weights_dir),
@@ -511,8 +513,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="AudioX offline end-to-end (HF weights + Omni).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pr = sub.add_parser("run", help="Load JSON config: download assets/weights if needed, run tasks.")
-    pr.add_argument("--config", type=str, required=True, help="Path to configs/*.json")
+    pr = sub.add_parser("run", help="Run inlined animal sample config; download assets/weights if needed.")
     pr.add_argument("--skip-download-weights", action="store_true")
     pr.add_argument("--skip-download-assets", action="store_true")
     pr.set_defaults(func=cmd_run)

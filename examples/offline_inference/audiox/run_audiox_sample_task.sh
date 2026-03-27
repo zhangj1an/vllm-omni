@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
-# AudioX offline sample: set PYTHONPATH, pick Python, run end2end.py with a JSON config.
+# AudioX offline sample: set PYTHONPATH, pick Python, run end2end.py.
 #
 # Prerequisites:
 #   - vLLM-Omni with diffusion (AudioX code is vendored under vllm_omni)
 #   - pip install -r requirements/audiox.txt
-#   - ffmpeg (system) for video tasks / Pexels asset download in run --config
+#   - ffmpeg (system) for video tasks / Pexels asset download in run
 #
 # Diffusion attention: defaults to TORCH_SDPA inside end2end.py if DIFFUSION_ATTENTION_BACKEND is unset
 # (fa3-fwd / Flash may error on FP16 on some GPUs). Override: export DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN
 #
 # Usage:
 #   ./run_audiox_sample_task.sh
-#
-# Config selection (default: configs/<AUDIOX_CLIP>.json):
-#   export AUDIOX_CLIP=animal    # or human
-#   export AUDIOX_CONFIG="$PWD/configs/human.json"   # overrides clip-based path
 #
 # Weights (optional overrides):
 #   export AUDIOX_MODEL=/path/to/bundle     # skip HF download; use this directory
@@ -42,11 +38,4 @@ else
   PYTHON="python3"
 fi
 
-CLIP="${AUDIOX_CLIP:-animal}"
-CONFIG="${AUDIOX_CONFIG:-$ROOT/configs/${CLIP}.json}"
-if [[ ! -f "$CONFIG" ]]; then
-  echo "Config not found: $CONFIG (set AUDIOX_CONFIG or AUDIOX_CLIP=animal|human)" >&2
-  exit 1
-fi
-
-exec "$PYTHON" "$ROOT/end2end.py" run --config "$CONFIG"
+exec "$PYTHON" "$ROOT/end2end.py" run
