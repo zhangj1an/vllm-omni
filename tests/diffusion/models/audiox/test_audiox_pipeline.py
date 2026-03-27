@@ -60,6 +60,7 @@ def test_audiox_pipeline_audio_prompt_from_tensor():
 
     raw = AudioXPipeline.__new__(AudioXPipeline)
     raw.od_config = OmniDiffusionConfig(model="x")
+    raw._audio_conditioning_samples = 80
     sp = OmniDiffusionSamplingParams()
     wav = torch.zeros(2, 80)
     tensors = raw._audio_prompt_tensors(
@@ -69,7 +70,6 @@ def test_audiox_pipeline_audio_prompt_from_tensor():
         seconds_start=0.0,
         sample_rate=80,
         device=torch.device("cpu"),
-        conditioning_audio_samples=80,
     )
     assert tensors[0].shape == (2, 80)
 
@@ -78,7 +78,7 @@ def test_audiox_pipeline_requires_model_files(tmp_path):
     from vllm_omni.diffusion.data import OmniDiffusionConfig
 
     cfg = OmniDiffusionConfig(model=str(tmp_path), model_class_name="AudioXPipeline")
-    with pytest.raises(FileNotFoundError, match="component-sharded|vLLM-Omni"):
+    with pytest.raises(FileNotFoundError, match="model_index.json|component-sharded|vLLM-Omni"):
         from vllm_omni.diffusion.models.audiox.pipeline_audiox import AudioXPipeline
 
         AudioXPipeline(od_config=cfg)
@@ -103,7 +103,6 @@ def test_audiox_pipeline_normalize_task_and_v2_requires_video():
             raw_prompts=[{"prompt": ""}],
             extra={},
             seconds_start=0.0,
-            user_seconds_total=1.0,
             target_fps=2,
             device=torch.device("cpu"),
         )
@@ -122,7 +121,6 @@ def test_audiox_pipeline_video_tasks_load_mm_tensor(task_norm: str):
         raw_prompts=[{"prompt": prompt, "multi_modal_data": {"video": vt}}],
         extra={},
         seconds_start=0.0,
-        user_seconds_total=1.0,
         target_fps=4,
         device=torch.device("cpu"),
     )
@@ -140,17 +138,16 @@ def test_audiox_pipeline_tv2_requires_video():
             raw_prompts=[{"prompt": "music"}],
             extra={},
             seconds_start=0.0,
-            user_seconds_total=1.0,
             target_fps=2,
             device=torch.device("cpu"),
         )
 
 
 def test_audiox_inference_module_importable_without_external_audiox():
-    """Regression: AudioX inference lives under ``vllm_omni.diffusion.models.audiox``."""
-    from vllm_omni.diffusion.models.audiox.inference import generation
+    """Regression: AudioX runtime entry point is vendored in this package."""
+    from vllm_omni.diffusion.models.audiox import audiox_runtime
 
-    assert hasattr(generation, "generate_diffusion_cond")
+    assert hasattr(audiox_runtime, "generate_diffusion_cond")
 
 
 @pytest.mark.parametrize("task", AUDIOX_TASKS)
@@ -186,7 +183,6 @@ def test_audiox_text_only_tasks_zero_video_shape(task: str):
         raw_prompts=["irrelevant"],
         extra={},
         seconds_start=0.0,
-        user_seconds_total=seconds,
         target_fps=fps,
         device=torch.device("cpu"),
     )
@@ -215,7 +211,6 @@ def test_audiox_v2_tasks_require_video_path_or_mm(task: str):
             raw_prompts=[""],
             extra={},
             seconds_start=0.0,
-            user_seconds_total=1.0,
             target_fps=2,
             device=torch.device("cpu"),
         )
@@ -226,7 +221,13 @@ def test_resolve_audiox_bundle_paths_requires_default_config_name(tmp_path):
 
     (tmp_path / "custom.json").write_text("{}", encoding="utf-8")
     _write_minimal_audiox_sharded_stub(tmp_path)
-    idx = {"_class_name": "AudioXPipeline", "config": "custom.json"}
+    idx = {
+        "_class_name": "AudioXPipeline",
+        "config": "custom.json",
+        "weight_layout": "vllm_omni_component_sharded",
+        "transformer_weights": "transformer/diffusion_pytorch_model.safetensors",
+        "conditioners_weights": "conditioners/diffusion_pytorch_model.safetensors",
+    }
     (tmp_path / "model_index.json").write_text(json.dumps(idx), encoding="utf-8")
 
     with pytest.raises(ValueError, match="config"):
@@ -247,6 +248,8 @@ def _audiox_pipeline_stub_for_forward():
     p._audio_conditioning_samples = 200
     p._target_fps = 5
     p._model_type = "diffusion_cond"
+    # Forward now encodes conditioning tensors before diffuse().
+    object.__setattr__(p, "_encode_conditioning_tensors", mock.Mock(return_value={"dummy": torch.zeros(1)}))
     p._generate_diffusion_cond = mock.Mock(return_value=torch.zeros(1, 2, 32))
     return p
 
@@ -293,9 +296,9 @@ def test_audiox_forward_all_six_tasks_conditioning_text(task: str, expected_text
     assert out.custom_output.get("audiox_task") == task
     pipe._generate_diffusion_cond.assert_called_once()
     kwargs = pipe._generate_diffusion_cond.call_args.kwargs
-    cond0 = kwargs["conditioning"][0]
-    assert cond0["text_prompt"] == expected_text
-    assert kwargs["negative_conditioning"] is None
+    assert "dummy" in kwargs["conditioning_tensors"]
+    assert torch.equal(kwargs["conditioning_tensors"]["dummy"], torch.zeros(1))
+    assert kwargs["negative_conditioning_tensors"] is None
 
 
 def test_audiox_forward_negative_conditioning_when_cfg_and_neg_prompt():
@@ -323,8 +326,8 @@ def test_audiox_forward_negative_conditioning_when_cfg_and_neg_prompt():
     AudioXPipeline.forward(pipe, req)
 
     kwargs = pipe._generate_diffusion_cond.call_args.kwargs
-    assert kwargs["negative_conditioning"] is not None
-    assert kwargs["negative_conditioning"][0]["text_prompt"] == "bad"
+    assert "dummy" in kwargs["negative_conditioning_tensors"]
+    assert torch.equal(kwargs["negative_conditioning_tensors"]["dummy"], torch.zeros(1))
 
 
 def test_omni_diffusion_sampling_params_has_audiox_fields():

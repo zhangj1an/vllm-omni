@@ -3,12 +3,12 @@
 
 import torch
 
-from vllm_omni.diffusion.models.audiox.pipeline_audiox import tensor_to_reference_audio
+from vllm_omni.diffusion.models.audiox.pipeline_audiox import prepare_audio_reference
 
 
-def test_tensor_to_reference_audio_stereo_pad_trim():
+def test_prepare_audio_reference_stereo_pad_trim():
     x = torch.randn(2, 100)
-    out = tensor_to_reference_audio(
+    out = prepare_audio_reference(
         x,
         model_sample_rate=50,
         seconds_start=0.0,
