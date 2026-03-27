@@ -38,7 +38,6 @@ def test_diffusion_registry_loads_audiox_pipeline_class():
 def test_audiox_pipeline_audio_source_resolution_order():
     from vllm_omni.diffusion.data import OmniDiffusionConfig
     from vllm_omni.diffusion.models.audiox.pipeline_audiox import AudioXPipeline
-    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     raw = AudioXPipeline.__new__(AudioXPipeline)
     raw.od_config = OmniDiffusionConfig(model="x", audiox_reference_audio_path="/default.wav")
@@ -52,7 +51,6 @@ def test_audiox_pipeline_audio_source_resolution_order():
 def test_audiox_pipeline_audio_prompt_from_tensor():
     from vllm_omni.diffusion.data import OmniDiffusionConfig
     from vllm_omni.diffusion.models.audiox.pipeline_audiox import AudioXPipeline
-    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     raw = AudioXPipeline.__new__(AudioXPipeline)
     raw.od_config = OmniDiffusionConfig(model="x")

@@ -109,5 +109,3 @@ def test_prepare_video_reference_png_tiles_to_target_frames(tmp_path: Path):
     out = prepare_video_reference(str(png), seek_time=0.0, duration=1.5, target_fps=4)
     assert out.shape == (6, 3, 224, 224)
     assert out.dtype == torch.float32
-
-

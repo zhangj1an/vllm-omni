@@ -46,7 +46,7 @@ REPO_BY_MODEL: dict[str, str] = {
 # --- Sample videos (Pexels); see https://www.pexels.com/license/ ---
 PEXELS_SAMPLE_ANIMAL_URL = "https://www.pexels.com/download/video/5871756/"
 _FFMPEG_PEXELS_HEADERS = (
-    "Referer: https://www.pexels.com/\r\n"
+    "Referrer: https://www.pexels.com/\r\n"
     "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36\r\n"
 )

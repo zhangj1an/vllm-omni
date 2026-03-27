@@ -23,9 +23,7 @@ VAE_SAFETENSORS = "vae/diffusion_pytorch_model.safetensors"
 
 _SELF_ATTN_QKV = ".self_attn.to_qkv.weight"
 _CROSS_ATTN_KV = ".cross_attn.to_kv.weight"
-_MODEL_PRETRANSFORM_PREFIX_MAP = (
-    ("_model.pretransform.model.", "_model.pretransform."),
-)
+_MODEL_PRETRANSFORM_PREFIX_MAP = (("_model.pretransform.model.", "_model.pretransform."),)
 
 
 def _model_root_has_file(model_root: str, rel: str) -> bool:
