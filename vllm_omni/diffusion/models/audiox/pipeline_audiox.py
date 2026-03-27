@@ -4,18 +4,18 @@
 
 from __future__ import annotations
 
-import math
 import os
 from collections.abc import Iterable
 from typing import Any, ClassVar
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.media.audio import prepare_audio_reference
+from vllm_omni.diffusion.media.video import prepare_video_reference
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
     encode_audiox_conditioning_tensors,
 )
@@ -35,141 +35,6 @@ _TEXT_VIDEO_TASKS = frozenset({"tv2a", "tv2m"})
 _VIDEO_CONDITIONED_TASKS = _VIDEO_ONLY_TASKS | _TEXT_VIDEO_TASKS
 
 logger = init_logger(__name__)
-
-
-def _to_2ch_audio(x: torch.Tensor) -> torch.Tensor:
-    x = x.float()
-    if x.dim() == 1:
-        x = x.unsqueeze(0)
-    if x.shape[0] == 1:
-        x = x.repeat(2, 1)
-    elif x.shape[0] > 2:
-        x = x[:2]
-    return x
-
-
-def _crop_or_pad_1d(x: torch.Tensor, start: int, target_len: int) -> torch.Tensor:
-    x = x[:, start : start + target_len]
-    cur = x.shape[1]
-    if cur < target_len:
-        x = F.pad(x, (target_len - cur, 0))
-    else:
-        x = x[:, :target_len]
-    return x
-
-
-def prepare_audio_reference(
-    source: Any,
-    *,
-    model_sample_rate: int,
-    seconds_start: float,
-    seconds_total: float,
-    device: torch.device,
-) -> torch.Tensor:
-    target_len = int(model_sample_rate * seconds_total)
-    start = int(model_sample_rate * seconds_start)
-
-    if isinstance(source, str):
-        import torchaudio
-
-        wav, sr = torchaudio.load(source)
-        if sr != model_sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, model_sample_rate)
-    elif isinstance(source, torch.Tensor):
-        wav = source
-    else:
-        try:
-            import numpy as np
-
-            if isinstance(source, np.ndarray):
-                wav = torch.from_numpy(source)
-            else:
-                raise TypeError(f"Unsupported audio source type: {type(source)!r}")
-        except ImportError:
-            raise TypeError(f"Unsupported audio source type: {type(source)!r}") from None
-
-    wav = _to_2ch_audio(wav)
-    wav = _crop_or_pad_1d(wav, start, target_len)
-    return wav.to(device=device, dtype=torch.float32)
-
-
-def _normalize_video_tensor(frames: torch.Tensor, size: int = 224) -> torch.Tensor:
-    if frames.dim() != 4:
-        raise ValueError(f"Expected [T, C, H, W], got {tuple(frames.shape)}")
-
-    frames = frames.float()
-    if frames.max() > 1.5:
-        frames = frames / 255.0
-
-    if frames.shape[-2:] != (size, size):
-        frames = F.interpolate(frames, size=(size, size), mode="bicubic", align_corners=False)
-    return frames
-
-
-def _adjust_video_duration(frames: torch.Tensor, duration: float, target_fps: int) -> torch.Tensor:
-    target_t = int(duration * target_fps)
-    cur_t = frames.shape[0]
-
-    if cur_t > target_t:
-        return frames[:target_t]
-    if cur_t < target_t:
-        last = frames[-1:].repeat(target_t - cur_t, 1, 1, 1)
-        return torch.cat([frames, last], dim=0)
-    return frames
-
-
-def prepare_video_reference(
-    source: Any,
-    *,
-    duration: float,
-    target_fps: int,
-    seek_time: float = 0.0,
-) -> torch.Tensor:
-    if isinstance(source, str):
-        ext = os.path.splitext(source)[1].lower()
-
-        if ext in {".jpg", ".jpeg", ".png"}:
-            import numpy as np
-            from PIL import Image
-
-            img = Image.open(source).convert("RGB")
-            frame = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0)
-            frames = frame
-        else:
-            from decord import VideoReader
-            from decord import cpu as decord_cpu
-
-            vr = VideoReader(source, ctx=decord_cpu(0))
-            fps = float(vr.get_avg_fps())
-            step = max(1, int(math.ceil(fps / target_fps)))
-            start = int(seek_time * fps)
-            if duration > 0:
-                target_t = int(duration * target_fps)
-                end = min(len(vr), start + target_t * step)
-                frame_ids = list(range(start, end, step))
-            else:
-                frame_ids = list(range(start, len(vr), step))
-            frames = torch.from_numpy(vr.get_batch(frame_ids).asnumpy()).permute(0, 3, 1, 2)
-    elif isinstance(source, torch.Tensor):
-        frames = source
-    else:
-        try:
-            import numpy as np
-
-            if isinstance(source, np.ndarray):
-                frames = torch.from_numpy(source)
-            else:
-                raise TypeError(f"Unsupported video source type: {type(source)!r}")
-        except ImportError:
-            raise TypeError(f"Unsupported video source type: {type(source)!r}") from None
-
-    if frames.dim() == 4 and frames.shape[-1] == 3:
-        frames = frames.permute(0, 3, 1, 2)
-
-    frames = _normalize_video_tensor(frames, size=224)
-    if duration > 0:
-        frames = _adjust_video_duration(frames, duration, target_fps)
-    return frames
 
 
 def get_audiox_post_process_func(_od_config: OmniDiffusionConfig):
