@@ -168,7 +168,7 @@ def test_audiox_text_only_tasks_zero_video_shape(task: str):
     from vllm_omni.diffusion.models.audiox.pipeline_audiox import AudioXPipeline
 
     raw = AudioXPipeline.__new__(AudioXPipeline)
-    fps, seconds = 5, 2.0
+    fps = 5
     tensors = AudioXPipeline._video_feature_tensors(
         raw,
         task_norm=task,

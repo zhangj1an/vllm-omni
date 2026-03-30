@@ -9,8 +9,8 @@ from collections.abc import Iterable
 from typing import Any, ClassVar
 
 import numpy as np
-from scipy.signal import resample_poly
 import torch
+from scipy.signal import resample_poly
 from torch import nn
 from vllm.logger import init_logger
 

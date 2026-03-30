@@ -456,11 +456,7 @@ def filter_unused_keys(weights: Iterable[tuple[str, torch.Tensor]]) -> list[tupl
     for k, v in weights:
         # Upstream checkpoints can include decoder-only postprocess conv weights
         # that are not present in this inference pipeline.
-        if (
-            "postprocess_conv" in k
-            or "preprocess_conv" in k
-            or "timestep_features" in k
-        ):
+        if "postprocess_conv" in k or "preprocess_conv" in k or "timestep_features" in k:
             continue
         filtered.append((k, v))
     return filtered
