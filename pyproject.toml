@@ -61,7 +61,9 @@ demo = [
     "gradio>=6.7.0",
 ]
 
-# AudioXPipeline (optional): protobuf floor is included here so one-command install works.
+# AudioXPipeline (optional): protobuf floor matches vLLM 0.18+.
+# descript-audio-codec is omitted: it pins descript-audiotools (protobuf<3.20), which
+# conflicts with vLLM; the vendored AudioX stack does not import it.
 audiox = [
     "decord>=0.6.0",
     "k-diffusion>=0.1.1.post1",
@@ -69,7 +71,6 @@ audiox = [
     "alias-free-torch>=0.0.6",
     "vector-quantize-pytorch>=1.0.0",
     "setuptools>=77.0.3,<81.0.0",
-    "descript-audio-codec>=1.0.0",
     "protobuf>=5.29.6,<7",
 ]
 

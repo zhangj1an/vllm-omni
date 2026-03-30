@@ -15,10 +15,6 @@ This folder runs [AudioX](https://github.com/ZeyueT/AudioX) through the `AudioXP
    pip install -e ".[audiox]"
    ```
 
-   The protobuf floor is included directly in the AudioX dependency set because
-   **descript-audio-codec** pulls **descript-audiotools** (old protobuf pin), while
-   **vLLM 0.18+** needs `protobuf>=5.29.6`.
-
 3. **Diffusion attention backend** — `end2end.py` defaults to `DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA` if unset, so a plain `python end2end.py …` works on GPUs where **fa3-fwd** / Flash reports errors such as *“This flash attention build does not support FP16”*. To force Flash when your stack supports it:
 
    ```bash
