@@ -223,6 +223,7 @@ datasets/
 *.csv
 *.json
 !apps/ComfyUI-vLLM-Omni/example_workflows/*.json
+!examples/offline_inference/audiox/configs/*.json
 *.jsonl
 *.parquet
 

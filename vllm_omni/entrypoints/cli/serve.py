@@ -192,6 +192,16 @@ class OmniServeCommand(CLISubcommand):
             help="Override the diffusion pipeline class name (e.g. LTX2ImageToVideoPipeline).",
         )
         omni_config_group.add_argument(
+            "--audiox-reference-audio-path",
+            dest="audiox_reference_audio_path",
+            type=str,
+            default=None,
+            help=(
+                "Optional default path for AudioX reference-audio conditioning (e.g. WAV). "
+                "Override per request via sampling_params.audiox_audio_path or extra_args['audio_path']."
+            ),
+        )
+        omni_config_group.add_argument(
             "--usp",
             "--ulysses-degree",
             dest="ulysses_degree",

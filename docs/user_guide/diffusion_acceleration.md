@@ -84,6 +84,12 @@ The following table shows which models are currently supported by each accelerat
 | **LTX-2** | `Lightricks/LTX-2` | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
 | **DreamID-Omni** | `XuGuo699/DreamID-Omni` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 
+### AudioGen
+
+| Model | Model Identifier | TeaCache | Cache-DiT | Ulysses-SP | Ring-Attention | CFG-Parallel | HSDP | VAE-Patch-Parallel |
+|-------|------------------|:--------:|:---------:|:----------:|:--------------:|:------------:|:----:|:------------------:|
+| **AudioX** | `HKUSTAudio/AudioX-MAF-MMDiT` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
 ### Quantization
 
 | Model | Model Identifier | FP8 | Int8 |
@@ -91,6 +97,7 @@ The following table shows which models are currently supported by each accelerat
 | **Qwen-Image** | `Qwen/Qwen-Image` | ✅ | ✅ |
 | **Qwen-Image-2512** | `Qwen/Qwen-Image-2512` | ✅ | ✅ |
 | **Z-Image** | `Tongyi-MAI/Z-Image-Turbo` | ✅ | ✅ |
+| **AudioX** | `HKUSTAudio/AudioX-MAF-MMDiT` | ❌ | ❌ |
 
 
 ### AudioGen

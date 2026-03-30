@@ -91,24 +91,22 @@ def assert_image_diffusion_response(
             }
         }
     """
+    extra_body = request_config.get("extra_body", {})
+
+    num_outputs_per_prompt = extra_body.get("num_outputs_per_prompt", 1)
+
     assert response.images is not None, "Image response is None"
     assert len(response.images) > 0, "No images in response"
-
-    extra_body = request_config.get("extra_body") or {}
-
-    num_outputs_per_prompt = extra_body.get("num_outputs_per_prompt")
-    if num_outputs_per_prompt is not None:
-        assert len(response.images) == num_outputs_per_prompt, (
-            f"Expected {num_outputs_per_prompt} images, got {len(response.images)}"
-        )
+    assert len(response.images) == num_outputs_per_prompt, (
+        f"Expected {num_outputs_per_prompt} images, got {len(response.images)}"
+    )
 
     if run_level == "advanced_model":
-        width = extra_body.get("width")
-        height = extra_body.get("height")
+        expected_width = extra_body["width"]  # intentionally raise KeyError if missing
+        expected_height = extra_body["height"]  # intentionally raise KeyError if missing
 
-        if width is not None or height is not None:
-            for img in response.images:
-                assert_image_valid(img, width=width, height=height)
+        for img in response.images:
+            assert_image_valid(img, width=expected_width, height=expected_height)
 
 
 def assert_video_diffusion_response(

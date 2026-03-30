@@ -66,6 +66,12 @@ The following table shows which models are currently supported by parallelism me
 | **Wan2.2** | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **LTX-2** | `Lightricks/LTX-2` | ✅ | ✅ | ✅ | ❌ | ❌ |
 
+### AudioGen
+
+| Model | Model Identifier | Ulysses-SP | Ring-Attention | Tensor-Parallel | HSDP | VAE-Patch-Parallel |
+|-------|------------------|:----------:|:--------------:|:---------------:|:----:|:------------------:|
+| **AudioX** | `HKUSTAudio/AudioX-MAF-MMDiT` | ❌ | ❌ | ❌ | ❌ | ❌ |
+
 ### Tensor Parallelism
 
 Tensor parallelism splits model parameters across GPUs. In vLLM-Omni, tensor parallelism is configured via `DiffusionParallelConfig.tensor_parallel_size`.

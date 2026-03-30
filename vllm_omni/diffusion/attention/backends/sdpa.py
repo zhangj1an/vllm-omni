@@ -86,6 +86,8 @@ class SDPAImpl(AttentionImpl):
         prefix: str = "",
         **extra_impl_args,
     ) -> None:
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.causal = causal
         self.softmax_scale = softmax_scale
 
@@ -102,6 +104,13 @@ class SDPAImpl(AttentionImpl):
         attention_mask = None
         if attn_metadata:
             attention_mask = _maybe_reshape_attn_mask(query, key, attn_metadata.attn_mask, mask_mode=mask_mode)
+
+        # GQA: SDPA needs matching Q/K/V head counts; flash-attn accepts nheads_q != nheads_kv.
+        nk, nh = self.num_kv_heads, self.num_heads
+        if nk < nh and nh % nk == 0:
+            r = nh // nk
+            key = key.repeat_interleave(r, dim=2)
+            value = value.repeat_interleave(r, dim=2)
 
         query, key, value = (x.permute(0, 2, 1, 3) for x in (query, key, value))
         output = torch.nn.functional.scaled_dot_product_attention(

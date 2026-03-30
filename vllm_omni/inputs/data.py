@@ -274,6 +274,9 @@ class OmniDiffusionSamplingParams:
     # Extra parameters that might be needed by specific pipeline implementations
     extra_args: dict[str, Any] = field(default_factory=dict)
 
+    audiox_task: str | None = None
+    audiox_audio_path: str | None = None
+
     # Misc
     save_output: bool = True
     return_frames: bool = False

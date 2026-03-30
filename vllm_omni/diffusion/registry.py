@@ -147,6 +147,11 @@ _DIFFUSION_MODELS = {
         "pipeline_dreamid_omni",
         "DreamIDOmniPipeline",
     ),
+    "AudioXPipeline": (
+        "audiox",
+        "pipeline_audiox",
+        "AudioXPipeline",
+    ),
     "HunyuanVideo15Pipeline": (
         "hunyuan_video",
         "pipeline_hunyuan_video_1_5",
@@ -173,6 +178,7 @@ DiffusionModelRegistry = _ModelRegistry(
 _NO_CACHE_ACCELERATION = {
     # Pipelines that do not support cache acceleration (cache_dit / tea_cache).
     "NextStep11Pipeline",
+    "AudioXPipeline",
 }
 
 
@@ -334,6 +340,7 @@ _DIFFUSION_POST_PROCESS_FUNCS = {
     "Flux2Pipeline": "get_flux2_post_process_func",
     "HunyuanVideo15Pipeline": "get_hunyuan_video_15_post_process_func",
     "HunyuanVideo15ImageToVideoPipeline": "get_hunyuan_video_15_i2v_post_process_func",
+    "AudioXPipeline": "get_audiox_post_process_func",
 }
 
 _DIFFUSION_PRE_PROCESS_FUNCS = {
@@ -351,6 +358,7 @@ _DIFFUSION_PRE_PROCESS_FUNCS = {
     "HeliosPipeline": "get_helios_pre_process_func",
     "HeliosPyramidPipeline": "get_helios_pre_process_func",
     "HunyuanVideo15ImageToVideoPipeline": "get_hunyuan_video_15_i2v_pre_process_func",
+    "AudioXPipeline": "get_audiox_pre_process_func",
 }
 
 
@@ -372,6 +380,6 @@ def get_diffusion_post_process_func(od_config: OmniDiffusionConfig):
 
 def get_diffusion_pre_process_func(od_config: OmniDiffusionConfig):
     if od_config.model_class_name not in _DIFFUSION_PRE_PROCESS_FUNCS:
-        return None  # Return None if no pre-processing function is registered (for backward compatibility)
+        return None
     func_name = _DIFFUSION_PRE_PROCESS_FUNCS[od_config.model_class_name]
     return _load_process_func(od_config, func_name)

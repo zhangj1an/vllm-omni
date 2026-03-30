@@ -45,6 +45,7 @@ th {
 | `FluxPipeline` | FLUX.1-dev | `black-forest-labs/FLUX.1-dev` | ✅︎ | ✅︎ | | ✅︎ |
 | `OmniGen2Pipeline` | OmniGen2 | `OmniGen2/OmniGen2` | ✅︎ | ✅︎ | | ✅︎ |
 | `StableAudioPipeline` | Stable-Audio-Open | `stabilityai/stable-audio-open-1.0` | ✅︎ | ✅︎ | | ✅︎ |
+| `AudioXPipeline` | AudioX | `HKUSTAudio/AudioX-MAF-MMDiT` | ✅︎ | ✅︎ | | |
 | `Qwen3TTSForConditionalGeneration` | Qwen3-TTS-12Hz-1.7B-CustomVoice | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | ✅︎ | ✅︎ | ✅︎ | ✅︎ |
 | `Qwen3TTSForConditionalGeneration` | Qwen3-TTS-12Hz-1.7B-VoiceDesign | `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` | ✅︎ | ✅︎ | ✅︎ | ✅︎ |
 | `Qwen3TTSForConditionalGeneration` | Qwen3-TTS-12Hz-1.7B-Base | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | ✅︎ | ✅︎ | ✅︎ | ✅︎ |
@@ -58,3 +59,5 @@ th {
 | `VoxtralTTSForConditionalGeneration` | Voxtral TTS | `mistralai/Voxtral-4B-TTS-2603` | ✅︎ | ✅︎ | | |
 
 ✅︎ indicates the model is supported on that backend. Empty cells mean not listed as supported on that backend.
+
+**AudioX (`AudioXPipeline`)** - install optional Python packages with `pip install -e ".[audiox]"` and `pip install -r requirements/audiox-protobuf.txt` from the vLLM-Omni repo (see `requirements/audiox.txt`). The example under `examples/offline_inference/audiox/` defaults diffusion attention to **TORCH_SDPA** when unset so end-to-end runs succeed on GPUs where Flash/**fa3-fwd** rejects FP16.

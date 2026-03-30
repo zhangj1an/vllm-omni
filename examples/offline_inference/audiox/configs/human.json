@@ -1,0 +1,26 @@
+{
+  "weights": {
+    "hf_model": "maf-mmdit",
+    "local_dir": "audiox_weights",
+    "full": true,
+    "download_if_missing": true
+  },
+  "assets": {
+    "local_dir": "assets",
+    "trim_seconds": 5,
+    "download_if_missing": true
+  },
+  "run": {
+    "clip": "human",
+    "tasks": null,
+    "output_root": "audiox_task_outputs",
+    "model_slug": null,
+    "num_inference_steps": 50,
+    "seconds_total": 2.0,
+    "guidance_scale": 6.0,
+    "seed": 42,
+    "sample_rate": 48000,
+    "enable_cpu_offload": false,
+    "enable_diffusion_pipeline_profiler": false
+  }
+}
