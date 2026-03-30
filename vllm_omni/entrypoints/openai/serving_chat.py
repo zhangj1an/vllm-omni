@@ -2049,8 +2049,10 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 else:
                     messages.append({"role": getattr(msg, "role", "user"), "content": getattr(msg, "content", "")})
 
-            # Extract prompt and images from messages
-            prompt, reference_images = self._extract_diffusion_prompt_and_images(messages)
+            # Extract prompt and multimodal inputs from messages
+            prompt, reference_images, reference_videos, reference_audios = (
+                self._extract_diffusion_prompt_and_media(messages)
+            )
 
             # Extract generation parameters from extra_body (preferred)
             # Reference: text_to_image.py and text_to_video.py for supported parameters
@@ -2138,6 +2140,22 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 gen_params.layers = layers
             if resolution is not None:
                 gen_params.resolution = resolution
+            # Pipeline-specific passthrough fields (e.g. AudioX task controls).
+            for key in (
+                "audiox_task",
+                "seconds_start",
+                "seconds_total",
+                "sigma_min",
+                "sigma_max",
+                "cfg_rescale",
+                "video_path",
+                "video_paths",
+                "audio_path",
+                "audio_paths",
+            ):
+                value = extra_body.get(key)
+                if value is not None:
+                    gen_params.extra_args[key] = value
 
             # Parse per-request LoRA (works for both AsyncOmniDiffusion and AsyncOmni).
             if lora_body and isinstance(lora_body, dict):
@@ -2172,6 +2190,13 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                             status_code=400,
                         )
 
+            if reference_videos:
+                mm = gen_prompt.setdefault("multi_modal_data", {})
+                mm["video"] = reference_videos[0] if len(reference_videos) == 1 else reference_videos
+            if reference_audios:
+                mm = gen_prompt.setdefault("multi_modal_data", {})
+                mm["audio"] = reference_audios[0] if len(reference_audios) == 1 else reference_audios
+
             # Generate image
             # Handle both AsyncOmniDiffusion (returns OmniRequestOutput) and AsyncOmni (returns AsyncGenerator)
             if isinstance(self._diffusion_engine, AsyncOmni):
@@ -2193,54 +2218,105 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                     sampling_params=gen_params,
                     request_id=request_id,
                 )
-            # Extract images from result
-            # Handle nested OmniRequestOutput structure where images might be in request_output
+            # Extract outputs from result.
+            final_output_type = getattr(result, "final_output_type", "image")
             images = getattr(result.request_output, "images", [])
+            multimodal_output = getattr(result, "multimodal_output", {}) or {}
             stage_durations = result.stage_durations
             peak_memory_mb = result.peak_memory_mb
 
-            # Convert images to base64 content
-            image_contents: list[dict[str, Any]] = []
-            flat_images = []
-            for item in images:
-                if isinstance(item, list):
-                    flat_images.extend(item)
+            if final_output_type == "audio":
+                sample_rate = 48000
+                for key in ("audio_sample_rate", "sample_rate", "sampling_rate", "sr"):
+                    raw_rate = multimodal_output.get(key)
+                    try:
+                        if raw_rate is not None:
+                            sample_rate = int(raw_rate)
+                            break
+                    except (TypeError, ValueError):
+                        pass
+
+                audio_payload = multimodal_output.get("audio")
+                if isinstance(audio_payload, list):
+                    if len(audio_payload) == 0:
+                        audio_payload = None
+                    elif len(audio_payload) == 1:
+                        audio_payload = audio_payload[0]
+                if audio_payload is None:
+                    return self._create_error_response("Audio generation completed but no audio was produced.")
+
+                if isinstance(audio_payload, torch.Tensor):
+                    audio_tensor = audio_payload.detach().cpu().float()
                 else:
-                    flat_images.append(item)
+                    audio_tensor = torch.as_tensor(audio_payload).detach().cpu().float()
+                if audio_tensor.ndim > 1:
+                    audio_tensor = audio_tensor.flatten()
+                audio_array = audio_tensor.numpy()
 
-            for img in flat_images:
-                with BytesIO() as buffer:
-                    img.save(buffer, format="PNG")
-                    img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-                image_contents.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{img_base64}",
-                        },
-                        "stage_durations": stage_durations,
-                        "peak_memory_mb": peak_memory_mb,
-                    }
+                audio_obj = CreateAudio(
+                    audio_tensor=audio_array,
+                    sample_rate=sample_rate,
+                    response_format="wav",
+                    speed=1.0,
+                    stream_format="audio",
+                    base64_encode=True,
                 )
-
-            # Build response
-            if not image_contents:
-                content = "Image generation completed but no images were produced."
+                audio_response: AudioResponse = self.create_audio(audio_obj)
+                audio_base64 = audio_response.audio_data
+                audio_id = f"audio-{uuid.uuid4().hex[:16]}"
+                expires_at = int((datetime.now(timezone.utc) + timedelta(hours=24)).timestamp())
+                message = ChatMessage(
+                    role="assistant",
+                    audio=OpenAIChatCompletionAudio(
+                        id=audio_id,
+                        data=audio_base64,
+                        expires_at=expires_at,
+                        transcript="",
+                    ),
+                )
             else:
-                content = image_contents
+                # Convert images to base64 content
+                image_contents: list[dict[str, Any]] = []
+                flat_images = []
+                for item in images:
+                    if isinstance(item, list):
+                        flat_images.extend(item)
+                    else:
+                        flat_images.append(item)
 
-            # Use model_construct to bypass validation for multimodal content
-            # (ChatMessage.content only accepts str, but we need list for images)
-            # Then use object.__setattr__ to directly set the field, bypassing Pydantic's type checking
-            import warnings as warnings_module
+                for img in flat_images:
+                    with BytesIO() as buffer:
+                        img.save(buffer, format="PNG")
+                        img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+                    image_contents.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img_base64}",
+                            },
+                            "stage_durations": stage_durations,
+                            "peak_memory_mb": peak_memory_mb,
+                        }
+                    )
 
-            with warnings_module.catch_warnings():
-                warnings_module.filterwarnings("ignore", category=UserWarning, module="pydantic")
-                message = ChatMessage.model_construct(role="assistant")
-                object.__setattr__(message, "content", content)
-                # Mark content as set in fields_set to ensure proper serialization
-                if hasattr(message, "__pydantic_fields_set__"):
-                    message.__pydantic_fields_set__.add("content")
+                # Build response
+                if not image_contents:
+                    content = "Image generation completed but no images were produced."
+                else:
+                    content = image_contents
+
+                # Use model_construct to bypass validation for multimodal content
+                # (ChatMessage.content only accepts str, but we need list for images)
+                # Then use object.__setattr__ to directly set the field, bypassing Pydantic's type checking
+                import warnings as warnings_module
+
+                with warnings_module.catch_warnings():
+                    warnings_module.filterwarnings("ignore", category=UserWarning, module="pydantic")
+                    message = ChatMessage.model_construct(role="assistant")
+                    object.__setattr__(message, "content", content)
+                    # Mark content as set in fields_set to ensure proper serialization
+                    if hasattr(message, "__pydantic_fields_set__"):
+                        message.__pydantic_fields_set__.add("content")
             choice = ChatCompletionResponseChoice.model_construct(
                 index=0,
                 message=message,
@@ -2262,8 +2338,9 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             )
 
             logger.info(
-                "Diffusion chat completed for request %s: %d images",
+                "Diffusion chat completed for request %s: output_type=%s, image_count=%d",
                 request_id,
+                final_output_type,
                 len(images),
             )
 
@@ -2276,20 +2353,22 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 status_code=500,
             )
 
-    def _extract_diffusion_prompt_and_images(
+    def _extract_diffusion_prompt_and_media(
         self,
         messages: list[dict[str, Any]],
-    ) -> tuple[str, list[str]]:
-        """Extract text prompt and base64 images from chat messages.
+    ) -> tuple[str, list[str], list[str], list[str]]:
+        """Extract text prompt and multimodal inputs from chat messages.
 
         Args:
             messages: List of chat messages
 
         Returns:
-            Tuple of (prompt_text, list_of_base64_images)
+            Tuple of (prompt_text, list_of_base64_images, list_of_video_urls, list_of_audio_urls)
         """
         prompt_parts: list[str] = []
         images: list[str] = []
+        videos: list[str] = []
+        audios: list[str] = []
 
         for message in messages:
             role = message.get("role", "")
@@ -2324,12 +2403,24 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                                     images.append(b64_data)
                                 except ValueError:
                                     logger.warning("Invalid data URL format")
+                        elif item.get("type") == "video_url":
+                            url = item.get("video_url", {}).get("url", "")
+                            if isinstance(url, str) and url:
+                                videos.append(url)
+                        elif item.get("type") == "audio_url":
+                            url = item.get("audio_url", {}).get("url", "")
+                            if isinstance(url, str) and url:
+                                audios.append(url)
                         # Handle {"image": "base64..."} format
                         elif "image" in item:
                             images.append(item["image"])
+                        elif "video" in item and isinstance(item["video"], str):
+                            videos.append(item["video"])
+                        elif "audio" in item and isinstance(item["audio"], str):
+                            audios.append(item["audio"])
 
         prompt = " ".join(prompt_parts).strip()
-        return prompt, images
+        return prompt, images, videos, audios
 
     def _create_error_response(
         self,
