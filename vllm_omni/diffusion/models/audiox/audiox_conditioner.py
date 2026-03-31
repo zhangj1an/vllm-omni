@@ -243,12 +243,18 @@ class T5Conditioner(Conditioner):
         )
         input_ids = encoded["input_ids"].to(device)
         attention_mask = encoded["attention_mask"].to(device).to(torch.bool)
+        dev = torch.device(device)
 
         with torch.inference_mode():
-            embeddings = self.model(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
+            if dev.type == "cuda":
+                with torch.amp.autocast("cuda", dtype=torch.float16):
+                    embeddings = self.model(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
+            else:
+                embeddings = self.model(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
 
-        embeddings = self.proj_out(embeddings)
-        embeddings = embeddings * attention_mask.unsqueeze(-1).to(embeddings.dtype)
+        # Match upstream ``audiox.models.conditioners.T5Conditioner``: proj in float32 after FP16 encoder.
+        embeddings = self.proj_out(embeddings.float())
+        embeddings = embeddings * attention_mask.unsqueeze(-1).float()
         return [embeddings, attention_mask]
 
 
