@@ -92,7 +92,6 @@ Core scheduling and caching components.
 
 Configuration classes.
 
-- [vllm_omni.config.model.OmniModelArchConfigConvertor][]
 - [vllm_omni.config.model.OmniModelConfig][]
 - [vllm_omni.config.stage_config.ModelPipeline][]
 - [vllm_omni.config.stage_config.StageConfig][]
@@ -134,7 +133,6 @@ Worker classes and model runners for distributed inference.
 - [vllm_omni.diffusion.worker.diffusion_worker.WorkerWrapperBase][]
 - [vllm_omni.diffusion.worker.utils.DiffusionRequestState][]
 - [vllm_omni.diffusion.worker.utils.RunnerOutput][]
-- [vllm_omni.platforms.npu.worker.base.OmniNPUWorkerBase][]
 - [vllm_omni.platforms.npu.worker.npu_ar_model_runner.ExecuteModelState][]
 - [vllm_omni.platforms.npu.worker.npu_ar_model_runner.NPUARModelRunner][]
 - [vllm_omni.platforms.npu.worker.npu_ar_worker.NPUARWorker][]
