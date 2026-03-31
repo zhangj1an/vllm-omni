@@ -171,10 +171,6 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
         clip_std = [0.26862954, 0.26130258, 0.27577711]
         self.preprocess_CLIP = transforms.Compose([transforms.Normalize(mean=clip_mean, std=clip_std)])
 
-    def process_video_with_custom_preprocessing(self, video_tensor: torch.Tensor) -> torch.Tensor:
-        video_tensor = video_tensor / 255.0
-        return self.preprocess_CLIP(video_tensor)
-
     def forward(self, video_list: list[torch.Tensor | dict], device: torch.device | str) -> list[torch.Tensor]:
         if isinstance(video_list[0], dict):
             video_tensors = [item["video_tensors"] for item in video_list]
@@ -193,7 +189,8 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
         is_zero = torch.all(original_videos == 0, dim=(1, 2, 3, 4))
 
         video_tensors = einops.rearrange(original_videos, "b t c h w -> (b t) c h w")
-        video_cond_pixel_values = self.process_video_with_custom_preprocessing(video_tensors).to(device)
+        # Video frames are expected in [0, 1] float (e.g. from `prepare_video_reference`).
+        video_cond_pixel_values = self.preprocess_CLIP(video_tensors).to(device)
 
         with torch.no_grad():
             outputs = visual_encoder_model(pixel_values=video_cond_pixel_values)
