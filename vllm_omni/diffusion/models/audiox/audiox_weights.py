@@ -422,7 +422,18 @@ def remap_audiox_state_dict(
     *,
     model_config: dict[str, Any],
 ) -> list[tuple[str, torch.Tensor]]:
-    remapped = remap_audiox_maf_weights(weights)
+    # ``convert_audiox_bundle`` / raw ``model.ckpt`` partitions use ``conditioner.`` / ``maf_block.`` /
+    # ``pretransform.`` without the ``_model.`` prefix. The Diffusers loader always passes
+    # ``_model.<component>...``. Oobleck→Diffusers remaps only match the latter; normalize here.
+    normalized: list[tuple[str, torch.Tensor]] = []
+    for k, v in weights:
+        if k.startswith("_model."):
+            normalized.append((k, v))
+        elif k.startswith(("conditioner.", "maf_block.", "pretransform.")):
+            normalized.append(("_model." + k, v))
+        else:
+            normalized.append((k, v))
+    remapped = remap_audiox_maf_weights(normalized)
     # Accept legacy prefixes from upstream checkpoints and normalize to inference layout.
     legacy_prefix_map = {
         "_model.model.model.": "_model.model.",
