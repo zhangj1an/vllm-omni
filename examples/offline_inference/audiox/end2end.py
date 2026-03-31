@@ -234,6 +234,8 @@ def run_single_inference(
     negative_prompt: str,
     enable_profiler: bool,
     enable_cpu_offload: bool,
+    sigma_min: float | None = None,
+    sigma_max: float | None = None,
 ) -> float:
     from vllm_omni.entrypoints.omni import Omni
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
@@ -269,6 +271,10 @@ def run_single_inference(
     extra["audiox_task"] = task
     if reference_audio_path.strip():
         extra["audio_path"] = os.path.abspath(os.path.expanduser(reference_audio_path))
+    if sigma_min is not None:
+        extra["sigma_min"] = float(sigma_min)
+    if sigma_max is not None:
+        extra["sigma_max"] = float(sigma_max)
 
     sampling = OmniDiffusionSamplingParams(
         generator=generator,

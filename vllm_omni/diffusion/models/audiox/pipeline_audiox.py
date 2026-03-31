@@ -38,6 +38,11 @@ _VIDEO_ONLY_TASKS = frozenset({"v2a", "v2m"})
 _TEXT_VIDEO_TASKS = frozenset({"tv2a", "tv2m"})
 _VIDEO_CONDITIONED_TASKS = _VIDEO_ONLY_TASKS | _TEXT_VIDEO_TASKS
 
+# k-diffusion polyexponential schedule endpoints (``get_sigmas_polyexponential``). Match upstream
+# AudioX ``generate_diffusion_cond`` / sample scripts (e.g. ``sigma_min=0.3``, ``sigma_max=500``).
+_DEFAULT_UPSTREAM_SIGMA_MIN = 0.3
+_DEFAULT_UPSTREAM_SIGMA_MAX = 500.0
+
 logger = init_logger(__name__)
 
 
@@ -458,8 +463,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
         seconds_start = float(extra_args.get("seconds_start", 0.0))
         seconds_model = self._sample_size / self._sample_rate
-        sigma_min = float(extra_args.get("sigma_min", 0.03))
-        sigma_max = float(extra_args.get("sigma_max", 1000.0))
+        sigma_min = float(extra_args.get("sigma_min", _DEFAULT_UPSTREAM_SIGMA_MIN))
+        sigma_max = float(extra_args.get("sigma_max", _DEFAULT_UPSTREAM_SIGMA_MAX))
         cfg_rescale = float(extra_args.get("cfg_rescale", 0.0))
         device = self.device
         generator = sampling_params.generator
