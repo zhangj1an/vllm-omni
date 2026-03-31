@@ -3,6 +3,7 @@ from __future__ import annotations
 import typing as tp
 from typing import Any
 
+import torch
 from diffusers import AutoencoderOobleck
 from torch import nn
 
@@ -32,8 +33,6 @@ def ae_cfg_to_diffusers_init_kwargs(ae_cfg: dict[str, Any], sample_rate: int) ->
 
 
 class AudioXVAE(OobleckVAEBase):
-    """Minimal AudioX adapter around Diffusers AutoencoderOobleck."""
-
     def __init__(
         self,
         inner: nn.Module,
@@ -54,7 +53,6 @@ class AudioXVAE(OobleckVAEBase):
         self.iterate_batch = bool(iterate_batch)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Match ``audiox.models.pretransforms.AutoencoderPretransform.encode`` when ``iterate_batch`` is set."""
         if self.iterate_batch and x.shape[0] > 1:
             parts = [super(AudioXVAE, self).encode(x[i : i + 1]) for i in range(x.shape[0])]
             return torch.cat(parts, dim=0)

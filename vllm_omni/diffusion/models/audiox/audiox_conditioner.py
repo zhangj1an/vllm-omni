@@ -57,8 +57,6 @@ class SA_FeedForward(nn.Module):
 
 
 class SA_Attention(nn.Module):
-    """Self-attention for sync/temporal conditioning; uses vLLM-Omni DiffusionAttention."""
-
     def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
         super().__init__()
         inner_dim = dim_head * heads
@@ -208,8 +206,6 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
 
 
 class T5Conditioner(Conditioner):
-    """T5 text encoder for AudioX; aligned with ``audiox.models.conditioners.T5Conditioner`` (inference)."""
-
     def __init__(
         self,
         output_dim: int,
@@ -228,12 +224,8 @@ class T5Conditioner(Conditioner):
             warnings.simplefilter("ignore")
             try:
                 self.tokenizer = AutoTokenizer.from_pretrained(t5_model_name)
-                # Upstream loads encoder weights in FP16 (see ``conditioners.T5Conditioner``).
                 self.model = (
-                    T5EncoderModel.from_pretrained(t5_model_name)
-                    .train(False)
-                    .requires_grad_(False)
-                    .to(torch.float16)
+                    T5EncoderModel.from_pretrained(t5_model_name).train(False).requires_grad_(False).to(torch.float16)
                 )
             finally:
                 logging.disable(previous_level)
@@ -254,7 +246,6 @@ class T5Conditioner(Conditioner):
         dev = torch.device(device)
 
         self.model.eval()
-        # Same pattern as upstream ``conditioners.T5Conditioner``: FP16 autocast on CUDA + no grad.
         if dev.type == "cuda":
             with torch.amp.autocast("cuda", dtype=torch.float16), torch.set_grad_enabled(False):
                 embeddings = self.model(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
@@ -262,15 +253,12 @@ class T5Conditioner(Conditioner):
             with torch.set_grad_enabled(False):
                 embeddings = self.model(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
 
-        # Upstream: linear projection in float32, then mask (same order).
         embeddings = self.proj_out(embeddings.float())
         embeddings = embeddings * attention_mask.unsqueeze(-1).float()
         return [embeddings, attention_mask]
 
 
 class AudioAutoencoderConditionerv2(Conditioner):
-    """Audio conditioning via VAE latents; aligned with ``audiox.models.conditioners.AudioAutoencoderConditionerv2``."""
-
     def __init__(
         self,
         pretransform: tp.Any,
@@ -287,10 +275,12 @@ class AudioAutoencoderConditionerv2(Conditioner):
         self.proj_features_128 = nn.Linear(in_features=self.latent_seq_len, out_features=128)
 
     def mask_audio(self, audio: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Match upstream ``AudioAutoencoderConditionerv2.mask_audio`` (training-style random masking)."""
         batch_size, _channels, seq_len = audio.shape
         device = audio.device
-        mask_ratios = torch.rand(batch_size, device=device) * (self.mask_ratio_end - self.mask_ratio_start) + self.mask_ratio_start
+        mask_ratios = (
+            torch.rand(batch_size, device=device) * (self.mask_ratio_end - self.mask_ratio_start)
+            + self.mask_ratio_start
+        )
         masked_audio = audio.clone()
         for i in range(batch_size):
             mask_len = int(seq_len * mask_ratios[i])
@@ -317,7 +307,6 @@ class AudioAutoencoderConditionerv2(Conditioner):
         if self.mask_ratio_start < self.mask_ratio_end:
             audio, _mask_ratios = self.mask_audio(audio)
 
-        # Same as upstream: ``AutoencoderPretransform.encode`` → ``encode_audio`` / ``scale`` (here ``encode_scaled``).
         latents = self.pretransform.encode_scaled(audio)
         latents = self.proj_features_128(latents)
         latents = latents.permute(0, 2, 1)
@@ -395,14 +384,6 @@ def _with_output_dim(cond_dim: int, cfg: dict[str, tp.Any]) -> dict[str, tp.Any]
 
 
 def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, tp.Any]) -> MultiConditioner:
-    """Build AudioX's fixed 3-conditioner stack (video/text/audio) directly.
-
-    This path intentionally avoids dynamic conditioner-type dispatch. We only support
-    the inlined AudioX inference design with:
-      - ``video_prompt`` -> ``CLIPWithSyncWithEmptyFeatureConditioner``
-      - ``text_prompt`` -> ``T5Conditioner``
-      - ``audio_prompt`` -> ``AudioAutoencoderConditionerv2``
-    """
     cond_dim = config["cond_dim"]
     configs = config["configs"]
     if len(configs) != 3:
@@ -427,7 +408,6 @@ def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, t
     video_cfg = _with_output_dim(cond_dim, by_id["video_prompt"])
     text_cfg = _with_output_dim(cond_dim, by_id["text_prompt"])
     audio_cfg = _with_output_dim(cond_dim, by_id["audio_prompt"])
-    # Upstream config may include clip_model_name; not required at inference here.
     video_allowed = {"output_dim", "project_out", "clip_model_name"}
     video_extra = set(video_cfg) - video_allowed
     if video_extra:
@@ -441,7 +421,6 @@ def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, t
     text_cfg = {k: text_cfg[k] for k in text_allowed if k in text_cfg}
 
     pretransform = _build_pretransform(audio_cfg)
-    # Upstream audio_prompt may include training-only fields not used by inference.
     audio_allowed = {
         "output_dim",
         "latent_seq_len",
@@ -468,7 +447,6 @@ def encode_audiox_conditioning_tensors(
     batch_metadata: list[dict[str, Any]],
     device: torch.device,
 ) -> dict[str, tp.Any]:
-    """Encode batch metadata through AudioX conditioners."""
     output: dict[str, Any] = {}
 
     for key, conditioner in multi_conditioner.conditioners.items():

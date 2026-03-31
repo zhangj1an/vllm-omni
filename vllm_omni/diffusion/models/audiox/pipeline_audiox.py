@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Upstream: https://github.com/ZeyueT/AudioX/tree/main/audiox/models
 
 from __future__ import annotations
 
@@ -43,7 +42,6 @@ logger = init_logger(__name__)
 
 
 def resample_audiox_waveform_poly(audio_data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    """Resample waveform with scipy polyphase filtering, preserving duration."""
     if src_rate == dst_rate:
         return audio_data
 
@@ -51,12 +49,6 @@ def resample_audiox_waveform_poly(audio_data: np.ndarray, src_rate: int, dst_rat
 
 
 def get_audiox_post_process_func(_od_config: OmniDiffusionConfig):
-    """Return a post-processor for AudioX outputs (contributing guide section 2.4).
-
-    Separates final tensor handling from ``AudioXPipeline.forward``: converts denoised
-    waveforms to CPU float numpy for saving, unless ``output_type`` requests tensors.
-    """
-
     return build_audio_post_process_func()
 
 
@@ -71,17 +63,6 @@ def _resolve_audio_source(
 
 
 def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
-    """Return a request pre-processor for text / video / audio (contributing guide section 2.4).
-
-    Normalizes each entry in ``OmniDiffusionRequest.prompts`` to a dict with
-    ``multi_modal_data`` and optional ``additional_information``. Strips text prompts.
-    When possible, resolves **video** and **reference audio** paths to CPU tensors early
-    so ``AudioXPipeline.forward`` only moves data to the inference device.
-
-    Video loading is skipped for text-only tasks (``t2a`` / ``t2m``). Reference audio is
-    loaded when a source path or tensor is present.
-    """
-
     if od_config.model is None:
         raise ValueError("AudioX pre-process requires od_config.model.")
 
@@ -102,8 +83,6 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
         sp = request.sampling_params
         extra = sp.extra_args or {}
         seconds_start = float(extra.get("seconds_start", 0.0))
-        # Engine dummy warmup may call pre-process without user-provided seconds_total.
-        # Fall back to model-native duration in that path.
         user_seconds_total = float(extra.get("seconds_total", seconds_model))
         cond_seconds = float(audio_conditioning_samples) / float(sample_rate)
 
@@ -150,11 +129,6 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
 
 
 def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int | None:
-    """Waveform length (per channel) so ``AudioAutoencoderConditionerv2`` encode matches ``latent_seq_len``.
-
-    Upstream ties ``proj_features_128`` to ``latent_seq_len``; input length must match
-    ``latent_seq_len * pretransform.downsampling_ratio`` (see ``audiox/models/conditioners.py``).
-    """
     try:
         m = model_config.get("model")
         if not isinstance(m, dict):
@@ -244,35 +218,9 @@ def _normalize_prompts(prompts: list[Any]) -> list[dict[str, Any]]:
 
 
 class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMixin):
-    """AudioX conditional diffusion (registry pipeline; weights via ``weights_sources`` + ``load_weights``).
-
-    Tasks (``extra_args["audiox_task"]`` on sampling params):
-
-    - ``t2a`` / ``t2m``: text — zero video and zero reference audio.
-    - ``v2a`` / ``v2m``: video — empty text.
-    - ``tv2a`` / ``tv2m``: text + video — non-empty text per item.
-
-    Video: ``extra_args["video_path"]`` / ``["video_paths"]`` or ``multi_modal_data["video"]``.
-
-    Reference audio: ``extra_args["audio_path"]`` / ``["audio_paths"]`` or
-    ``multi_modal_data["audio"]``.
-
-    Requires ``od_config.model`` to be a **vLLM-Omni sharded** tree: ``config.json`` plus
-    ``transformer/diffusion_pytorch_model.safetensors`` and
-    ``conditioners/diffusion_pytorch_model.safetensors`` (and ``vae/`` when the config includes a
-    pretransform). Produce this layout from a Hugging Face ``config.json`` + ``model.ckpt`` bundle via
-    ``python -m vllm_omni.diffusion.models.audiox.audiox_weights``. Also requires
-    third-party Python deps used by the inlined AudioX modules under this package
-    (``inference/``, ``models/``, ``data/``). VAE weights are remapped onto Hugging Face
-    :class:`~diffusers.AutoencoderOobleck` (see :mod:`vllm_omni.diffusion.models.audiox.audiox_weights`).
-    """
-
     support_audio_output: ClassVar[bool] = True
     _PROFILER_TARGETS: ClassVar[list[str]] = ["diffuse"]
-    # ``CLIPWithSyncWithEmptyFeatureConditioner`` hard-codes ``duration = 10`` (seconds) and
-    # positional embeddings of length ``duration * video_fps``.
     _CLIP_SYNC_DURATION_SEC: ClassVar[float] = 10.0
-    # Sync placeholder shape is fixed in AudioX: ``proj_sync`` consumes 240-frame features.
     _VIDEO_SYNC_FRAME_COUNT: ClassVar[int] = 240
 
     def __init__(
@@ -319,22 +267,16 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load AudioX checkpoint shards from ``weights`` (from ``DiffusersPipelineLoader.get_all_weights``)."""
         load_audiox_weights(self, weights, model_config=self._model_config)
 
-        # Upstream AudioX inference is effectively float32 (e.g. T5 ``proj_out(embeddings.float())``).
         self._model.to(torch.float32)
         self._model.eval().requires_grad_(False)
 
-        # ``AutoWeightsLoader`` only reports tensors present in the iterator; ``DiffusersPipelineLoader``
-        # strict check expects every parameter/buffer under ``weights_sources`` prefixes. Treat init
-        # defaults as satisfying coverage.
         names = {n for n, _ in self.named_parameters()}
         names.update(n for n, _ in self.named_buffers())
         return names
 
     def _conditioning_dtype(self) -> torch.dtype:
-        """Dtype of the inner model's floating-point parameters."""
         p = next(self._model.parameters())
         return p.dtype if p.dtype.is_floating_point else torch.float32
 
@@ -440,7 +382,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         generator: torch.Generator,
         cfg_rescale: float,
     ) -> torch.Tensor:
-        """Run k-diffusion sampling (profiled when ``enable_diffusion_pipeline_profiler`` is set)."""
         return self._generate_diffusion_cond(
             self._model,
             steps=steps,
@@ -492,23 +433,12 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         return batch
 
     def forward(self, req: OmniDiffusionRequest) -> DiffusionOutput:
-        """Execute one generation request (vLLM-Omni pipeline contract; see contributing guide section 2.3).
-
-        Reads :class:`~vllm_omni.diffusion.request.OmniDiffusionRequest`: ``prompts`` (strings or dicts)
-        and :class:`~vllm_omni.inputs.data.OmniDiffusionSamplingParams` for steps, guidance, seed, and
-        ``extra_args`` (sampler, sigmas, timing, paths). Dict prompts may include ``multi_modal_data``
-        (e.g. ``video``, ``audio``) per item.
-
-        Returns :class:`~vllm_omni.diffusion.data.DiffusionOutput` with generated audio as ``output``.
-        """
-        # --- Prompts (and optional negative prompts for CFG) ---
         if req.prompts is None or len(req.prompts) == 0:
             raise ValueError("AudioXPipeline requires at least one prompt.")
         normalized_prompts = _normalize_prompts(list(req.prompts))
         prompts = [p["prompt"] for p in normalized_prompts]
 
         sampling_params = req.sampling_params
-        # --- Sampling parameters (OmniDiffusionSamplingParams + extra_args) ---
         if sampling_params.num_inference_steps is None:
             raise ValueError("AudioXPipeline requires sampling_params.num_inference_steps.")
         num_inference_steps = int(sampling_params.num_inference_steps)

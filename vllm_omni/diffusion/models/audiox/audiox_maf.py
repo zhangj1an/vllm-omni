@@ -11,13 +11,6 @@ from vllm_omni.diffusion.attention.layer import Attention
 
 
 class _MAFCrossAttentionBlock(nn.Module):
-    """Experts attend to fused multimodal tokens; Q from experts, K/V from context.
-
-    Uses :func:`torch.nn.functional.scaled_dot_product_attention` directly (``B, H, L, D``),
-    because :class:`~vllm_omni.diffusion.attention.layer.Attention`'s SDPA path permutes
-    dimensions in a way that breaks when query and key sequence lengths differ.
-    """
-
     def __init__(self, dim: int, num_heads: int):
         super().__init__()
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
@@ -43,8 +36,6 @@ class _MAFCrossAttentionBlock(nn.Module):
 
 
 class _MAFFusionBlock(nn.Module):
-    """Pre-norm self-attention + output projection + FFN (TransformerEncoderLayer-compatible)."""
-
     def __init__(self, dim: int, num_heads: int, mlp_ratio: float):
         super().__init__()
         assert dim % num_heads == 0, "dim must be divisible by num_heads"
@@ -90,14 +81,6 @@ class _MAFFusionBlock(nn.Module):
 
 
 class MAF_Block(nn.Module):
-    """AudioX MAF multimodal fusion (matches upstream ``audiox.models.MAF.MAF_Block`` layout).
-
-    Parameter names ``video_tokens`` / ``text_tokens`` / ``audio_tokens`` follow the upstream
-    module, but **upstream** ``ConditionedDiffusionModel.get_conditioning_inputs`` calls
-    ``maf_block(text_feature, video_feature, audio_feature)`` — so the **first** tensor is
-    **text** conditioning and the **second** is **video** (see upstream ``diffusion.py``).
-    """
-
     DIM = 768
     MLP_RATIO = 4.0
 

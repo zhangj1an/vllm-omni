@@ -139,14 +139,11 @@ class ConditionedDiffusionModelWrapper(nn.Module):
                 cross_attention_masks.append(cross_attn_mask)
 
             video_feature, text_feature, audio_feature = cross_attention_input
-            # Upstream order: maf_block(text, video, audio) vs list order video, text, audio.
             if self.maf_block is not None:
                 refined_branches = self.maf_block(text_feature, video_feature, audio_feature)
                 cross_attention_input = torch.cat(list(refined_branches.values()), dim=1)
             else:
-                cross_attention_input = torch.cat(
-                    [video_feature, text_feature, audio_feature], dim=1
-                )
+                cross_attention_input = torch.cat([video_feature, text_feature, audio_feature], dim=1)
             cross_attention_masks = torch.cat(cross_attention_masks, dim=1)
 
         if len(self.global_cond_ids) > 0:
@@ -254,7 +251,6 @@ def _sample_dpmpp_3m_sde_fixed(
     s_noise=1.0,
     noise_sampler=None,
 ):
-    """DPM-Solver++(3M) SDE with terminal-sigma fix."""
     sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
     noise_sampler = BrownianTreeNoiseSampler(x, sigma_min, sigma_max) if noise_sampler is None else noise_sampler
     extra_args = {} if extra_args is None else extra_args
@@ -310,7 +306,6 @@ def _sample_dpmpp_3m_sde_fixed(
 
 
 def patch_k_diffusion_sample_dpmpp_3m_sde() -> None:
-    """Idempotently replace ``k_diffusion.sampling.sample_dpmpp_3m_sde`` with fixed version."""
     if getattr(ks, _PATCH_ATTR, False):
         return
     ks.sample_dpmpp_3m_sde = _sample_dpmpp_3m_sde_fixed
@@ -339,7 +334,6 @@ def sample_k(
     callback=None,
     **extra_args,
 ):
-    """Inference-only AudioX sampler (k-diffusion)."""
     patch_k_diffusion_sample_dpmpp_3m_sde()
     denoiser = K.external.VDenoiser(model_fn)
 
@@ -366,7 +360,6 @@ def generate_diffusion_cond(
     return_latents: bool = False,
     **sampler_kwargs,
 ) -> torch.Tensor:
-    """Generate audio in inference-only mode (no variation/inpainting)."""
     pt = model.pretransform
     if pt is None:
         raise RuntimeError("AudioX inference-only path requires an AudioX pretransform.")

@@ -1,5 +1,3 @@
-"""AudioX multimodal diffusion transformer entry points and MM layers."""
-
 from __future__ import annotations
 
 import logging
@@ -8,13 +6,13 @@ import typing as tp
 
 import torch
 import torch.nn as nn
+from audiox.models.mm_embeddings import apply_rope, compute_rope_rotations
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from torch.nn import functional as F
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
-from audiox.models.mm_embeddings import apply_rope, compute_rope_rotations
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +81,6 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):
 
 
 class AudioXRMSNorm(nn.Module):
-    """RMSNorm without learnable weight (matches upstream)."""
-
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.eps = eps
@@ -140,8 +136,6 @@ class AudioXMMDiTSelfAttention(nn.Module):
 
 
 class AudioXMMDiTBlock(nn.Module):
-    """MM-DiT block (pip CrossAttention; self-attention fork or upstream via ``self_attn_mode``)."""
-
     def __init__(
         self,
         dim: int,

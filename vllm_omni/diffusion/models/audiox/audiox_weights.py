@@ -148,7 +148,6 @@ def remap_audiox_split_fused_attention_linears(
 def remap_audiox_merge_cross_attn_to_kv_for_upstream_dit(
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> list[tuple[str, torch.Tensor]]:
-    """Merge split ``to_k``/``to_v`` back to ``to_kv`` for pip CrossAttention."""
     d = dict(weights)
     drop: set[str] = set()
     add: dict[str, torch.Tensor] = {}
@@ -451,7 +450,6 @@ def remap_audiox_state_dict(
     *,
     model_config: dict[str, Any],
 ) -> list[tuple[str, torch.Tensor]]:
-    # Raw checkpoints omit ``_model.``; Diffusers loader expects it.
     normalized: list[tuple[str, torch.Tensor]] = []
     for k, v in weights:
         if k.startswith("_model."):
@@ -490,7 +488,6 @@ def remap_audiox_state_dict(
 
 
 def filter_unused_keys(weights: Iterable[tuple[str, torch.Tensor]]) -> list[tuple[str, torch.Tensor]]:
-    """API compatibility; returns weights unchanged."""
     return list(weights)
 
 
