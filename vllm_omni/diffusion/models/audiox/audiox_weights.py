@@ -145,6 +145,50 @@ def remap_audiox_split_fused_attention_linears(
     return list(out.items())
 
 
+def _use_upstream_pip_audiox_dit_for_weights() -> bool:
+    """Match ``audiox_runtime._use_upstream_pip_audiox_dit`` without importing runtime (avoid cycles)."""
+    v = os.environ.get("VLLM_OMNI_AUDIOX_USE_UPSTREAM_DIT", "")
+    return str(v).strip().lower() in ("1", "true", "yes")
+
+
+def _use_upstream_style_cross_attn_weights() -> bool:
+    """vLLM DiT blocks always use pip ``audiox.models.mm_transformer_layers.CrossAttention`` (``to_q`` + ``to_kv``).
+
+    ``remap_audiox_split_fused_attention_linears`` splits checkpoint ``to_kv`` into ``to_k`` / ``to_v``; we merge
+    back before load so module keys match upstream.
+    """
+    return True
+
+
+def remap_audiox_merge_cross_attn_to_kv_for_upstream_dit(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> list[tuple[str, torch.Tensor]]:
+    """Undo ``remap_audiox_split_fused_attention_linears`` cross-attn split for pip ``audiox`` ``CrossAttention`` (``to_q`` + ``to_kv``)."""
+    d = dict(weights)
+    drop: set[str] = set()
+    add: dict[str, torch.Tensor] = {}
+    for k in list(d.keys()):
+        if not k.endswith(".cross_attn.to_k.weight"):
+            continue
+        base = k[: -len("to_k.weight")]
+        vk = base + "to_v.weight"
+        if vk not in d:
+            continue
+        wk, wv = d[k], d[vk]
+        add[base + "to_kv.weight"] = torch.cat([wk, wv], dim=0).contiguous()
+        drop.add(k)
+        drop.add(vk)
+    if not add:
+        return list(d.items())
+    out: dict[str, torch.Tensor] = {}
+    for k, v in d.items():
+        if k in drop:
+            continue
+        out[k] = v
+    out.update(add)
+    return list(out.items())
+
+
 def _split_cross_in_proj(
     w: torch.Tensor, b: torch.Tensor | None
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
@@ -459,6 +503,8 @@ def remap_audiox_state_dict(
     remapped = normalized
     remapped = remap_audiox_oobleck_weights_for_diffusers(remapped, model_config=model_config)
     remapped = remap_audiox_split_fused_attention_linears(remapped)
+    if _use_upstream_style_cross_attn_weights():
+        remapped = remap_audiox_merge_cross_attn_to_kv_for_upstream_dit(remapped)
     return remapped
 
 

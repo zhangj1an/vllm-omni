@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 import typing as tp
 
 import k_diffusion as K
@@ -21,6 +23,8 @@ from vllm_omni.diffusion.models.audiox.audiox_pretransform import (
 from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
 
+logger = logging.getLogger(__name__)
+
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -29,6 +33,12 @@ torch.set_float32_matmul_precision("highest")  # FP32
 
 _PATCH_ATTR = "_vllm_omni_dpmpp_3m_sde_fixed"
 _PROGRESS = ProgressBarMixin()
+
+
+def _use_upstream_pip_audiox_dit() -> bool:
+    """Use ``pip`` ``audiox.models.dit.MMDiffusionTransformer`` instead of the vLLM fork (``audiox_transformer``)."""
+    v = os.environ.get("VLLM_OMNI_AUDIOX_USE_UPSTREAM_DIT", "")
+    return str(v).strip().lower() in ("1", "true", "yes")
 
 
 def create_model_from_config(model_config, od_config: OmniDiffusionConfig | None = None):
@@ -179,7 +189,22 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
     if od_config is not None:
         diffusion_build_kwargs["od_config"] = od_config
 
-    diffusion_model = MMDiffusionTransformer(**diffusion_build_kwargs)
+    if _use_upstream_pip_audiox_dit():
+        try:
+            from audiox.models.dit import MMDiffusionTransformer as UpstreamMMDiffusionTransformer
+        except ImportError as e:
+            raise ImportError(
+                "VLLM_OMNI_AUDIOX_USE_UPSTREAM_DIT is set but the ``audiox`` package is not importable. "
+                "Install upstream AudioX in the same environment (e.g. ``pip install audiox``)."
+            ) from e
+        kw = dict(diffusion_build_kwargs)
+        kw.pop("od_config", None)
+        diffusion_model = UpstreamMMDiffusionTransformer(**kw)
+        logger.info(
+            "Using upstream pip ``audiox.models.dit.MMDiffusionTransformer`` (VLLM_OMNI_AUDIOX_USE_UPSTREAM_DIT)."
+        )
+    else:
+        diffusion_model = MMDiffusionTransformer(**diffusion_build_kwargs)
 
     io_channels = model_config["io_channels"]
     sample_rate = config["sample_rate"]
