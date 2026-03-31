@@ -90,19 +90,28 @@ class _MAFFusionBlock(nn.Module):
 
 
 class MAF_Block(nn.Module):
-    """AudioX MAF block with fixed official dimensions."""
+    """AudioX MAF multimodal fusion (matches upstream ``audiox.models.MAF.MAF_Block`` layout).
+
+    Parameter names ``video_tokens`` / ``text_tokens`` / ``audio_tokens`` follow the upstream
+    module, but **upstream** ``ConditionedDiffusionModel.get_conditioning_inputs`` calls
+    ``maf_block(text_feature, video_feature, audio_feature)`` — so the **first** tensor is
+    **text** conditioning and the **second** is **video** (see upstream ``diffusion.py``).
+    """
 
     DIM = 768
-    NUM_EXPERTS_PER_MODALITY = 64
-    NUM_HEADS = 12
-    NUM_FUSION_LAYERS = 8
     MLP_RATIO = 4.0
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        dim: int = 768,
+        num_experts_per_modality: int = 64,
+        num_heads: int = 24,
+        num_fusion_layers: int = 8,
+        mlp_ratio: float = 4.0,
+    ):
         super().__init__()
-        dim = self.DIM
-        num_heads = self.NUM_HEADS
-        total_experts = self.NUM_EXPERTS_PER_MODALITY * 3
+        total_experts = num_experts_per_modality * 3
 
         self.gating_network = nn.Sequential(
             nn.Linear(dim * 3, dim),
@@ -116,7 +125,7 @@ class MAF_Block(nn.Module):
         self.cross_block = _MAFCrossAttentionBlock(dim, num_heads)
         self.norm1 = nn.LayerNorm(dim)
         self.fusion_blocks = nn.ModuleList(
-            [_MAFFusionBlock(dim, num_heads, self.MLP_RATIO) for _ in range(self.NUM_FUSION_LAYERS)]
+            [_MAFFusionBlock(dim, num_heads, mlp_ratio) for _ in range(num_fusion_layers)]
         )
 
         self.norm_v2 = nn.LayerNorm(dim)

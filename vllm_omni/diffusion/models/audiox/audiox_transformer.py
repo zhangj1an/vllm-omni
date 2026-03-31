@@ -422,7 +422,6 @@ class MMDiffusionTransformer(nn.Module):
 
         if cross_attn_cond_mask is not None:
             cross_attn_cond_mask = cross_attn_cond_mask.bool()
-            cross_attn_cond_mask = None
 
         if prepend_cond_mask is not None:
             prepend_cond_mask = prepend_cond_mask.bool()

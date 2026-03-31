@@ -1,12 +1,17 @@
 import json
+import os
 import wave
 from pathlib import Path
 
-from examples.offline_inference.audiox.end2end import run_single_inference
+from examples.offline_inference.audiox.end2end import (
+    _default_diffusion_attention_backend,
+    run_single_inference,
+)
 
 
 def main() -> None:
-    base = Path("/root/vllm-omni/examples/offline_inference/audiox")
+    _default_diffusion_attention_backend()
+    base = Path(__file__).resolve().parent
     out_dir = base / "output" / "vllm_omni"
     out_dir.mkdir(parents=True, exist_ok=True)
     weights = str(base / "audiox_weights")
@@ -24,6 +29,11 @@ def main() -> None:
         ("tv2a", "drum beating sound and human talking", str(videos / "tv2a.mp4")),
         ("tv2m", "Uplifting music matching the scene", str(videos / "tv2m.mp4")),
     ]
+    # Comma/space-separated subset, e.g. AUDIOX_BENCH_TASKS=t2a
+    filt = os.environ.get("AUDIOX_BENCH_TASKS", "").strip()
+    if filt:
+        allow = {t.strip().lower() for t in filt.replace(",", " ").split() if t.strip()}
+        cases = [c for c in cases if c[0] in allow]
 
     results = []
     for task, prompt, video in cases:

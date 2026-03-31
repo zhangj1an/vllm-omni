@@ -83,6 +83,10 @@ class ConditionedDiffusionModelWrapper(nn.Module):
         cross_attn_cond_ids: list[str] | None = None,
         global_cond_ids: list[str] | None = None,
         od_config: OmniDiffusionConfig | None = None,
+        *,
+        gate: bool = False,
+        gate_type: str | None = None,
+        gate_type_config: dict[str, tp.Any] | None = None,
     ):
         super().__init__()
         self.model = model
@@ -97,7 +101,16 @@ class ConditionedDiffusionModelWrapper(nn.Module):
         self.global_cond_ids = global_cond_ids or []
         self.min_input_length = min_input_length
 
-        self.maf_block = MAF_Block()
+        self.maf_block: MAF_Block | None = None
+        if gate and gate_type == "MAF":
+            gtc = gate_type_config or {}
+            self.maf_block = MAF_Block(
+                dim=768,
+                num_experts_per_modality=int(gtc.get("num_experts_per_modality", 64)),
+                num_heads=int(gtc.get("num_heads", 24)),
+                num_fusion_layers=int(gtc.get("num_fusion_layers", 8)),
+                mlp_ratio=float(gtc.get("mlp_ratio", 4.0)),
+            )
 
     def get_conditioning_inputs(self, conditioning_tensors: dict[torch.Tensor, tp.Any], negative=False):
         cross_attention_input = None
@@ -117,8 +130,16 @@ class ConditionedDiffusionModelWrapper(nn.Module):
                 cross_attention_masks.append(cross_attn_mask)
 
             video_feature, text_feature, audio_feature = cross_attention_input
-            refined_branches = self.maf_block(video_feature, text_feature, audio_feature)
-            cross_attention_input = torch.cat(list(refined_branches.values()), dim=1)
+            # Match upstream ``audiox.models.diffusion.ConditionedDiffusionModel``:
+            # ``maf_block(text_feature, video_feature, audio_feature)`` (text and video args swapped
+            # vs cross_attn_cond_ids order; MAF parameter names are legacy).
+            if self.maf_block is not None:
+                refined_branches = self.maf_block(text_feature, video_feature, audio_feature)
+                cross_attention_input = torch.cat(list(refined_branches.values()), dim=1)
+            else:
+                cross_attention_input = torch.cat(
+                    [video_feature, text_feature, audio_feature], dim=1
+                )
             cross_attention_masks = torch.cat(cross_attention_masks, dim=1)
 
         if len(self.global_cond_ids) > 0:
@@ -159,9 +180,6 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
         diffusion_build_kwargs["od_config"] = od_config
 
     diffusion_model = MMDiffusionTransformer(**diffusion_build_kwargs)
-    with torch.no_grad():
-        for param in diffusion_model.parameters():
-            param *= 0.5
 
     io_channels = model_config["io_channels"]
     sample_rate = config["sample_rate"]
@@ -173,6 +191,11 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
 
     cross_attention_ids = ["video_prompt", "text_prompt", "audio_prompt"]
     global_cond_ids: list[str] = []
+
+    diffusion_full = model_config.get("diffusion") or {}
+    gate = bool(diffusion_full.get("gate", False))
+    gate_type = diffusion_full.get("gate_type")
+    gate_type_config = diffusion_full.get("gate_type_config")
 
     pretransform_cfg = model_config["pretransform"]
     pretransform = create_pretransform_from_config(pretransform_cfg, sample_rate)
@@ -191,6 +214,9 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
         io_channels=io_channels,
         diffusion_objective=diffusion_objective,
         od_config=od_config,
+        gate=gate,
+        gate_type=gate_type,
+        gate_type_config=gate_type_config,
     )
 
 
