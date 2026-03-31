@@ -21,13 +21,8 @@ from vllm_omni import Omni
 models = ["linyueqian/stable_audio_random"]
 
 
-@pytest.mark.core_model
-@pytest.mark.diffusion
-@hardware_test(res={"cuda": "L4", "xpu": "B60"})
-@pytest.mark.parametrize("model_name", models)
-def test_stable_audio_model(model_name: str):
-    m = Omni(model=model_name)
-
+def _run_stable_audio_and_validate(m: Omni) -> None:
+    """Run a minimal Stable Audio generation and validate output shape."""
     # Use minimal settings for testing
     # Generate a short 2-second audio clip with minimal inference steps
     audio_start_in_s = 0.0
@@ -70,3 +65,32 @@ def test_stable_audio_model(model_name: str):
     assert audio.shape[1] == 2  # stereo channels
     expected_samples = int((audio_end_in_s - audio_start_in_s) * sample_rate)
     assert audio.shape[2] == expected_samples  # 88200 samples for 2 seconds
+
+
+@pytest.mark.core_model
+@pytest.mark.diffusion
+@hardware_test(res={"cuda": "L4", "xpu": "B60"})
+@pytest.mark.parametrize("model_name", models)
+def test_stable_audio_model(model_name: str):
+    m = Omni(model=model_name)
+    try:
+        _run_stable_audio_and_validate(m)
+    finally:
+        m.close()
+
+
+@pytest.mark.core_model
+@pytest.mark.diffusion
+@pytest.mark.cache
+@hardware_test(res={"cuda": "L4", "xpu": "B60"})
+@pytest.mark.parametrize("model_name", models)
+def test_stable_audio_teacache(model_name: str):
+    m = Omni(
+        model=model_name,
+        cache_backend="tea_cache",
+        cache_config={"rel_l1_thresh": 0.2},
+    )
+    try:
+        _run_stable_audio_and_validate(m)
+    finally:
+        m.close()
