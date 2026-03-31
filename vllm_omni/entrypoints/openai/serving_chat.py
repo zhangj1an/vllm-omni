@@ -2051,8 +2051,8 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                     messages.append({"role": getattr(msg, "role", "user"), "content": getattr(msg, "content", "")})
 
             # Extract prompt and multimodal inputs from messages
-            prompt, reference_images, reference_videos, reference_audios = (
-                self._extract_diffusion_prompt_and_media(messages)
+            prompt, reference_images, reference_videos, reference_audios = self._extract_diffusion_prompt_and_media(
+                messages
             )
 
             # Extract generation parameters from extra_body (preferred)

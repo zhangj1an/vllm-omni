@@ -32,7 +32,8 @@ class OobleckVAEBase(nn.Module):
             return getattr(inner, name)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Sample VAE latents (same distribution as ``audiox`` ``vae_sample`` / Diffusers ``OobleckDiagonalGaussianDistribution.sample``).
+        """Sample VAE latents (same distribution as ``audiox`` ``vae_sample`` /
+        Diffusers ``OobleckDiagonalGaussianDistribution.sample``).
 
         For **bit-identical** parity vs upstream in a single process, call ``torch.manual_seed(...)`` to the **same**
         value immediately before **each** full ``MultiConditioner`` forward (video→text→audio order), so the first
