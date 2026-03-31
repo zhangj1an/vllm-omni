@@ -4,6 +4,7 @@ import typing as tp
 from typing import Any
 
 from diffusers import AutoencoderOobleck
+from torch import nn
 
 from vllm_omni.diffusion.layers.oobleck_vae_base import OobleckVAEBase
 from vllm_omni.diffusion.models.audiox.audiox_weights import (
@@ -33,6 +34,32 @@ def ae_cfg_to_diffusers_init_kwargs(ae_cfg: dict[str, Any], sample_rate: int) ->
 class AudioXVAE(OobleckVAEBase):
     """Minimal AudioX adapter around Diffusers AutoencoderOobleck."""
 
+    def __init__(
+        self,
+        inner: nn.Module,
+        *,
+        scaling_factor: float,
+        io_channels: int,
+        latent_dim: int,
+        sample_rate: int,
+        iterate_batch: bool = False,
+    ) -> None:
+        super().__init__(
+            inner,
+            scaling_factor=scaling_factor,
+            io_channels=io_channels,
+            latent_dim=latent_dim,
+            sample_rate=sample_rate,
+        )
+        self.iterate_batch = bool(iterate_batch)
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Match ``audiox.models.pretransforms.AutoencoderPretransform.encode`` when ``iterate_batch`` is set."""
+        if self.iterate_batch and x.shape[0] > 1:
+            parts = [super(AudioXVAE, self).encode(x[i : i + 1]) for i in range(x.shape[0])]
+            return torch.cat(parts, dim=0)
+        return super().encode(x)
+
 
 def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], sample_rate: int):
     allowed_keys = {"type", "config", "scale", "iterate_batch"}
@@ -55,6 +82,7 @@ def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], samp
         )
 
     scaling_factor = float(pretransform_config.get("scale", 1.0))
+    iterate_batch = bool(pretransform_config.get("iterate_batch", False))
 
     inner = AutoencoderOobleck(**ae_cfg_to_diffusers_init_kwargs(ae_inner, sample_rate))
     pretransform = AudioXVAE(
@@ -63,6 +91,7 @@ def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], samp
         io_channels=int(ae_inner["io_channels"]),
         latent_dim=int(ae_inner["latent_dim"]),
         sample_rate=int(sample_rate),
+        iterate_batch=iterate_batch,
     )
 
     pretransform.eval().requires_grad_(False)
