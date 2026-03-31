@@ -29,14 +29,13 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
-torch.set_float32_matmul_precision("highest")  # FP32
+torch.set_float32_matmul_precision("highest")
 
 _PATCH_ATTR = "_vllm_omni_dpmpp_3m_sde_fixed"
 _PROGRESS = ProgressBarMixin()
 
 
 def _use_upstream_pip_audiox_dit() -> bool:
-    """Use ``pip`` ``audiox.models.dit.MMDiffusionTransformer`` instead of the vLLM fork (``audiox_transformer``)."""
     v = os.environ.get("VLLM_OMNI_AUDIOX_USE_UPSTREAM_DIT", "")
     return str(v).strip().lower() in ("1", "true", "yes")
 
@@ -140,9 +139,7 @@ class ConditionedDiffusionModelWrapper(nn.Module):
                 cross_attention_masks.append(cross_attn_mask)
 
             video_feature, text_feature, audio_feature = cross_attention_input
-            # Match upstream ``audiox.models.diffusion.ConditionedDiffusionModel``:
-            # ``maf_block(text_feature, video_feature, audio_feature)`` (text and video args swapped
-            # vs cross_attn_cond_ids order; MAF parameter names are legacy).
+            # Upstream order: maf_block(text, video, audio) vs list order video, text, audio.
             if self.maf_block is not None:
                 refined_branches = self.maf_block(text_feature, video_feature, audio_feature)
                 cross_attention_input = torch.cat(list(refined_branches.values()), dim=1)

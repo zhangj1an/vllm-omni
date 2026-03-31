@@ -14,7 +14,7 @@ from torch.nn import functional as F
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
-from vllm_omni.diffusion.models.audiox.audiox_mm_rope import apply_rope, compute_rope_rotations
+from audiox.models.mm_embeddings import apply_rope, compute_rope_rotations
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):
 
 
 class AudioXRMSNorm(nn.Module):
-    """Matches upstream ``audiox.models.mm_transformer_layers.RMSNorm`` (no learnable weight)."""
+    """RMSNorm without learnable weight (matches upstream)."""
 
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -109,7 +109,6 @@ class AudioXMMDiTSelfAttention(nn.Module):
         self.split_into_heads = Rearrange("b n (h d j) -> b h n d j", h=nheads, d=dim // nheads, j=3)
 
     def apply_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        # Match upstream ``mm_transformer_layers.attention``: (B, H, N, D) layout, PyTorch SDPA.
         q = q.contiguous()
         k = k.contiguous()
         v = v.contiguous()
@@ -141,19 +140,7 @@ class AudioXMMDiTSelfAttention(nn.Module):
 
 
 class AudioXMMDiTBlock(nn.Module):
-    """MM-DiT residual block.
-
-    **Cross-attention** always uses pip ``audiox.models.mm_transformer_layers.CrossAttention``:
-
-    - **Upstream / pip:** one linear ``to_kv: (dim → 2*dim)`` for keys and values from ``context``, plus
-      ``to_q``; after head split, ``RMSNorm`` on Q/K, then shared ``attention()`` (SDPA).
-
-    - **Removed fork:** three separate linears ``to_q``, ``to_k``, ``to_v`` with the same output layout
-      split via ``einops`` — mathematically similar load, but checkpoint layout uses fused ``to_kv`` and
-      bisection showed numerical drift vs pip on identical tensors.
-
-    Self-attention remains selectable (fork vs pip ``SelfAttention``) via ``self_attn_mode``.
-    """
+    """MM-DiT block (pip CrossAttention; self-attention fork or upstream via ``self_attn_mode``)."""
 
     def __init__(
         self,
@@ -299,7 +286,7 @@ class MMDiffusionTransformer(nn.Module):
         self.global_cond_type = global_cond_type
 
         mm_stack = kwargs.pop("mm_stack", None) or _env_mm_stack()
-        kwargs.pop("mm_cross_attn", None)  # legacy no-op; cross-attn is always pip CrossAttention
+        kwargs.pop("mm_cross_attn", None)
         mm_self = kwargs.pop("mm_self_attn", None) or _env_mm_self_attn()
         if mm_stack != "fork" or mm_self != "fork":
             logger.info(

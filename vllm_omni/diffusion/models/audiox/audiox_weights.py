@@ -145,25 +145,10 @@ def remap_audiox_split_fused_attention_linears(
     return list(out.items())
 
 
-def _use_upstream_pip_audiox_dit_for_weights() -> bool:
-    """Match ``audiox_runtime._use_upstream_pip_audiox_dit`` without importing runtime (avoid cycles)."""
-    v = os.environ.get("VLLM_OMNI_AUDIOX_USE_UPSTREAM_DIT", "")
-    return str(v).strip().lower() in ("1", "true", "yes")
-
-
-def _use_upstream_style_cross_attn_weights() -> bool:
-    """vLLM DiT blocks always use pip ``audiox.models.mm_transformer_layers.CrossAttention`` (``to_q`` + ``to_kv``).
-
-    ``remap_audiox_split_fused_attention_linears`` splits checkpoint ``to_kv`` into ``to_k`` / ``to_v``; we merge
-    back before load so module keys match upstream.
-    """
-    return True
-
-
 def remap_audiox_merge_cross_attn_to_kv_for_upstream_dit(
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> list[tuple[str, torch.Tensor]]:
-    """Undo ``remap_audiox_split_fused_attention_linears`` cross-attn split for pip ``audiox`` ``CrossAttention`` (``to_q`` + ``to_kv``)."""
+    """Merge split ``to_k``/``to_v`` back to ``to_kv`` for pip CrossAttention."""
     d = dict(weights)
     drop: set[str] = set()
     add: dict[str, torch.Tensor] = {}
@@ -466,9 +451,7 @@ def remap_audiox_state_dict(
     *,
     model_config: dict[str, Any],
 ) -> list[tuple[str, torch.Tensor]]:
-    # ``convert_audiox_bundle`` / raw ``model.ckpt`` partitions use ``conditioner.`` / ``maf_block.`` /
-    # ``pretransform.`` without the ``_model.`` prefix. The Diffusers loader always passes
-    # ``_model.<component>...``. Oobleck→Diffusers remaps only match the latter; normalize here.
+    # Raw checkpoints omit ``_model.``; Diffusers loader expects it.
     normalized: list[tuple[str, torch.Tensor]] = []
     for k, v in weights:
         if k.startswith("_model."):
@@ -478,7 +461,6 @@ def remap_audiox_state_dict(
         else:
             normalized.append((k, v))
     remapped = remap_audiox_maf_weights(normalized)
-    # Accept legacy prefixes from upstream checkpoints and normalize to inference layout.
     legacy_prefix_map = {
         "_model.model.model.": "_model.model.",
         "model.model.": "_model.model.",
@@ -503,13 +485,12 @@ def remap_audiox_state_dict(
     remapped = normalized
     remapped = remap_audiox_oobleck_weights_for_diffusers(remapped, model_config=model_config)
     remapped = remap_audiox_split_fused_attention_linears(remapped)
-    if _use_upstream_style_cross_attn_weights():
-        remapped = remap_audiox_merge_cross_attn_to_kv_for_upstream_dit(remapped)
+    remapped = remap_audiox_merge_cross_attn_to_kv_for_upstream_dit(remapped)
     return remapped
 
 
 def filter_unused_keys(weights: Iterable[tuple[str, torch.Tensor]]) -> list[tuple[str, torch.Tensor]]:
-    """Pass-through; kept for API stability. ``MMDiffusionTransformer`` uses timestep/preprocess/postprocess."""
+    """API compatibility; returns weights unchanged."""
     return list(weights)
 
 
