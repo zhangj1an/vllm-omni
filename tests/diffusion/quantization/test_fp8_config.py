@@ -208,8 +208,15 @@ def test_supported_methods_count():
 
 
 def test_omnigen2_transformer_threads_fp8_quant_config():
-    """OmniGen2 DiT uses vLLM linear layers so dynamic FP8 can be applied."""
-    from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
+    """OmniGen2 DiT applies dynamic FP8 only on attn and FFN projection layers."""
+    import torch.nn as nn
+
+    from vllm.model_executor.layers.linear import (
+        MergedColumnParallelLinear,
+        QKVParallelLinear,
+        ReplicatedLinear,
+        RowParallelLinear,
+    )
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
     from vllm_omni.diffusion.models.omnigen2.omnigen2_transformer import OmniGen2Transformer2DModel
@@ -232,8 +239,10 @@ def test_omnigen2_transformer_threads_fp8_quant_config():
     )
     assert isinstance(m.layers[0].attn.to_qkv, QKVParallelLinear)
     assert isinstance(m.layers[0].attn.to_out[0], ReplicatedLinear)
-    assert isinstance(m.x_embedder, ReplicatedLinear)
-    assert isinstance(m.time_caption_embed.caption_embedder[1], ReplicatedLinear)
+    assert isinstance(m.layers[0].feed_forward.gate_up_proj, MergedColumnParallelLinear)
+    assert isinstance(m.layers[0].feed_forward.down_proj, RowParallelLinear)
+    assert isinstance(m.x_embedder, nn.Linear)
+    assert isinstance(m.time_caption_embed.caption_embedder[1], nn.Linear)
 
 
 def test_per_component_routing_with_resolve():

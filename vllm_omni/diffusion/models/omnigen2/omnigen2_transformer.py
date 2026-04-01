@@ -1,5 +1,4 @@
 import itertools
-import logging
 from collections.abc import Iterable
 from types import SimpleNamespace
 
@@ -21,8 +20,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.layer import Attention
-
-logger = logging.getLogger(__name__)
 
 
 class OmniGen2Attention(nn.Module):
@@ -152,20 +149,10 @@ class TimestepEmbedding(nn.Module):
         post_act_fn: str | None = None,
         cond_proj_dim=None,
         sample_proj_bias=True,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
     ):
         super().__init__()
 
-        p1 = f"{prefix}.linear_1" if prefix else "linear_1"
-        self.linear_1 = ReplicatedLinear(
-            in_channels,
-            time_embed_dim,
-            bias=sample_proj_bias,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=p1,
-        )
+        self.linear_1 = nn.Linear(in_channels, time_embed_dim, sample_proj_bias)
 
         if cond_proj_dim is not None:
             self.cond_proj = nn.Linear(cond_proj_dim, in_channels, bias=False)
@@ -178,15 +165,7 @@ class TimestepEmbedding(nn.Module):
             time_embed_dim_out = out_dim
         else:
             time_embed_dim_out = time_embed_dim
-        p2 = f"{prefix}.linear_2" if prefix else "linear_2"
-        self.linear_2 = ReplicatedLinear(
-            time_embed_dim,
-            time_embed_dim_out,
-            bias=sample_proj_bias,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=p2,
-        )
+        self.linear_2 = nn.Linear(time_embed_dim, time_embed_dim_out, sample_proj_bias)
 
         if post_act_fn is None:
             self.post_act = None
@@ -267,19 +246,13 @@ class LuminaRMSNormZero(nn.Module):
         embedding_dim: int,
         norm_eps: float,
         norm_elementwise_affine: bool,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
     ):
         super().__init__()
         self.silu = nn.SiLU()
-        lp = f"{prefix}.linear" if prefix else "linear"
-        self.linear = ReplicatedLinear(
+        self.linear = nn.Linear(
             min(embedding_dim, 1024),
             4 * embedding_dim,
             bias=True,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=lp,
         )
 
         self.norm = RMSNorm(embedding_dim, eps=norm_eps)
@@ -310,22 +283,12 @@ class LuminaLayerNormContinuous(nn.Module):
         bias=True,
         norm_type="layer_norm",
         out_dim: int | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
     ):
         super().__init__()
 
         # AdaLN
         self.silu = nn.SiLU()
-        p1 = f"{prefix}.linear_1" if prefix else "linear_1"
-        self.linear_1 = ReplicatedLinear(
-            conditioning_embedding_dim,
-            embedding_dim,
-            bias=bias,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=p1,
-        )
+        self.linear_1 = nn.Linear(conditioning_embedding_dim, embedding_dim, bias=bias)
 
         if norm_type == "layer_norm":
             self.norm = nn.LayerNorm(embedding_dim, eps, elementwise_affine, bias)
@@ -336,15 +299,7 @@ class LuminaLayerNormContinuous(nn.Module):
 
         self.linear_2 = None
         if out_dim is not None:
-            p2 = f"{prefix}.linear_2" if prefix else "linear_2"
-            self.linear_2 = ReplicatedLinear(
-                embedding_dim,
-                out_dim,
-                bias=bias,
-                quant_config=quant_config,
-                return_bias=False,
-                prefix=p2,
-            )
+            self.linear_2 = nn.Linear(embedding_dim, out_dim, bias=bias)
 
     def forward(
         self,
@@ -415,7 +370,8 @@ class LuminaFeedForward(nn.Module):
     def forward(self, x):
         x = self.gate_up_proj(x)
         x = self.act_fn(x)
-        return self.down_proj(x)
+        x = self.down_proj(x)
+        return x
 
 
 class Lumina2CombinedTimestepCaptionEmbedding(nn.Module):
@@ -426,7 +382,6 @@ class Lumina2CombinedTimestepCaptionEmbedding(nn.Module):
         frequency_embedding_size: int = 256,
         norm_eps: float = 1e-5,
         timestep_scale: float = 1.0,
-        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
 
@@ -440,20 +395,11 @@ class Lumina2CombinedTimestepCaptionEmbedding(nn.Module):
         self.timestep_embedder = TimestepEmbedding(
             in_channels=frequency_embedding_size,
             time_embed_dim=min(hidden_size, 1024),
-            quant_config=quant_config,
-            prefix="time_caption_embed.timestep_embedder",
         )
 
         self.caption_embedder = nn.Sequential(
             RMSNorm(text_feat_dim, eps=norm_eps),
-            ReplicatedLinear(
-                text_feat_dim,
-                hidden_size,
-                bias=True,
-                quant_config=quant_config,
-                return_bias=False,
-                prefix="time_caption_embed.caption_embedder.1",
-            ),
+            nn.Linear(text_feat_dim, hidden_size, bias=True),
         )
 
     def forward(
@@ -699,8 +645,6 @@ class OmniGen2TransformerBlock(nn.Module):
                 embedding_dim=dim,
                 norm_eps=norm_eps,
                 norm_elementwise_affine=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.norm1",
             )
         else:
             self.norm1 = RMSNorm(dim, eps=norm_eps)
@@ -830,22 +774,16 @@ class OmniGen2Transformer2DModel(nn.Module):
             patch_size=patch_size,
         )
 
-        self.x_embedder = ReplicatedLinear(
-            patch_size * patch_size * in_channels,
-            hidden_size,
+        self.x_embedder = nn.Linear(
+            in_features=patch_size * patch_size * in_channels,
+            out_features=hidden_size,
             bias=True,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix="x_embedder",
         )
 
-        self.ref_image_patch_embedder = ReplicatedLinear(
-            patch_size * patch_size * in_channels,
-            hidden_size,
+        self.ref_image_patch_embedder = nn.Linear(
+            in_features=patch_size * patch_size * in_channels,
+            out_features=hidden_size,
             bias=True,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix="ref_image_patch_embedder",
         )
 
         self.time_caption_embed = Lumina2CombinedTimestepCaptionEmbedding(
@@ -853,7 +791,6 @@ class OmniGen2Transformer2DModel(nn.Module):
             text_feat_dim=text_feat_dim,
             norm_eps=norm_eps,
             timestep_scale=timestep_scale,
-            quant_config=quant_config,
         )
 
         # Initialize transformer blocks
@@ -934,8 +871,6 @@ class OmniGen2Transformer2DModel(nn.Module):
             eps=1e-6,
             bias=True,
             out_dim=patch_size * patch_size * self.out_channels,
-            quant_config=quant_config,
-            prefix="norm_out",
         )
 
         # Add learnable embeddings to distinguish different images
@@ -954,11 +889,25 @@ class OmniGen2Transformer2DModel(nn.Module):
         temb,
     ):
         batch_size = len(hidden_states)
+        has_ref_tokens = any(ref_img_len > 0 for ref_lens in l_effective_ref_img_len for ref_img_len in ref_lens)
         max_combined_img_len = max(
             [img_len + sum(ref_img_len) for img_len, ref_img_len in zip(l_effective_img_len, l_effective_ref_img_len)]
         )
 
         hidden_states = self.x_embedder(hidden_states)
+        if not has_ref_tokens:
+            # FP8 kernels do not support zero-token GEMM on ref_image_patch_embedder; skip that path only.
+            # Still run noise_refiner and return the same combined layout as the no-ref case below
+            # (batch, max_combined_img_len, hidden) — not raw noise tokens alone.
+            for layer in self.noise_refiner:
+                hidden_states = layer(hidden_states, padded_img_mask, noise_rotary_emb, temb)
+            combined_img_hidden_states = hidden_states.new_zeros(
+                batch_size, max_combined_img_len, self.config.hidden_size
+            )
+            for i, img_len in enumerate(l_effective_img_len):
+                combined_img_hidden_states[i, :img_len] = hidden_states[i, :img_len]
+            return combined_img_hidden_states
+
         ref_image_hidden_states = self.ref_image_patch_embedder(ref_image_hidden_states)
 
         for i in range(batch_size):

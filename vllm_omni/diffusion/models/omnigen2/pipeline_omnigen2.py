@@ -1252,8 +1252,6 @@ class OmniGen2Pipeline(nn.Module):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
-        batch_size, num_channels_latents, height, width = latents.shape
-
         optional_kwargs = {}
         if "ref_image_hidden_states" in set(inspect.signature(self.transformer.forward).parameters.keys()):
             optional_kwargs["ref_image_hidden_states"] = ref_image_hidden_states
@@ -1266,6 +1264,10 @@ class OmniGen2Pipeline(nn.Module):
             prompt_attention_mask,
             **optional_kwargs,
         )
+
+        if hasattr(model_pred, "sample"):
+            model_pred = model_pred.sample
+
         return model_pred
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
