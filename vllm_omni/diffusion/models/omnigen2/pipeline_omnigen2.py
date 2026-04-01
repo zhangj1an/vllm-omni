@@ -675,7 +675,10 @@ class OmniGen2Pipeline(nn.Module):
         )
 
         transformer_kwargs = get_transformer_config_kwargs(od_config.tf_model_config, OmniGen2Transformer2DModel)
-        self.transformer = OmniGen2Transformer2DModel(**transformer_kwargs)
+        self.transformer = OmniGen2Transformer2DModel(
+            **transformer_kwargs,
+            quant_config=od_config.quantization_config,
+        )
         self.mllm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model, subfolder="mllm", local_files_only=local_files_only
         ).to(self.device)

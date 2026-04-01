@@ -14,8 +14,10 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.layer import Attention
@@ -30,6 +32,8 @@ class OmniGen2Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         eps: float = 1e-5,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.dim = dim
@@ -45,12 +49,25 @@ class OmniGen2Attention(nn.Module):
             total_num_kv_heads=num_kv_heads,
             disable_tp=True,
             bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_qkv",
         )
 
         self.norm_q = RMSNorm(self.head_dim, eps=eps)
         self.norm_k = RMSNorm(self.head_dim, eps=eps)
 
-        self.to_out = nn.ModuleList([nn.Linear(dim, dim, bias=False)])
+        self.to_out = nn.ModuleList(
+            [
+                ReplicatedLinear(
+                    dim,
+                    dim,
+                    bias=False,
+                    quant_config=quant_config,
+                    return_bias=False,
+                    prefix=f"{prefix}.to_out.0",
+                )
+            ]
+        )
         self.attn = Attention(
             num_heads=num_heads,
             head_size=self.head_dim,
@@ -135,10 +152,20 @@ class TimestepEmbedding(nn.Module):
         post_act_fn: str | None = None,
         cond_proj_dim=None,
         sample_proj_bias=True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
-        self.linear_1 = nn.Linear(in_channels, time_embed_dim, sample_proj_bias)
+        p1 = f"{prefix}.linear_1" if prefix else "linear_1"
+        self.linear_1 = ReplicatedLinear(
+            in_channels,
+            time_embed_dim,
+            bias=sample_proj_bias,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix=p1,
+        )
 
         if cond_proj_dim is not None:
             self.cond_proj = nn.Linear(cond_proj_dim, in_channels, bias=False)
@@ -151,7 +178,15 @@ class TimestepEmbedding(nn.Module):
             time_embed_dim_out = out_dim
         else:
             time_embed_dim_out = time_embed_dim
-        self.linear_2 = nn.Linear(time_embed_dim, time_embed_dim_out, sample_proj_bias)
+        p2 = f"{prefix}.linear_2" if prefix else "linear_2"
+        self.linear_2 = ReplicatedLinear(
+            time_embed_dim,
+            time_embed_dim_out,
+            bias=sample_proj_bias,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix=p2,
+        )
 
         if post_act_fn is None:
             self.post_act = None
@@ -232,13 +267,19 @@ class LuminaRMSNormZero(nn.Module):
         embedding_dim: int,
         norm_eps: float,
         norm_elementwise_affine: bool,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.silu = nn.SiLU()
-        self.linear = nn.Linear(
+        lp = f"{prefix}.linear" if prefix else "linear"
+        self.linear = ReplicatedLinear(
             min(embedding_dim, 1024),
             4 * embedding_dim,
             bias=True,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix=lp,
         )
 
         self.norm = RMSNorm(embedding_dim, eps=norm_eps)
@@ -269,12 +310,22 @@ class LuminaLayerNormContinuous(nn.Module):
         bias=True,
         norm_type="layer_norm",
         out_dim: int | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
         # AdaLN
         self.silu = nn.SiLU()
-        self.linear_1 = nn.Linear(conditioning_embedding_dim, embedding_dim, bias=bias)
+        p1 = f"{prefix}.linear_1" if prefix else "linear_1"
+        self.linear_1 = ReplicatedLinear(
+            conditioning_embedding_dim,
+            embedding_dim,
+            bias=bias,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix=p1,
+        )
 
         if norm_type == "layer_norm":
             self.norm = nn.LayerNorm(embedding_dim, eps, elementwise_affine, bias)
@@ -285,7 +336,15 @@ class LuminaLayerNormContinuous(nn.Module):
 
         self.linear_2 = None
         if out_dim is not None:
-            self.linear_2 = nn.Linear(embedding_dim, out_dim, bias=bias)
+            p2 = f"{prefix}.linear_2" if prefix else "linear_2"
+            self.linear_2 = ReplicatedLinear(
+                embedding_dim,
+                out_dim,
+                bias=bias,
+                quant_config=quant_config,
+                return_bias=False,
+                prefix=p2,
+            )
 
     def forward(
         self,
@@ -324,6 +383,8 @@ class LuminaFeedForward(nn.Module):
         inner_dim: int,
         multiple_of: int | None = 256,
         ffn_dim_multiplier: float | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -337,6 +398,8 @@ class LuminaFeedForward(nn.Module):
             [inner_dim, inner_dim],
             bias=False,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.act_fn = get_act_and_mul_fn("silu")
         self.down_proj = RowParallelLinear(
@@ -345,6 +408,8 @@ class LuminaFeedForward(nn.Module):
             bias=False,
             input_is_parallel=True,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
 
     def forward(self, x):
@@ -361,6 +426,7 @@ class Lumina2CombinedTimestepCaptionEmbedding(nn.Module):
         frequency_embedding_size: int = 256,
         norm_eps: float = 1e-5,
         timestep_scale: float = 1.0,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
 
@@ -372,12 +438,22 @@ class Lumina2CombinedTimestepCaptionEmbedding(nn.Module):
         )
 
         self.timestep_embedder = TimestepEmbedding(
-            in_channels=frequency_embedding_size, time_embed_dim=min(hidden_size, 1024)
+            in_channels=frequency_embedding_size,
+            time_embed_dim=min(hidden_size, 1024),
+            quant_config=quant_config,
+            prefix="time_caption_embed.timestep_embedder",
         )
 
         self.caption_embedder = nn.Sequential(
             RMSNorm(text_feat_dim, eps=norm_eps),
-            nn.Linear(text_feat_dim, hidden_size, bias=True),
+            ReplicatedLinear(
+                text_feat_dim,
+                hidden_size,
+                bias=True,
+                quant_config=quant_config,
+                return_bias=False,
+                prefix="time_caption_embed.caption_embedder.1",
+            ),
         )
 
     def forward(
@@ -590,6 +666,8 @@ class OmniGen2TransformerBlock(nn.Module):
         ffn_dim_multiplier: float,
         norm_eps: float,
         modulation: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         """Initialize the transformer block."""
         super().__init__()
@@ -601,6 +679,8 @@ class OmniGen2TransformerBlock(nn.Module):
             num_heads=num_attention_heads,
             num_kv_heads=num_kv_heads,
             eps=1e-5,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
         )
 
         # Initialize feed-forward network
@@ -609,11 +689,19 @@ class OmniGen2TransformerBlock(nn.Module):
             inner_dim=4 * dim,
             multiple_of=multiple_of,
             ffn_dim_multiplier=ffn_dim_multiplier,
+            quant_config=quant_config,
+            prefix=f"{prefix}.feed_forward",
         )
 
         # Initialize normalization layers
         if modulation:
-            self.norm1 = LuminaRMSNormZero(embedding_dim=dim, norm_eps=norm_eps, norm_elementwise_affine=True)
+            self.norm1 = LuminaRMSNormZero(
+                embedding_dim=dim,
+                norm_eps=norm_eps,
+                norm_elementwise_affine=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.norm1",
+            )
         else:
             self.norm1 = RMSNorm(dim, eps=norm_eps)
 
@@ -712,6 +800,7 @@ class OmniGen2Transformer2DModel(nn.Module):
         axes_lens: tuple[int, int, int] = (1024, 1664, 1664),
         text_feat_dim: int = 2048,
         timestep_scale: float = 1000.0,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         """Initialize the OmniGen2 transformer model."""
         super().__init__()
@@ -741,14 +830,22 @@ class OmniGen2Transformer2DModel(nn.Module):
             patch_size=patch_size,
         )
 
-        self.x_embedder = nn.Linear(
-            in_features=patch_size * patch_size * in_channels,
-            out_features=hidden_size,
+        self.x_embedder = ReplicatedLinear(
+            patch_size * patch_size * in_channels,
+            hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix="x_embedder",
         )
 
-        self.ref_image_patch_embedder = nn.Linear(
-            in_features=patch_size * patch_size * in_channels,
-            out_features=hidden_size,
+        self.ref_image_patch_embedder = ReplicatedLinear(
+            patch_size * patch_size * in_channels,
+            hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix="ref_image_patch_embedder",
         )
 
         self.time_caption_embed = Lumina2CombinedTimestepCaptionEmbedding(
@@ -756,6 +853,7 @@ class OmniGen2Transformer2DModel(nn.Module):
             text_feat_dim=text_feat_dim,
             norm_eps=norm_eps,
             timestep_scale=timestep_scale,
+            quant_config=quant_config,
         )
 
         # Initialize transformer blocks
@@ -769,8 +867,10 @@ class OmniGen2Transformer2DModel(nn.Module):
                     ffn_dim_multiplier,
                     norm_eps,
                     modulation=True,
+                    quant_config=quant_config,
+                    prefix=f"noise_refiner.{i}",
                 )
-                for _ in range(num_refiner_layers)
+                for i in range(num_refiner_layers)
             ]
         )
 
@@ -784,8 +884,10 @@ class OmniGen2Transformer2DModel(nn.Module):
                     ffn_dim_multiplier,
                     norm_eps,
                     modulation=True,
+                    quant_config=quant_config,
+                    prefix=f"ref_image_refiner.{i}",
                 )
-                for _ in range(num_refiner_layers)
+                for i in range(num_refiner_layers)
             ]
         )
 
@@ -799,8 +901,10 @@ class OmniGen2Transformer2DModel(nn.Module):
                     ffn_dim_multiplier,
                     norm_eps,
                     modulation=False,
+                    quant_config=quant_config,
+                    prefix=f"context_refiner.{i}",
                 )
-                for _ in range(num_refiner_layers)
+                for i in range(num_refiner_layers)
             ]
         )
 
@@ -815,8 +919,10 @@ class OmniGen2Transformer2DModel(nn.Module):
                     ffn_dim_multiplier,
                     norm_eps,
                     modulation=True,
+                    quant_config=quant_config,
+                    prefix=f"layers.{i}",
                 )
-                for _ in range(num_layers)
+                for i in range(num_layers)
             ]
         )
 
@@ -828,6 +934,8 @@ class OmniGen2Transformer2DModel(nn.Module):
             eps=1e-6,
             bias=True,
             out_dim=patch_size * patch_size * self.out_channels,
+            quant_config=quant_config,
+            prefix="norm_out",
         )
 
         # Add learnable embeddings to distinguish different images

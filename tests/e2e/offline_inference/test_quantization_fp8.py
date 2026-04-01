@@ -222,6 +222,20 @@ def test_single_stage_qwen_image_fp8():
 
 
 @hardware_test(res={"cuda": "H100"})
+def test_single_stage_omnigen2_fp8():
+    """OmniGen2 with FP8 generates valid images."""
+    if current_omni_platform.is_npu() or current_omni_platform.is_rocm():
+        pytest.skip("OmniGen2 FP8 e2e test is CUDA-only in CI")
+
+    images, _ = _generate_single_stage_image(
+        model="OmniGen2/OmniGen2",
+        quantization="fp8",
+    )
+    assert len(images) >= 1
+    images[0].save("test_omnigen2_fp8.png")
+
+
+@hardware_test(res={"cuda": "H100"})
 def test_single_stage_flux_fp8():
     """FLUX.1-dev with FP8 generates valid images."""
     images, _ = _generate_single_stage_image(

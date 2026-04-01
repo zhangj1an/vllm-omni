@@ -207,6 +207,35 @@ def test_supported_methods_count():
     assert len(SUPPORTED_QUANTIZATION_METHODS) >= 20
 
 
+def test_omnigen2_transformer_threads_fp8_quant_config():
+    """OmniGen2 DiT uses vLLM linear layers so dynamic FP8 can be applied."""
+    from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    from vllm_omni.diffusion.models.omnigen2.omnigen2_transformer import OmniGen2Transformer2DModel
+
+    fp8 = Fp8Config(is_checkpoint_fp8_serialized=False, activation_scheme="dynamic")
+    m = OmniGen2Transformer2DModel(
+        patch_size=2,
+        in_channels=16,
+        hidden_size=128,
+        num_layers=1,
+        num_refiner_layers=1,
+        num_attention_heads=4,
+        num_kv_heads=2,
+        multiple_of=32,
+        ffn_dim_multiplier=1.0,
+        axes_dim_rope=(16, 8, 8),
+        axes_lens=(64, 64, 64),
+        text_feat_dim=64,
+        quant_config=fp8,
+    )
+    assert isinstance(m.layers[0].attn.to_qkv, QKVParallelLinear)
+    assert isinstance(m.layers[0].attn.to_out[0], ReplicatedLinear)
+    assert isinstance(m.x_embedder, ReplicatedLinear)
+    assert isinstance(m.time_caption_embed.caption_embedder[1], ReplicatedLinear)
+
+
 def test_per_component_routing_with_resolve():
     """Verify resolve() routes correctly by prefix."""
     from vllm_omni.quantization import ComponentQuantizationConfig, build_quant_config
