@@ -210,7 +210,6 @@ def test_supported_methods_count():
 def test_omnigen2_transformer_threads_fp8_quant_config():
     """OmniGen2 DiT applies dynamic FP8 only on attn and FFN projection layers."""
     import torch.nn as nn
-
     from vllm.model_executor.layers.linear import (
         MergedColumnParallelLinear,
         QKVParallelLinear,
