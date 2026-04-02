@@ -61,7 +61,7 @@ class OmniGen2Attention(nn.Module):
                     input_is_parallel=True,
                     quant_config=quant_config,
                     return_bias=False,
-                    prefix=f"{prefix}.to_out.0",
+                    prefix=f"{prefix}.to_out",
                 )
             ]
         )
