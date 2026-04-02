@@ -13,7 +13,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -55,10 +54,11 @@ class OmniGen2Attention(nn.Module):
 
         self.to_out = nn.ModuleList(
             [
-                ReplicatedLinear(
+                RowParallelLinear(
                     dim,
                     dim,
                     bias=False,
+                    input_is_parallel=True,
                     quant_config=quant_config,
                     return_bias=False,
                     prefix=f"{prefix}.to_out.0",

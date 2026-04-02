@@ -214,7 +214,6 @@ def test_omnigen2_transformer_threads_fp8_quant_config():
     from vllm.model_executor.layers.linear import (
         MergedColumnParallelLinear,
         QKVParallelLinear,
-        ReplicatedLinear,
         RowParallelLinear,
     )
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
@@ -238,7 +237,7 @@ def test_omnigen2_transformer_threads_fp8_quant_config():
         quant_config=fp8,
     )
     assert isinstance(m.layers[0].attn.to_qkv, QKVParallelLinear)
-    assert isinstance(m.layers[0].attn.to_out[0], ReplicatedLinear)
+    assert isinstance(m.layers[0].attn.to_out[0], RowParallelLinear)
     assert isinstance(m.layers[0].feed_forward.gate_up_proj, MergedColumnParallelLinear)
     assert isinstance(m.layers[0].feed_forward.down_proj, RowParallelLinear)
     assert isinstance(m.x_embedder, nn.Linear)
