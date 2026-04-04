@@ -20,6 +20,7 @@ logger = init_logger(__name__)
 
 _DIFFUSERS_CLASS_TO_CONFIG: dict[str, str] = {
     "GlmImagePipeline": "glm_image",
+    "StableAudioPipeline": "stable_audio",
 }
 
 
