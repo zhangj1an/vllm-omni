@@ -42,6 +42,12 @@ def generate_stable_audio_short_clip(
 
     assert outputs is not None
     first_output = outputs[0]
+    # Outer OmniRequestOutput.final_output_type comes from get_stage_metadata. 
+    # The nested request_output is the worker OmniRequestOutput
+    # (e.g. final_output_type="audio") and holds the multimodal payload.
+    # Follow-up: add StableAudioPipeline stage YAML, and pass model into
+    # _create_default_diffusion_stage_cfg so default diffusion metadata can set
+    # final_output_type to "audio" for future audio pipelines without YAML.
     assert first_output.final_output_type == "image"
     assert hasattr(first_output, "request_output") and first_output.request_output
 
