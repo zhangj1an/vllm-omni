@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-End-to-end AudioX offline example: Hugging Face weight download, sample video assets, and Omni inference.
+End-to-end AudioX offline example: local weight bundle, optional sample video assets, and Omni inference.
 
-Weights are fetched from **Hugging Face** (same repos as ``HKUSTAudio/AudioX*``). Inference code is
-inlined under ``vllm_omni.diffusion.models.audiox`` (no separate AudioX clone).
+Provide a directory with **vLLM-Omni sharded safetensors** (see ``model_index.json``), e.g. from
+``zhangj1an/AudioX`` on Hugging Face. Inference code lives under ``vllm_omni.diffusion.models.audiox``
+(no separate AudioX clone).
 
 Install extra Python deps from the repo root: ``pip install -e ".[audiox]"``
 (see ``README.md``).
@@ -14,6 +15,7 @@ Unless ``DIFFUSION_ATTENTION_BACKEND`` is set, this script defaults it to ``TORC
 Typical flow::
 
     cd examples/offline_inference/audiox
+    # populate ./audiox_weights (e.g. huggingface-cli download zhangj1an/AudioX …) or set AUDIOX_MODEL
     python end2end.py run
 
 Or use ``./run_audiox_sample_task.sh`` (sets ``PYTHONPATH`` and runs the same command).
@@ -37,12 +39,6 @@ import torch
 
 ROOT = Path(__file__).resolve().parent
 
-# --- Hugging Face model id (weights only) ---
-DEFAULT_HF_MODEL_KEY = "maf-mmdit"
-REPO_BY_MODEL: dict[str, str] = {
-    DEFAULT_HF_MODEL_KEY: "HKUSTAudio/AudioX-MAF-MMDiT",
-}
-
 # --- Sample videos (Pexels); see https://www.pexels.com/license/ ---
 PEXELS_SAMPLE_ANIMAL_URL = "https://www.pexels.com/download/video/5871756/"
 _FFMPEG_PEXELS_HEADERS = (
@@ -64,10 +60,7 @@ SAMPLE_PROMPTS: dict[str, str] = {
 # --- Inlined default run config (previously configs/animal.json) ---
 DEFAULT_RUN_CONFIG: dict[str, Any] = {
     "weights": {
-        "hf_model": DEFAULT_HF_MODEL_KEY,
         "local_dir": "audiox_weights",
-        "full": True,
-        "download_if_missing": True,
     },
     "assets": {
         "local_dir": "assets",
@@ -94,32 +87,6 @@ TEXT_TASKS = frozenset({"t2a", "t2m", "tv2a", "tv2m"})
 ALL_TASKS_ORDERED = ("t2a", "t2m", "v2a", "v2m", "tv2a", "tv2m")
 
 
-def _timed_hf_download(repo_id: str, local_dir: Path, *, allow_patterns: list[str]) -> None:
-    from huggingface_hub import snapshot_download
-
-    if local_dir.is_dir() and any(local_dir.iterdir()):
-        print(f"Directory {local_dir} is non-empty. HF may skip existing files.")
-    print(f"Downloading {repo_id} -> {local_dir}")
-    t0 = time.perf_counter()
-    snapshot_download(
-        repo_id=repo_id,
-        local_dir=str(local_dir),
-        local_dir_use_symlinks=False,
-        allow_patterns=allow_patterns,
-    )
-    print(f"Finished in {time.perf_counter() - t0:.1f}s")
-
-
-def _ensure_transformer_stub_config(output_dir: Path) -> None:
-    """HF README / tooling sometimes expect ``transformer/config.json`` under the bundle."""
-    tf_dir = output_dir / "transformer"
-    tf_dir.mkdir(parents=True, exist_ok=True)
-    stub = tf_dir / "config.json"
-    if not stub.is_file():
-        stub.write_text("{}\n", encoding="utf-8")
-        print(f"Wrote {stub}")
-
-
 def _audiox_bundle_is_sharded(weights_dir: Path) -> bool:
     from vllm_omni.diffusion.models.audiox.audiox_weights import resolve_audiox_bundle_paths
 
@@ -137,42 +104,16 @@ def _get_audiox_model_sample_rate(weights_dir: Path) -> int:
     return int(model_cfg.get("sample_rate", 48000))
 
 
-def _ensure_audiox_sharded_weights(weights_dir: Path) -> None:
-    """vLLM-Omni loads only component safetensors; convert ``model.ckpt`` in place when needed."""
-    from vllm_omni.diffusion.models.audiox.audiox_weights import convert_audiox_bundle
-
+def _require_sharded_audiox_weights(weights_dir: Path) -> None:
+    """vLLM-Omni loads only component safetensors (``model_index.json`` + shard files)."""
     if _audiox_bundle_is_sharded(weights_dir):
         return
-    ckpt = weights_dir / "model.ckpt"
-    if not ckpt.is_file():
-        raise FileNotFoundError(
-            f"No sharded weights and no model.ckpt under {weights_dir} "
-            "(download HF bundle or run audiox_weights conversion on a checkpoint directory)."
-        )
-    print(f"Converting {ckpt.name} to vLLM-Omni sharded safetensors under {weights_dir} …")
-    convert_audiox_bundle(str(weights_dir.resolve()), str(weights_dir.resolve()), copy_config=True)
-    if not _audiox_bundle_is_sharded(weights_dir):
-        raise RuntimeError(f"Sharded layout still incomplete after conversion under {weights_dir}")
-
-
-def download_weights(
-    *,
-    hf_model: str,
-    output_dir: Path,
-    full: bool,
-    repo_id: str | None = None,
-) -> None:
-    """Download checkpoint bundle from Hugging Face and write vLLM-Omni index files."""
-    if hf_model != DEFAULT_HF_MODEL_KEY:
-        raise SystemExit(f"Unsupported hf_model={hf_model!r}. This example only supports {DEFAULT_HF_MODEL_KEY!r}.")
-    repo_id = repo_id or REPO_BY_MODEL.get(hf_model, hf_model)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    allow = ["config.json", "model.ckpt", "README.md", ".gitattributes"]
-    if full:
-        allow.extend(["VAE.ckpt"])
-    _timed_hf_download(repo_id, output_dir, allow_patterns=allow)
-    _ensure_transformer_stub_config(output_dir)
-    _ensure_audiox_sharded_weights(output_dir)
+    raise SystemExit(
+        f"Missing vLLM-Omni sharded weights under {weights_dir}. "
+        "Expected model_index.json plus transformer/conditioners safetensor shards (and vae/ if pretransform). "
+        "Download a bundle, for example:\n"
+        f"  huggingface-cli download zhangj1an/AudioX --local-dir {weights_dir}"
+    )
 
 
 def download_sample_assets(output_dir: Path, *, trim_seconds: int) -> None:
@@ -248,10 +189,7 @@ def run_single_inference(
         raise SystemExit(f"task {task} requires a video path.")
 
     wd = Path(os.path.abspath(os.path.expanduser(model_dir)))
-    try:
-        _ensure_audiox_sharded_weights(wd)
-    except (FileNotFoundError, RuntimeError, ValueError) as e:
-        raise SystemExit(str(e)) from e
+    _require_sharded_audiox_weights(wd)
 
     prompt_text = prompt if task in TEXT_TASKS else ""
     model_sample_rate = _get_audiox_model_sample_rate(wd)
@@ -375,24 +313,13 @@ def cmd_run(args: argparse.Namespace) -> None:
     a = cfg.get("assets") or {}
     r = cfg.get("run") or {}
 
-    hf_model = w.get("hf_model", DEFAULT_HF_MODEL_KEY)
     weights_dir = Path(w.get("local_dir", "audiox_weights"))
     if not weights_dir.is_absolute():
         weights_dir = ROOT / weights_dir
-    full = bool(w.get("full", True))
-    dl_w = bool(w.get("download_if_missing", True)) and not args.skip_download_weights
-    repo_override = (w.get("repo_id") or "").strip() or None
 
     model_override = os.environ.get("AUDIOX_MODEL", "").strip()
-    variant = os.environ.get("AUDIOX_MODEL_VARIANT", "").strip().lower()
-    if variant and not model_override:
-        if variant != DEFAULT_HF_MODEL_KEY:
-            raise SystemExit(f"AUDIOX_MODEL_VARIANT={variant!r} is not supported. Use {DEFAULT_HF_MODEL_KEY!r}.")
-        hf_model = DEFAULT_HF_MODEL_KEY
-        weights_dir = ROOT / "audiox_weights"
-
-    if hf_model != DEFAULT_HF_MODEL_KEY:
-        raise SystemExit(f"weights.hf_model={hf_model!r} is not supported. Use {DEFAULT_HF_MODEL_KEY!r}.")
+    if model_override:
+        weights_dir = Path(os.path.abspath(os.path.expanduser(model_override)))
 
     assets_dir = Path(a.get("local_dir", "assets"))
     if not assets_dir.is_absolute():
@@ -405,31 +332,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     if not video_path:
         video_path = str(assets_dir / f"sample_{clip}.mp4")
 
-    if model_override:
-        weights_dir = Path(os.path.abspath(os.path.expanduser(model_override)))
-        dl_w = False
-
-    ckpt = weights_dir / "model.ckpt"
     if not _audiox_bundle_is_sharded(weights_dir):
-        if dl_w and not ckpt.is_file():
-            download_weights(
-                hf_model=hf_model,
-                output_dir=weights_dir,
-                full=full,
-                repo_id=repo_override,
-            )
-        elif ckpt.is_file():
-            try:
-                _ensure_audiox_sharded_weights(weights_dir)
-            except (FileNotFoundError, RuntimeError, ValueError) as e:
-                raise SystemExit(str(e)) from e
-        else:
-            raise SystemExit(
-                f"Missing AudioX weights under {weights_dir}. Expected either component-sharded "
-                f"safetensors (transformer/ + conditioners/) or model.ckpt to convert. "
-                f"Run with download_if_missing true or set AUDIOX_MODEL.\n"
-                f"HF model key in config: {hf_model!r}"
-            )
+        _require_sharded_audiox_weights(weights_dir)
 
     v2_needed = False
     tasks_cfg = r.get("tasks")
@@ -457,7 +361,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     model_slug = os.environ.get("AUDIOX_PR_MODEL_SLUG", "").strip() or r.get("model_slug")
     if not model_slug:
-        model_slug = hf_model
+        model_slug = weights_dir.name or "audiox"
 
     out_root = Path(r.get("output_root", "audiox_task_outputs"))
     if not out_root.is_absolute():
@@ -530,11 +434,10 @@ def cmd_infer(args: argparse.Namespace) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="AudioX offline end-to-end (HF weights + Omni).")
+    p = argparse.ArgumentParser(description="AudioX offline end-to-end (local weights + Omni).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pr = sub.add_parser("run", help="Run inlined animal sample config; download assets/weights if needed.")
-    pr.add_argument("--skip-download-weights", action="store_true")
+    pr = sub.add_parser("run", help="Run inlined animal sample config; optional Pexels video download.")
     pr.add_argument("--skip-download-assets", action="store_true")
     pr.set_defaults(func=cmd_run)
 

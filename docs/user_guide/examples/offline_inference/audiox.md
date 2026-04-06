@@ -3,7 +3,7 @@
 Source <https://github.com/vllm-project/vllm-omni/tree/main/examples/offline_inference/audiox>.
 
 
-This folder runs [AudioX](https://github.com/ZeyueT/AudioX) through the `AudioXPipeline` integration: **Hugging Face weights**, optional **sample stock videos** (Pexels), and **`Omni()`** inference. Inference code is **vendored** under `vllm_omni.diffusion.models.audiox` — you do **not** need a separate `AudioX` git clone or `AUDIOX_SRC`.
+This folder runs [AudioX](https://github.com/ZeyueT/AudioX) through the `AudioXPipeline` integration: **local weight bundles**, optional **sample stock videos** (Pexels), and **`Omni()`** inference. Inference code is **vendored** under `vllm_omni.diffusion.models.audiox` — you do **not** need a separate `AudioX` git clone or `AUDIOX_SRC`.
 
 ## Prerequisites
 
@@ -21,11 +21,19 @@ This folder runs [AudioX](https://github.com/ZeyueT/AudioX) through the `AudioXP
    export DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN
    ```
 
-4. **`ffmpeg`** on your **PATH** if you use `run --config` with video tasks (`v2*`, `tv2*`) or Pexels sample download (see `end2end.py`). Text-only `infer --task t2a` does not need ffmpeg.
+4. **`ffmpeg`** on your **PATH** if you use `run` with video tasks (`v2*`, `tv2*`) or Pexels sample download (see `end2end.py`). Text-only `infer --task t2a` does not need ffmpeg.
 
 ## Weight layout
 
-`AudioXPipeline` loads **only** vLLM-Omni **component-sharded** weights (`transformer/diffusion_pytorch_model.safetensors` and `conditioners/diffusion_pytorch_model.safetensors`, plus `vae/` when the config has a pretransform). Hugging Face repos ship a flat `model.ckpt`; **`end2end.py` converts that checkpoint in place** after download (or on first `infer` / `run` if you copied `model.ckpt` yourself). Manual conversion: `python -m vllm_omni.diffusion.models.audiox.audiox_weights --input-dir DIR --output-dir DIR`.
+`AudioXPipeline` loads **only** vLLM-Omni **component-sharded** weights (`transformer/diffusion_pytorch_model.safetensors` and `conditioners/diffusion_pytorch_model.safetensors`, plus `vae/` when the config has a pretransform).
+
+Obtain weights by **downloading a pre-sharded bundle** (for example [zhangj1an/AudioX](https://huggingface.co/zhangj1an/AudioX) on Hugging Face):
+
+```bash
+huggingface-cli download zhangj1an/AudioX --local-dir ./audiox_weights
+```
+
+Earlier docs and upstream used **`HKUSTAudio/AudioX`**; the layout and remap path in vLLM-Omni are aligned with the pre-sharded bundle published as **`zhangj1an/AudioX`** for now.
 
 ## Quick start
 
@@ -34,7 +42,7 @@ From the vLLM-Omni repo root (or anywhere), with `PYTHONPATH` pointing at the re
 ```bash
 cd examples/offline_inference/audiox
 
-# One command: HF weights + assets (if missing) + all six tasks
+# Populate ./audiox_weights (sharded safetensors), then:
 ./run_audiox_sample_task.sh
 ```
 
@@ -48,16 +56,16 @@ python end2end.py run
 
 | Subcommand | Purpose |
 |------------|---------|
-| `run` | Use inlined default config in `end2end.py`; download weights/assets when missing; run task list. |
+| `run` | Use inlined default config in `end2end.py`; optional Pexels video download; run task list. |
 | `infer …` | Single-task inference (CLI flags for task, prompt, video, steps, etc.). |
 
 Examples:
 
 ```bash
-# Built-in sample batch
+# Built-in sample batch (expects weights under ./audiox_weights or AUDIOX_MODEL)
 python end2end.py run
 
-# Use custom local weight bundle (skip HF download)
+# Use custom local weight bundle
 export AUDIOX_MODEL=/data/audiox_weights
 python end2end.py run
 
@@ -70,18 +78,17 @@ python end2end.py infer --model ./audiox_weights --task t2a \
   --prompt "A busy city street with horns and footsteps."
 ```
 
-Skip downloads (you already have weights and videos):
+Skip **asset** downloads only (you already have sample video paths):
 
 ```bash
-python end2end.py run \
-  --skip-download-weights --skip-download-assets
+python end2end.py run --skip-download-assets
 ```
 
 ## Built-in run config
 
 `end2end.py run` uses an inlined default config (`DEFAULT_RUN_CONFIG`) with:
 
-- **`weights`**: `hf_model` (`maf-mmdit`), `local_dir`, `full`, `download_if_missing`, optional `repo_id`.
+- **`weights`**: `local_dir` (default `audiox_weights` under this example folder).
 - **`assets`**: `local_dir`, `trim_seconds`, `download_if_missing`.
 - **`run`**: task list, `output_root`, `num_inference_steps`, `seconds_total`, `guidance_scale`, etc.
 
@@ -94,7 +101,7 @@ Use environment variables below to override these defaults without editing code.
 | `DIFFUSION_ATTENTION_BACKEND` | `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, etc. Unset in `end2end.py` defaults to `TORCH_SDPA`. |
 | `AUDIOX_CONFIG` | Path to JSON config (shell default: `configs/<AUDIOX_CLIP>.json`). |
 | `AUDIOX_CLIP` | `animal` or `human`; selects default config when `AUDIOX_CONFIG` is unset. |
-| `AUDIOX_MODEL` | Weight directory; if set, HF download is skipped. |
+| `AUDIOX_MODEL` | Absolute path to weight directory (overrides `local_dir`). |
 | `AUDIOX_VIDEO` | Override video path for `v2*` / `tv2*` tasks. |
 | `AUDIOX_TASKS` | Comma/space-separated subset of `t2a t2m v2a v2m tv2a tv2m`. |
 | `AUDIOX_TASKS_FILE` | Same tasks, one per line (`#` comments allowed). |
@@ -102,13 +109,7 @@ Use environment variables below to override these defaults without editing code.
 | `AUDIOX_SECONDS` | `seconds_total` override. |
 | `AUDIOX_OUT_DIR` | Exact output directory (no `model_slug/clip` subdirs). |
 | `AUDIOX_TASK_OUTPUT_ROOT` | Root under this folder for `audiox_task_outputs/<slug>/<clip>/`. |
-| `AUDIOX_PR_MODEL_SLUG` | Folder name under the output root (default: `hf_model`). |
-
-## Model (Hugging Face)
-
-| Key | Repo |
-|-----|------|
-| `maf-mmdit` | `HKUSTAudio/AudioX-MAF-MMDiT` |
+| `AUDIOX_PR_MODEL_SLUG` | Folder name under the output root (default: weight directory name). |
 
 ## Outputs
 
@@ -123,7 +124,7 @@ audiox_task_outputs/<model_slug>/<animal|human>/{t2a,t2m,v2a,v2m,tv2a,tv2m}.wav
 - **Import errors** (`k_diffusion`, `dac`, `einops_exts`, …): install `.[audiox]` as above.
 - **protobuf / vLLM errors** after installing AudioX deps: re-run `pip install -e ".[audiox]"` to enforce the protobuf floor.
 - **Flash attention / FP16 / dummy run failed**: use default `TORCH_SDPA` (already the default in `end2end.py`) or fix your Flash / fa3-fwd build for your GPU.
-- **Missing `transformer/config.json`**: re-run `end2end.py run` with downloads enabled, or add `transformer/config.json` containing `{}` under the weight bundle.
+- **Missing `transformer/config.json`**: some tooling expects `transformer/config.json` (can be `{}`) under the bundle; add it if something complains.
 - **`tv2a` / `tv2m`**: require a **non-empty** prompt. **`v2*` / `tv2*`**: require **`--video-path`** (or a config that supplies a video file).
 - **VRAM**: shorten `seconds_total`, reduce steps, shorter video clips, or `enable_cpu_offload: true` in config / `--enable-cpu-offload` for `infer`.
 

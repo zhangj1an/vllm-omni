@@ -5,6 +5,8 @@ The example is intentionally trimmed to a single built-in **animal** sample flow
 
 ## Quick start
 
+Place a vLLM-Omni **sharded** weight bundle under `./audiox_weights` (or set `AUDIOX_MODEL` to another directory), then:
+
 ```bash
 cd examples/offline_inference/audiox
 ./run_audiox_sample_task.sh
@@ -16,7 +18,13 @@ Equivalent:
 python end2end.py run
 ```
 
-`run` now uses an inlined default config in `end2end.py` (formerly `configs/animal.json`).
+`run` uses an inlined default config in `end2end.py` (formerly `configs/animal.json`).
+
+To fetch weights, download a pre-sharded bundle **before** running the example (the script does not download model files for you), for example:
+
+```bash
+huggingface-cli download zhangj1an/AudioX --local-dir ./audiox_weights
+```
 
 ## Prerequisites
 
@@ -31,7 +39,7 @@ pip install -e ".[audiox]"
 
 ## Commands
 
-- `python end2end.py run`: animal sample bundle; downloads weights/assets if missing.
+- `python end2end.py run`: animal sample bundle; optional Pexels video download for video tasks.
 - `python end2end.py infer ...`: single-task debugging with explicit CLI flags.
 
 Example infer command:
@@ -44,7 +52,7 @@ python end2end.py infer --model ./audiox_weights --task t2a \
 ## Environment overrides
 
 - `DIFFUSION_ATTENTION_BACKEND`: defaults to `TORCH_SDPA` if unset.
-- `AUDIOX_MODEL`: local weights directory; skips HF download.
+- `AUDIOX_MODEL`: local weights directory (overrides default `./audiox_weights`).
 - `AUDIOX_VIDEO`: override sample video path for `v2*` / `tv2*`.
 - `AUDIOX_TASKS` / `AUDIOX_TASKS_FILE`: subset of `t2a t2m v2a v2m tv2a tv2m`.
 - `AUDIOX_STEPS`, `AUDIOX_SECONDS`: generation overrides.
@@ -61,5 +69,5 @@ audiox_task_outputs/<model_slug>/animal/{t2a,t2m,v2a,v2m,tv2a,tv2m}.wav
 
 ## Notes
 
-- Hugging Face `model.ckpt` is converted in place to vLLM-Omni sharded weights when needed.
+- Weights must already be in the vLLM-Omni sharded layout; use a Hub bundle such as [zhangj1an/AudioX](https://huggingface.co/zhangj1an/AudioX).
 - Sample video is fetched from [Pexels](https://www.pexels.com/license/).

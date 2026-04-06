@@ -75,8 +75,9 @@ def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], samp
     ae_inner = pretransform_config["config"]
     if not audiox_oobleck_ae_config_supported(ae_inner):
         raise NotImplementedError(
-            "AudioX pretransform must match official HKUSTAudio checkpoints (Oobleck encoder/decoder, "
-            "VAE bottleneck, use_snake=true, no use_nearest_upsample)."
+            "AudioX pretransform must match Oobleck/VAE layout used by published weights "
+            "(e.g. zhangj1an/AudioX on Hugging Face: encoder/decoder, VAE bottleneck, "
+            "use_snake=true, no use_nearest_upsample)."
         )
 
     scaling_factor = float(pretransform_config.get("scale", 1.0))

@@ -13,7 +13,7 @@
 #   ./run_audiox_sample_task.sh
 #
 # Weights (optional overrides):
-#   export AUDIOX_MODEL=/path/to/bundle     # skip HF download; use this directory
+#   export AUDIOX_MODEL=/path/to/bundle     # use this directory instead of ./audiox_weights
 #
 # Tasks (default: all six, from config unless overridden):
 #   export AUDIOX_TASKS="t2a,t2m,v2a,v2m,tv2a,tv2m"

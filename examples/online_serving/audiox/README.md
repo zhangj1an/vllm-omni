@@ -10,16 +10,12 @@ This example shows how to serve AudioX with `vllm-omni` using the OpenAI-compati
 pip install -e ".[audiox]"
 ```
 
-2. Prepare AudioX sharded weights (same as offline flow):
+2. Prepare AudioX sharded weights (same layout as the offline example). Download a pre-sharded bundle under `examples/offline_inference/audiox/audiox_weights`, or set `MODEL` / `AUDIOX_MODEL` to your path. For example:
 
 ```bash
-cd examples/offline_inference/audiox
-python end2end.py run --skip-download-assets
+huggingface-cli download zhangj1an/AudioX \
+  --local-dir examples/offline_inference/audiox/audiox_weights
 ```
-
-This creates/uses:
-
-`examples/offline_inference/audiox/audiox_weights`
 
 ## Start server
 

@@ -1,15 +1,20 @@
+"""Load and remap AudioX sharded weights for vLLM-Omni.
+
+Originally, examples and checkpoints were associated with the Hugging Face org
+``HKUSTAudio/AudioX`` (and related ``HKUSTAudio/AudioX-*`` repos). To align with the
+on-disk layout and remap path implemented here, documentation and download instructions
+currently use ``zhangj1an/AudioX`` instead.
+"""
+
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
-import shutil
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 import torch
-from safetensors.torch import save_file as safetensors_save_file
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
@@ -117,8 +122,8 @@ def build_sharded_component_sources(
         if not _model_root_has_file(root, VAE_SAFETENSORS):
             raise FileNotFoundError(
                 f"AudioX config includes pretransform but {VAE_SAFETENSORS} was not found under {root}. "
-                "Convert the bundle with vllm_omni.diffusion.models.audiox.audiox_weights "
-                "or add the vae shard."
+                "Use a pre-sharded bundle from https://huggingface.co/zhangj1an/AudioX "
+                f"(or add the vae shard next to {TRANSFORMER_SAFETENSORS})."
             )
         sources.append(_src(VAE_SAFETENSORS))
     return sources
@@ -472,7 +477,7 @@ def remap_audiox_state_dict(
                 break
         legacy_normalized.append((nk, v))
     remapped = legacy_normalized
-    normalized: list[tuple[str, torch.Tensor]] = []
+    normalized = []
     for k, v in remapped:
         if k.startswith(tuple(legacy_prefix_map)):
             raise ValueError(
@@ -501,113 +506,3 @@ def load_audiox_weights(
     remapped = remap_audiox_state_dict(weights, model_config=model_config)
     remapped = filter_unused_keys(remapped)
     loader.load_weights(remapped)
-
-
-def _partition_keys(state: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], ...]:
-    transformer: dict[str, torch.Tensor] = {}
-    conditioners: dict[str, torch.Tensor] = {}
-    vae: dict[str, torch.Tensor] = {}
-    unknown: list[str] = []
-    for k, v in state.items():
-        if k.startswith("model."):
-            transformer[k] = v
-        elif k.startswith("pretransform."):
-            vae[k] = v
-        elif k.startswith("conditioner.") or k.startswith("maf_block."):
-            conditioners[k] = v
-        else:
-            unknown.append(k)
-    if unknown:
-        raise ValueError(
-            "Checkpoint contains keys that are not mapped to transformer / vae / conditioners "
-            f"shards (expected prefixes model., pretransform., conditioner., maf_block.): {unknown[:20]}"
-            + (" ..." if len(unknown) > 20 else "")
-        )
-    return transformer, conditioners, vae
-
-
-def _contiguous_state_dict(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    return {k: v.contiguous() if isinstance(v, torch.Tensor) else v for k, v in sd.items()}
-
-
-def _save_safetensor_shard(output_dir: str, rel_path: str, state_dict: dict[str, torch.Tensor]) -> None:
-    shard_dir = os.path.join(output_dir, os.path.dirname(rel_path))
-    os.makedirs(shard_dir, exist_ok=True)
-    safetensors_save_file(_contiguous_state_dict(state_dict), os.path.join(output_dir, rel_path))
-
-
-def _resolve_ckpt_path(input_dir: str) -> str:
-    ckpt = os.path.join(os.path.abspath(input_dir), "model.ckpt")
-    if os.path.isfile(ckpt):
-        return ckpt
-    raise FileNotFoundError(f"No checkpoint found under {input_dir} (expected model.ckpt).")
-
-
-def _load_checkpoint_state_dict(ckpt_path: str) -> dict[str, torch.Tensor]:
-    loaded = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-    if not isinstance(loaded, Mapping) or "state_dict" not in loaded or not isinstance(loaded["state_dict"], Mapping):
-        raise RuntimeError(
-            "AudioX inference conversion expects model.ckpt to contain a top-level 'state_dict' mapping."
-        )
-    loaded = loaded["state_dict"]
-
-    out: dict[str, torch.Tensor] = {}
-    for name, tensor in loaded.items():
-        if isinstance(tensor, torch.Tensor):
-            out[str(name)] = tensor
-    return out
-
-
-def convert_audiox_bundle(input_dir: str, output_dir: str, *, copy_config: bool = True) -> None:
-    input_dir = os.path.abspath(input_dir)
-    output_dir = os.path.abspath(output_dir)
-    os.makedirs(output_dir, exist_ok=True)
-
-    cfg_src = os.path.join(input_dir, "config.json")
-    if not os.path.isfile(cfg_src):
-        raise FileNotFoundError(f"Missing config.json in {input_dir}")
-    if copy_config:
-        cfg_dst = os.path.join(output_dir, "config.json")
-        if os.path.normpath(cfg_src) != os.path.normpath(cfg_dst):
-            shutil.copy2(cfg_src, cfg_dst)
-
-    ckpt_path = _resolve_ckpt_path(input_dir)
-    state = _load_checkpoint_state_dict(ckpt_path)
-    transformer_sd, conditioners_sd, vae_sd = _partition_keys(state)
-
-    _save_safetensor_shard(output_dir, TRANSFORMER_SAFETENSORS, transformer_sd)
-    _save_safetensor_shard(output_dir, CONDITIONERS_SAFETENSORS, conditioners_sd)
-    if vae_sd:
-        _save_safetensor_shard(output_dir, VAE_SAFETENSORS, vae_sd)
-
-    index: dict[str, Any] = {
-        "_class_name": "AudioXPipeline",
-        "config": "config.json",
-        "weight_layout": AUDIOX_WEIGHT_LAYOUT_SHARDED,
-        "source_checkpoint": os.path.basename(ckpt_path),
-        "transformer_weights": TRANSFORMER_SAFETENSORS,
-        "conditioners_weights": CONDITIONERS_SAFETENSORS,
-    }
-    if vae_sd:
-        index["vae_weights"] = VAE_SAFETENSORS
-    with open(os.path.join(output_dir, "model_index.json"), "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2)
-        f.write("\n")
-
-
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--input-dir", required=True, help="Legacy bundle with config.json + model.ckpt")
-    p.add_argument("--output-dir", required=True, help="Directory to write sharded safetensors + index")
-    p.add_argument(
-        "--no-copy-config",
-        action="store_true",
-        help="Do not copy config.json (output dir must already contain a compatible config.json)",
-    )
-    args = p.parse_args()
-    convert_audiox_bundle(args.input_dir, args.output_dir, copy_config=not args.no_copy_config)
-    print(f"Wrote sharded AudioX layout to {os.path.abspath(args.output_dir)}")
-
-
-if __name__ == "__main__":
-    main()

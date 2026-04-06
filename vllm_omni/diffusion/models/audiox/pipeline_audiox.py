@@ -242,7 +242,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         if od_config.model is None:
             raise ValueError(
                 "AudioXPipeline requires od_config.model (directory with component-sharded safetensors; "
-                "see audiox_weights)."
+                "see https://huggingface.co/zhangj1an/AudioX)."
             )
 
         self._model_root = os.path.abspath(od_config.model)
