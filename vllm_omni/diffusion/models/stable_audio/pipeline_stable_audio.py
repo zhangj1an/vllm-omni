@@ -29,7 +29,6 @@ from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
 from vllm_omni.diffusion.models.stable_audio.stable_audio_transformer import StableAudioDiTModel
-from vllm_omni.diffusion.postprocess.audio import build_audio_post_process_func
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.utils.tf_utils import get_transformer_config_kwargs
@@ -37,16 +36,15 @@ from vllm_omni.diffusion.utils.tf_utils import get_transformer_config_kwargs
 logger = init_logger(__name__)
 
 
-def get_stable_audio_post_process_func(
-    od_config: OmniDiffusionConfig,
-):
-    """
-    Create post-processing function for Stable Audio output.
+def get_stable_audio_post_process_func(od_config: OmniDiffusionConfig):
+    """Post-processing: convert audio tensor to numpy for saving (aligned with OmniVoice)."""
 
-    Converts raw audio tensor to numpy array for saving.
-    """
+    def post_process_func(audio: torch.Tensor, output_type: str = "np"):
+        if output_type == "pt":
+            return audio
+        return audio.cpu().float().numpy()
 
-    return build_audio_post_process_func()
+    return post_process_func
 
 
 class StableAudioPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMixin):
