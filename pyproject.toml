@@ -64,7 +64,6 @@ demo = [
 # AudioXPipeline (optional).
 audiox = [
     "decord>=0.6.0",
-    "k-diffusion>=0.1.1.post1",
     "einops-exts>=0.0.4",
     "alias-free-torch>=0.0.6",
     "setuptools>=77.0.3,<81.0.0",

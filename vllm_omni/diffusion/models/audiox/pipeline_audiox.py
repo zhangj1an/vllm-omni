@@ -39,8 +39,7 @@ _VIDEO_ONLY_TASKS = frozenset({"v2a", "v2m"})
 _TEXT_VIDEO_TASKS = frozenset({"tv2a", "tv2m"})
 _VIDEO_CONDITIONED_TASKS = _VIDEO_ONLY_TASKS | _TEXT_VIDEO_TASKS
 
-# k-diffusion polyexponential schedule endpoints (``get_sigmas_polyexponential``). Match upstream
-# AudioX ``generate_diffusion_cond`` / sample scripts (e.g. ``sigma_min=0.3``, ``sigma_max=500``).
+# Polyexponential sigma schedule defaults; match upstream AudioX sample scripts (``sigma_min=0.3``, ``sigma_max=500``).
 _DEFAULT_UPSTREAM_SIGMA_MIN = 0.3
 _DEFAULT_UPSTREAM_SIGMA_MAX = 500.0
 
@@ -228,7 +227,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         self.weights_sources = build_sharded_component_sources(
             model_root=self._model_root,
             od_config=od_config,
-            model_config=self._model_config,
         )
         sample_rate = int(self._model_config.get("sample_rate", 48000))
         sample_size = int(self._model_config.get("sample_size", sample_rate * 10))
@@ -245,7 +243,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        load_audiox_weights(self, weights, model_config=self._model_config)
+        load_audiox_weights(self, weights)
 
         self._model.to(torch.float32)
         self._model.eval().requires_grad_(False)
@@ -370,7 +368,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             sample_size=self._sample_size,
             device=self.device,
             generator=generator,
-            sampler_type="dpmpp-3m-sde",
             sigma_min=sigma_min,
             sigma_max=sigma_max,
             scale_phi=cfg_rescale,

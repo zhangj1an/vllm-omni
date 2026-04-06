@@ -121,7 +121,7 @@ audiox_task_outputs/<model_slug>/<animal|human>/{t2a,t2m,v2a,v2m,tv2a,tv2m}.wav
 
 ## Troubleshooting
 
-- **Import errors** (`k_diffusion`, `dac`, `einops_exts`, …): install `.[audiox]` as above.
+- **Import errors** (`dac`, `einops_exts`, …): install `.[audiox]` as above.
 - **protobuf / vLLM errors** after installing AudioX deps: re-run `pip install -e ".[audiox]"` to enforce the protobuf floor.
 - **Flash attention / FP16 / dummy run failed**: use default `TORCH_SDPA` (already the default in `end2end.py`) or fix your Flash / fa3-fwd build for your GPU.
 - **Missing `transformer/config.json`**: some tooling expects `transformer/config.json` (can be `{}`) under the bundle; add it if something complains.

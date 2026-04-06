@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import logging
+import math
 import os
 import typing as tp
 
-import k_diffusion as K
-import k_diffusion.sampling as ks
 import torch
 from diffusers import AutoencoderOobleck
-from k_diffusion.sampling import BrownianTreeNoiseSampler
+from diffusers.schedulers import EDMDPMSolverMultistepScheduler
 from torch import nn
 
 from vllm_omni.diffusion.data import OmniDiffusionConfig
@@ -30,7 +30,6 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 torch.set_float32_matmul_precision("highest")
 
-_PATCH_ATTR = "_vllm_omni_dpmpp_3m_sde_fixed"
 _PROGRESS = ProgressBarMixin()
 
 
@@ -243,77 +242,22 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
     )
 
 
-@torch.no_grad()
-def _sample_dpmpp_3m_sde_fixed(
-    model,
-    x,
-    sigmas,
-    extra_args=None,
-    callback=None,
-    disable=None,
-    eta=1.0,
-    s_noise=1.0,
-    noise_sampler=None,
-):
-    sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
-    noise_sampler = BrownianTreeNoiseSampler(x, sigma_min, sigma_max) if noise_sampler is None else noise_sampler
-    extra_args = {} if extra_args is None else extra_args
-    s_in = x.new_ones([x.shape[0]])
-
-    denoised_1, denoised_2 = None, None
-    h_1, h_2 = None, None
-
-    _PROGRESS.set_progress_bar_config(disable=disable)
-    with _PROGRESS.progress_bar(total=len(sigmas) - 1) as pbar:
-        for i in range(len(sigmas) - 1):
-            denoised = model(x, sigmas[i] * s_in, **extra_args)
-            if callback is not None:
-                callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
-            if sigmas[i + 1] == 0:
-                x = denoised
-            else:
-                t, s = -sigmas[i].log(), -sigmas[i + 1].log()
-                h = s - t
-                h_eta = h * (eta + 1)
-
-                x = torch.exp(-h_eta) * x + (-h_eta).expm1().neg() * denoised
-
-                if h_2 is not None:
-                    r0 = h_1 / h
-                    r1 = h_2 / h
-                    d1_0 = (denoised - denoised_1) / r0
-                    d1_1 = (denoised_1 - denoised_2) / r1
-                    d1 = d1_0 + (d1_0 - d1_1) * r0 / (r0 + r1)
-                    d2 = (d1_0 - d1_1) / (r0 + r1)
-                    phi_2 = h_eta.neg().expm1() / h_eta + 1
-                    phi_3 = phi_2 / h_eta - 0.5
-                    x = x + phi_2 * d1 - phi_3 * d2
-                elif h_1 is not None:
-                    r = h_1 / h
-                    d = (denoised - denoised_1) / r
-                    phi_2 = h_eta.neg().expm1() / h_eta + 1
-                    x = x + phi_2 * d
-
-                if eta:
-                    x = (
-                        x
-                        + noise_sampler(sigmas[i], sigmas[i + 1])
-                        * sigmas[i + 1]
-                        * (-2 * h * eta).expm1().neg().sqrt()
-                        * s_noise
-                    )
-
-                denoised_1, denoised_2 = denoised, denoised_1
-                h_1, h_2 = h, h_1
-            pbar.update()
-    return x
+def _append_zero(sigmas: torch.Tensor) -> torch.Tensor:
+    return torch.cat([sigmas, sigmas.new_zeros(1)])
 
 
-def patch_k_diffusion_sample_dpmpp_3m_sde() -> None:
-    if getattr(ks, _PATCH_ATTR, False):
-        return
-    ks.sample_dpmpp_3m_sde = _sample_dpmpp_3m_sde_fixed
-    setattr(ks, _PATCH_ATTR, True)
+def _sigmas_polyexponential(
+    n: int, sigma_min: float, sigma_max: float, rho: float, device: torch.device
+) -> torch.Tensor:
+    """Polynomial-in-log-sigma noise schedule (upstream AudioX / ``get_sigmas_polyexponential``)."""
+    ramp = torch.linspace(1, 0, n, device=device) ** rho
+    sigmas = torch.exp(ramp * (math.log(sigma_max) - math.log(sigma_min)) + math.log(sigma_min))
+    return _append_zero(sigmas)
+
+
+def _sigma_to_t_vdiffusion(sigma: torch.Tensor) -> torch.Tensor:
+    """Timestep embedding input ``atan(sigma) * 2 / pi`` (AudioX DiT conditioning)."""
+    return sigma.atan() / math.pi * 2
 
 
 def set_audio_channels(audio: torch.Tensor, target_channels: int) -> torch.Tensor:
@@ -334,21 +278,61 @@ def sample_k(
     sigma_min: float = 0.3,
     sigma_max: float = 500.0,
     rho: float = 1.0,
-    device: str = "cuda",
+    device: str | torch.device = "cuda",
     callback=None,
+    generator: torch.Generator | None = None,
     **extra_args,
 ):
-    patch_k_diffusion_sample_dpmpp_3m_sde()
-    denoiser = K.external.VDenoiser(model_fn)
+    """Sample with :class:`~diffusers.schedulers.EDMDPMSolverMultistepScheduler` (``sde-dpmsolver++``, ``sigma_data=1``)."""
+    dev = device if isinstance(device, torch.device) else torch.device(device)
+    sigmas_full = _sigmas_polyexponential(steps, sigma_min, sigma_max, rho, dev)
 
-    sigmas = K.sampling.get_sigmas_polyexponential(steps, sigma_min, sigma_max, rho, device=device)
-    noise = noise * sigmas[0]
-    x = noise
+    scheduler = EDMDPMSolverMultistepScheduler(
+        sigma_min=sigma_min,
+        sigma_max=sigma_max,
+        sigma_data=1.0,
+        sigma_schedule="exponential",
+        prediction_type="v_prediction",
+        algorithm_type="sde-dpmsolver++",
+        solver_order=2,
+        solver_type="midpoint",
+        final_sigmas_type="zero",
+    )
+    scheduler.set_timesteps(steps, device=device)
+    scheduler.sigmas = sigmas_full.detach().cpu().to(torch.float32)
+    scheduler.timesteps = scheduler.precondition_noise(sigmas_full[:-1]).detach().cpu().to(torch.float32)
+    scheduler.num_inference_steps = steps
 
-    with torch.cuda.amp.autocast():
-        return K.sampling.sample_dpmpp_3m_sde(
-            denoiser, x, sigmas, disable=False, callback=callback, extra_args=extra_args
-        )
+    latents = noise * sigmas_full[0].to(device=noise.device, dtype=noise.dtype)
+
+    amp = (
+        torch.autocast(device_type="cuda", enabled=True)
+        if dev.type == "cuda"
+        else contextlib.nullcontext()
+    )
+
+    _PROGRESS.set_progress_bar_config(disable=False)
+    with _PROGRESS.progress_bar(total=len(scheduler.timesteps)) as pbar, amp:
+        for t in scheduler.timesteps:
+            latent_in = scheduler.scale_model_input(latents, t)
+            sigma = scheduler.sigmas[scheduler.step_index].to(device=latent_in.device, dtype=latent_in.dtype)
+            s_in = latent_in.new_ones([latent_in.shape[0]])
+            t_cond = _sigma_to_t_vdiffusion(sigma * s_in)
+            model_output = model_fn(latent_in, t_cond, **extra_args)
+            if callback is not None:
+                callback(
+                    {
+                        "x": latents,
+                        "i": int(scheduler.step_index),
+                        "sigma": sigma,
+                        "sigma_hat": sigma,
+                        "denoised": None,
+                    }
+                )
+            latents = scheduler.step(model_output, t, latents, generator=generator).prev_sample
+            pbar.update()
+
+    return latents
 
 
 def generate_diffusion_cond(
@@ -362,7 +346,7 @@ def generate_diffusion_cond(
     device: str | torch.device = "cuda",
     generator: torch.Generator | None = None,
     return_latents: bool = False,
-    **sampler_kwargs,
+    **sample_kwargs,
 ) -> torch.Tensor:
     pt = model.pretransform
     if pt is None:
@@ -401,13 +385,14 @@ def generate_diffusion_cond(
         model.model,
         noise,
         steps,
-        **sampler_kwargs,
+        **sample_kwargs,
         **conditioning_inputs,
         **negative_conditioning_tensors,
         cfg_scale=cfg_scale,
         batch_cfg=True,
         rescale_cfg=True,
         device=device,
+        generator=generator,
     )
     del noise
     del conditioning_tensors
@@ -431,7 +416,6 @@ __all__ = [
     "create_diffusion_cond_from_config",
     "create_model_from_config",
     "generate_diffusion_cond",
-    "patch_k_diffusion_sample_dpmpp_3m_sde",
     "sample_k",
     "set_audio_channels",
 ]
