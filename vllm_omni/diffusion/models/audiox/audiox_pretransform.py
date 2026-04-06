@@ -1,38 +1,16 @@
 from __future__ import annotations
 
+import os
 import typing as tp
-from typing import Any
 
 import torch
 from diffusers import AutoencoderOobleck
 from torch import nn
 
-from vllm_omni.diffusion.layers.oobleck_vae_base import OobleckVAEBase
-from vllm_omni.diffusion.models.audiox.audiox_weights import (
-    audiox_oobleck_ae_config_supported,
-)
 
+class AudioXVAE(nn.Module):
+    """Thin wrapper around Diffusers ``AutoencoderOobleck`` for AudioX (encode/decode, scaling, metadata)."""
 
-def ae_cfg_to_diffusers_init_kwargs(ae_cfg: dict[str, Any], sample_rate: int) -> dict[str, Any]:
-    enc = ae_cfg["encoder"]["config"]
-    dec = ae_cfg["decoder"]["config"]
-    strides = enc["strides"]
-    if list(strides) != list(dec["strides"]):
-        raise ValueError("AudioX encoder/decoder strides must match for Diffusers Oobleck.")
-    if list(enc["c_mults"]) != list(dec["c_mults"]):
-        raise ValueError("AudioX encoder/decoder c_mults must match for Diffusers Oobleck.")
-    return {
-        "encoder_hidden_size": int(enc["channels"]),
-        "downsampling_ratios": [int(s) for s in strides],
-        "channel_multiples": [int(c) for c in enc["c_mults"]],
-        "decoder_channels": int(dec["channels"]),
-        "decoder_input_channels": int(dec["latent_dim"]),
-        "audio_channels": int(enc["in_channels"]),
-        "sampling_rate": int(sample_rate),
-    }
-
-
-class AudioXVAE(OobleckVAEBase):
     def __init__(
         self,
         inner: nn.Module,
@@ -43,23 +21,53 @@ class AudioXVAE(OobleckVAEBase):
         sample_rate: int,
         iterate_batch: bool = False,
     ) -> None:
-        super().__init__(
-            inner,
-            scaling_factor=scaling_factor,
-            io_channels=io_channels,
-            latent_dim=latent_dim,
-            sample_rate=sample_rate,
-        )
+        super().__init__()
+        self.inner = inner
+        self.scaling_factor = float(scaling_factor)
+        self.io_channels = int(io_channels)
+        self.encoded_channels = int(latent_dim)
+        self.downsampling_ratio = int(inner.hop_length)
+        self.sample_rate = int(sample_rate)
         self.iterate_batch = bool(iterate_batch)
 
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            inner = super().__getattr__("inner")
+            return getattr(inner, name)
+
+    def _encode_latents(self, x: torch.Tensor) -> torch.Tensor:
+        return self.inner.encode(x, return_dict=True).latent_dist.sample()
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Sample VAE latents (``OobleckDiagonalGaussianDistribution.sample``)."""
         if self.iterate_batch and x.shape[0] > 1:
-            parts = [super(AudioXVAE, self).encode(x[i : i + 1]) for i in range(x.shape[0])]
+            parts = [self._encode_latents(x[i : i + 1]) for i in range(x.shape[0])]
             return torch.cat(parts, dim=0)
-        return super().encode(x)
+        return self._encode_latents(x)
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        return self.inner.decode(z, return_dict=True).sample
+
+    def encode_scaled(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encode(x) / self.scaling_factor
+
+    def decode_scaled(self, z: torch.Tensor) -> torch.Tensor:
+        return self.decode(z * self.scaling_factor)
 
 
-def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], sample_rate: int):
+def create_pretransform_from_config(
+    pretransform_config: dict[str, tp.Any],
+    sample_rate: int,
+    *,
+    model: str,
+) -> AudioXVAE:
+    """Build ``AudioXVAE`` with Diffusers ``AutoencoderOobleck``, matching Stable Audio:
+
+    ``AutoencoderOobleck.from_pretrained(model, subfolder="vae", ...)`` where ``model`` is
+    ``OmniDiffusionConfig.model`` (HF repo id or local directory with a Diffusers ``vae/`` tree).
+    """
     allowed_keys = {"type", "config", "scale", "iterate_batch"}
     extra_keys = set(pretransform_config) - allowed_keys
     if extra_keys:
@@ -72,24 +80,30 @@ def create_pretransform_from_config(pretransform_config: dict[str, tp.Any], samp
             f"AudioX HKUST weights only use pretransform type 'autoencoder'; got {pretransform_type!r}"
         )
 
-    ae_inner = pretransform_config["config"]
-    if not audiox_oobleck_ae_config_supported(ae_inner):
-        raise NotImplementedError(
-            "AudioX pretransform must match Oobleck/VAE layout used by published weights "
-            "(e.g. zhangj1an/AudioX on Hugging Face: encoder/decoder, VAE bottleneck, "
-            "use_snake=true, no use_nearest_upsample)."
-        )
-
-    scaling_factor = float(pretransform_config.get("scale", 1.0))
     iterate_batch = bool(pretransform_config.get("iterate_batch", False))
 
-    inner = AutoencoderOobleck(**ae_cfg_to_diffusers_init_kwargs(ae_inner, sample_rate))
+    local_files_only = os.path.exists(model)
+    inner = AutoencoderOobleck.from_pretrained(
+        model,
+        subfolder="vae",
+        torch_dtype=torch.float32,
+        local_files_only=local_files_only,
+    )
+    icfg = inner.config
+    if "scale" in pretransform_config:
+        scaling_factor = float(pretransform_config["scale"])
+    elif hasattr(icfg, "get") and callable(getattr(icfg, "get", None)):
+        scaling_factor = float(icfg.get("scaling_factor", 1.0))
+    else:
+        scaling_factor = float(getattr(icfg, "scaling_factor", 1.0))
     pretransform = AudioXVAE(
         inner,
         scaling_factor=scaling_factor,
-        io_channels=int(ae_inner["io_channels"]),
-        latent_dim=int(ae_inner["latent_dim"]),
-        sample_rate=int(sample_rate),
+        io_channels=int(getattr(icfg, "audio_channels", 2)),
+        latent_dim=int(
+            getattr(icfg, "latent_channels", getattr(icfg, "decoder_input_channels", 1)),
+        ),
+        sample_rate=int(getattr(icfg, "sampling_rate", sample_rate)),
         iterate_batch=iterate_batch,
     )
 

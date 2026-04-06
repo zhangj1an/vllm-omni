@@ -205,8 +205,15 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
 
     diffusion_objective: tp.Literal["v"] = "v"
 
+    if od_config is None or not getattr(od_config, "model", None):
+        raise ValueError(
+            "AudioX requires OmniDiffusionConfig.model (Hugging Face repo id or local path with Diffusers layout "
+            "including vae/) to load AutoencoderOobleck — same contract as Stable Audio Open."
+        )
+    model_path = od_config.model
+
     conditioning_config = model_config["conditioning"]
-    conditioner = create_audiox_fixed_conditioner_from_conditioning_config(conditioning_config)
+    conditioner = create_audiox_fixed_conditioner_from_conditioning_config(conditioning_config, model=model_path)
 
     cross_attention_ids = ["video_prompt", "text_prompt", "audio_prompt"]
     global_cond_ids: list[str] = []
@@ -217,7 +224,7 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
     gate_type_config = diffusion_full.get("gate_type_config")
 
     pretransform_cfg = model_config["pretransform"]
-    pretransform = create_pretransform_from_config(pretransform_cfg, sample_rate)
+    pretransform = create_pretransform_from_config(pretransform_cfg, sample_rate, model=model_path)
     min_input_length = pretransform.downsampling_ratio
 
     min_input_length *= diffusion_model.patch_size

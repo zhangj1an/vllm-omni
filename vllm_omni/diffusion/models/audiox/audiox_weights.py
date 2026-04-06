@@ -24,7 +24,6 @@ AUDIOX_WEIGHT_LAYOUT_SHARDED = "vllm_omni_component_sharded"
 
 TRANSFORMER_SAFETENSORS = "transformer/diffusion_pytorch_model.safetensors"
 CONDITIONERS_SAFETENSORS = "conditioners/diffusion_pytorch_model.safetensors"
-VAE_SAFETENSORS = "vae/diffusion_pytorch_model.safetensors"
 
 _SELF_ATTN_QKV = ".self_attn.to_qkv.weight"
 _CROSS_ATTN_KV = ".cross_attn.to_kv.weight"
@@ -65,13 +64,6 @@ def load_audiox_model_index(model_root: str) -> dict[str, Any]:
     with open(index_path, encoding="utf-8") as f:
         index: dict[str, Any] = json.load(f)
     return index
-
-
-def model_config_has_pretransform(model_config: dict[str, Any]) -> bool:
-    m = model_config.get("model")
-    if not isinstance(m, dict):
-        return False
-    return m.get("pretransform") is not None
 
 
 def resolve_audiox_bundle_paths(model_root: str) -> tuple[str, dict[str, Any]]:
@@ -118,14 +110,6 @@ def build_sharded_component_sources(
         _src(TRANSFORMER_SAFETENSORS),
         _src(CONDITIONERS_SAFETENSORS),
     ]
-    if model_config_has_pretransform(model_config):
-        if not _model_root_has_file(root, VAE_SAFETENSORS):
-            raise FileNotFoundError(
-                f"AudioX config includes pretransform but {VAE_SAFETENSORS} was not found under {root}. "
-                "Use a pre-sharded bundle from https://huggingface.co/zhangj1an/AudioX "
-                f"(or add the vae shard next to {TRANSFORMER_SAFETENSORS})."
-            )
-        sources.append(_src(VAE_SAFETENSORS))
     return sources
 
 
@@ -464,28 +448,6 @@ def remap_audiox_state_dict(
         else:
             normalized.append((k, v))
     remapped = remap_audiox_maf_weights(normalized)
-    legacy_prefix_map = {
-        "_model.model.model.": "_model.model.",
-        "model.model.": "_model.model.",
-    }
-    legacy_normalized: list[tuple[str, torch.Tensor]] = []
-    for k, v in remapped:
-        nk = k
-        for prefix, replacement in legacy_prefix_map.items():
-            if nk.startswith(prefix):
-                nk = replacement + nk[len(prefix) :]
-                break
-        legacy_normalized.append((nk, v))
-    remapped = legacy_normalized
-    normalized = []
-    for k, v in remapped:
-        if k.startswith(tuple(legacy_prefix_map)):
-            raise ValueError(
-                "Unsupported legacy AudioX key prefix detected during state-dict remap: "
-                f"{k!r}. Only strict inference layout keys are supported."
-            )
-        normalized.append((k, v))
-    remapped = normalized
     remapped = remap_audiox_oobleck_weights_for_diffusers(remapped, model_config=model_config)
     remapped = remap_audiox_split_fused_attention_linears(remapped)
     remapped = remap_audiox_merge_cross_attn_to_kv_for_upstream_dit(remapped)

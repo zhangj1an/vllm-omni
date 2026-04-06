@@ -338,12 +338,14 @@ class MultiConditioner(nn.Module):
         return output
 
 
-def _build_pretransform(conditioner_config: dict[str, tp.Any]) -> tp.Any:
+def _build_pretransform(conditioner_config: dict[str, tp.Any], *, model: str) -> tp.Any:
     sample_rate = conditioner_config.pop("sample_rate", None)
     assert sample_rate is not None, "Sample rate must be specified for pretransform conditioners"
 
     pretransform = create_pretransform_from_config(
-        conditioner_config.pop("pretransform_config"), sample_rate=sample_rate
+        conditioner_config.pop("pretransform_config"),
+        sample_rate,
+        model=model,
     )
     return pretransform
 
@@ -390,7 +392,9 @@ def _with_output_dim(cond_dim: int, cfg: dict[str, tp.Any]) -> dict[str, tp.Any]
     return out
 
 
-def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, tp.Any]) -> MultiConditioner:
+def create_audiox_fixed_conditioner_from_conditioning_config(
+    config: dict[str, tp.Any], *, model: str
+) -> MultiConditioner:
     cond_dim = config["cond_dim"]
     configs = config["configs"]
     if len(configs) != 3:
@@ -427,7 +431,7 @@ def create_audiox_fixed_conditioner_from_conditioning_config(config: dict[str, t
         raise ValueError(f"Unsupported text_prompt config keys for AudioX inference: {sorted(text_extra)}")
     text_cfg = {k: text_cfg[k] for k in text_allowed if k in text_cfg}
 
-    pretransform = _build_pretransform(audio_cfg)
+    pretransform = _build_pretransform(audio_cfg, model=model)
     audio_allowed = {
         "output_dim",
         "latent_seq_len",
