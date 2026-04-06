@@ -16,7 +16,6 @@ Architecture:
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import typing as tp
@@ -311,7 +310,6 @@ class T5TextEncoderAdapter(Conditioner):
 
     def forward(self, texts: list[str], device: torch.device | str) -> list[torch.Tensor]:
         self.to(device)
-        dev = torch.device(device)
 
         encoded = self.tokenizer(
             texts,
@@ -324,8 +322,7 @@ class T5TextEncoderAdapter(Conditioner):
         attention_mask = encoded["attention_mask"].to(device).to(torch.bool)
 
         self.encoder.eval()
-        ctx = torch.amp.autocast("cuda", dtype=torch.float16) if dev.type == "cuda" else contextlib.nullcontext()
-        with ctx, torch.set_grad_enabled(False):
+        with torch.set_grad_enabled(False):
             embeddings = self.encoder(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
 
         embeddings = self.proj_out(embeddings.float())

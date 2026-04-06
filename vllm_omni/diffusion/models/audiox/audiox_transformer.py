@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import typing as tp
 
 import torch
@@ -11,7 +10,6 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 from torch.nn import functional as F
 
-from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
 
 logger = logging.getLogger(__name__)
@@ -24,27 +22,6 @@ __all__ = [
     "ContinuousMMDiTTransformer",
     "MMDiffusionTransformer",
 ]
-
-
-def _env_mm_stack() -> str:
-    v = os.environ.get("VLLM_OMNI_AUDIOX_MM_STACK", "fork").strip().lower()
-    return v if v in ("fork", "upstream") else "fork"
-
-
-def _env_mm_self_attn() -> str:
-    v = os.environ.get("VLLM_OMNI_AUDIOX_MM_SELF_ATTN", "fork").strip().lower()
-    return v if v in ("fork", "upstream") else "fork"
-
-
-class FourierFeatures(GaussianFourierProjection):
-    def __init__(self, in_features, out_features, std=1.0):
-        assert out_features % 2 == 0
-        super().__init__(
-            in_features=in_features,
-            embedding_size=out_features // 2,
-            scale=std,
-            trainable=True,
-        )
 
 
 class AudioXMMChannelLastConv1d(nn.Conv1d):
@@ -217,13 +194,10 @@ class MMDiffusionTransformer(nn.Module):
         transformer_type: tp.Literal["continuous_transformer"] = "continuous_transformer",
         condition_mask_type: None = None,
         global_cond_type: tp.Literal["prepend", "adaLN"] = "prepend",
-        od_config: OmniDiffusionConfig | None = None,
         **kwargs,
     ):
         super().__init__()
 
-        self.od_config = od_config
-        self.parallel_config = od_config.parallel_config if od_config is not None else None
         self.cond_token_dim = cond_token_dim
         if patch_size != 1:
             raise ValueError("AudioX inference-only MMDiT requires patch_size=1.")
@@ -241,7 +215,12 @@ class MMDiffusionTransformer(nn.Module):
             )
 
         timestep_features_dim = 256
-        self.timestep_features = FourierFeatures(1, timestep_features_dim)
+        self.timestep_features = GaussianFourierProjection(
+            in_features=1,
+            embedding_size=timestep_features_dim // 2,
+            scale=1.0,
+            trainable=True,
+        )
         self.to_timestep_embed = nn.Sequential(
             nn.Linear(timestep_features_dim, embed_dim, bias=True),
             nn.SiLU(),
@@ -279,9 +258,9 @@ class MMDiffusionTransformer(nn.Module):
         self.condition_mask_type = condition_mask_type
         self.global_cond_type = global_cond_type
 
-        mm_stack = kwargs.pop("mm_stack", None) or _env_mm_stack()
+        mm_stack = kwargs.pop("mm_stack", None) or "fork"
         kwargs.pop("mm_cross_attn", None)
-        mm_self = kwargs.pop("mm_self_attn", None) or _env_mm_self_attn()
+        mm_self = kwargs.pop("mm_self_attn", None) or "fork"
         if mm_stack != "fork" or mm_self != "fork":
             logger.info(
                 "AudioX DiT MM ablation: mm_stack=%s mm_self_attn=%s",
@@ -416,9 +395,8 @@ class MMDiffusionTransformer(nn.Module):
         scale_phi=0.0,
         mask=None,
         return_info=False,
-        **kwargs,
+        **_kwargs,
     ):
-        del negative_global_embed
         assert not causal, "Causal mode is not supported for DiffusionTransformer"
         if cfg_dropout_prob != 0.0:
             raise ValueError(
@@ -475,7 +453,7 @@ class MMDiffusionTransformer(nn.Module):
                 prepend_cond=batch_prepend_cond,
                 prepend_cond_mask=batch_prepend_cond_mask,
                 return_info=return_info,
-                **kwargs,
+                **_kwargs,
             )
 
             if return_info:
@@ -506,7 +484,7 @@ class MMDiffusionTransformer(nn.Module):
             prepend_cond_mask=prepend_cond_mask,
             mask=mask,
             return_info=return_info,
-            **kwargs,
+            **_kwargs,
         )
 
 
@@ -529,18 +507,8 @@ class ContinuousMMDiTTransformer(nn.Module):
         conformer=False,
         _latent_seq_len=237,
         mm_self_attn: str = "fork",
-        **kwargs,
+        **_kwargs,
     ):
-        del (
-            fusion_depth,
-            cond_token_dim,
-            global_cond_dim,
-            causal,
-            rotary_pos_emb,
-            zero_init_branch_outputs,
-            conformer,
-            kwargs,
-        )
         super().__init__()
 
         self.dim = dim
@@ -598,10 +566,8 @@ class ContinuousMMDiTTransformer(nn.Module):
         context=None,
         context_mask=None,
         return_info=False,
-        **kwargs,
+        **_kwargs,
     ):
-        del mask, prepend_mask, global_cond, context_mask, kwargs
-
         info = {"hidden_states": []}
         x = self.project_in(x)
 

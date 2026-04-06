@@ -14,7 +14,6 @@ from torch import nn
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
-from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.media.audio import prepare_audio_reference
 from vllm_omni.diffusion.media.video import prepare_video_reference
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
@@ -43,6 +42,13 @@ _DEFAULT_UPSTREAM_SIGMA_MIN = 0.3
 _DEFAULT_UPSTREAM_SIGMA_MAX = 500.0
 
 logger = init_logger(__name__)
+
+
+def _default_audiox_device() -> torch.device:
+    """Single-process device; placement for multi-GPU runs is handled outside this module."""
+    if torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
 
 
 def resample_audiox_waveform_poly(audio_data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
@@ -211,10 +217,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         prefix: str = "",
     ):
         super().__init__()
-        del prefix
         self.od_config = od_config
-        self.parallel_config = od_config.parallel_config
-        self.device = get_local_device()
+        self.device = _default_audiox_device()
         if od_config.model is None:
             raise ValueError(
                 "AudioXPipeline requires od_config.model (directory with component-sharded safetensors; "

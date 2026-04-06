@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import contextlib
-import logging
 import math
-import os
 import typing as tp
 
 import torch
@@ -22,20 +19,7 @@ from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTran
 from vllm_omni.diffusion.models.audiox.audiox_weights import strip_diffusion_model_config_for_audiox_dit
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
 
-logger = logging.getLogger(__name__)
-
-torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.deterministic = True
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
-torch.set_float32_matmul_precision("highest")
-
 _PROGRESS = ProgressBarMixin()
-
-
-def _use_upstream_pip_audiox_dit() -> bool:
-    v = os.environ.get("VLLM_OMNI_AUDIOX_USE_UPSTREAM_DIT", "")
-    return str(v).strip().lower() in ("1", "true", "yes")
 
 
 def create_model_from_config(model_config, od_config: OmniDiffusionConfig | None = None):
@@ -89,7 +73,6 @@ class ConditionedDiffusionModelWrapper(nn.Module):
         pretransform: AutoencoderOobleck | None = None,
         cross_attn_cond_ids: list[str] | None = None,
         global_cond_ids: list[str] | None = None,
-        od_config: OmniDiffusionConfig | None = None,
         *,
         gate: bool = False,
         gate_type: str | None = None,
@@ -98,8 +81,6 @@ class ConditionedDiffusionModelWrapper(nn.Module):
         super().__init__()
         self.model = model
         self.conditioner = conditioner
-        self.od_config = od_config
-        self.parallel_config = od_config.parallel_config if od_config is not None else None
         self.io_channels = io_channels
         self.sample_rate = sample_rate
         self.diffusion_objective = diffusion_objective
@@ -176,25 +157,8 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
     diffusion_model_config = strip_diffusion_model_config_for_audiox_dit(dict(diffusion_model_config))
 
     diffusion_build_kwargs = dict(diffusion_model_config)
-    if od_config is not None:
-        diffusion_build_kwargs["od_config"] = od_config
 
-    if _use_upstream_pip_audiox_dit():
-        try:
-            from audiox.models.dit import MMDiffusionTransformer as UpstreamMMDiffusionTransformer
-        except ImportError as e:
-            raise ImportError(
-                "VLLM_OMNI_AUDIOX_USE_UPSTREAM_DIT is set but the ``audiox`` package is not importable. "
-                "Install upstream AudioX in the same environment (e.g. ``pip install audiox``)."
-            ) from e
-        kw = dict(diffusion_build_kwargs)
-        kw.pop("od_config", None)
-        diffusion_model = UpstreamMMDiffusionTransformer(**kw)
-        logger.info(
-            "Using upstream pip ``audiox.models.dit.MMDiffusionTransformer`` (VLLM_OMNI_AUDIOX_USE_UPSTREAM_DIT)."
-        )
-    else:
-        diffusion_model = MMDiffusionTransformer(**diffusion_build_kwargs)
+    diffusion_model = MMDiffusionTransformer(**diffusion_build_kwargs)
 
     io_channels = model_config["io_channels"]
     sample_rate = config["sample_rate"]
@@ -235,7 +199,6 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
         pretransform=pretransform,
         io_channels=io_channels,
         diffusion_objective=diffusion_objective,
-        od_config=od_config,
         gate=gate,
         gate_type=gate_type,
         gate_type_config=gate_type_config,
@@ -305,14 +268,8 @@ def sample_k(
 
     latents = noise * sigmas_full[0].to(device=noise.device, dtype=noise.dtype)
 
-    amp = (
-        torch.autocast(device_type="cuda", enabled=True)
-        if dev.type == "cuda"
-        else contextlib.nullcontext()
-    )
-
     _PROGRESS.set_progress_bar_config(disable=False)
-    with _PROGRESS.progress_bar(total=len(scheduler.timesteps)) as pbar, amp:
+    with _PROGRESS.progress_bar(total=len(scheduler.timesteps)) as pbar:
         for t in scheduler.timesteps:
             latent_in = scheduler.scale_model_input(latents, t)
             sigma = scheduler.sigmas[scheduler.step_index].to(device=latent_in.device, dtype=latent_in.dtype)
@@ -360,11 +317,6 @@ def generate_diffusion_cond(
         raise ValueError("AudioX generation requires a torch.Generator.")
     noise = torch.randn([batch_size, model.io_channels, sample_size], device=device, generator=generator)
 
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    torch.backends.cudnn.benchmark = False
-
     conditioning_inputs = model.get_conditioning_inputs(conditioning_tensors)
 
     if negative_conditioning_tensors is not None:
@@ -394,18 +346,13 @@ def generate_diffusion_cond(
         device=device,
         generator=generator,
     )
-    del noise
-    del conditioning_tensors
-    del conditioning_inputs
-    torch.cuda.empty_cache()
 
     if not return_latents:
         sampled = sampled.to(next(pt.parameters()).dtype)
         model.pretransform = pt.to(dtype=torch.float32).eval()
-        with torch.cuda.amp.autocast(enabled=False):
-            vae = model.pretransform
-            z = sampled.to(dtype=torch.float32)
-            sampled = vae.decode(z * float(vae.audiox_scaling_factor), return_dict=True).sample
+        vae = model.pretransform
+        z = sampled.to(dtype=torch.float32)
+        sampled = vae.decode(z * float(vae.audiox_scaling_factor), return_dict=True).sample
 
     return sampled
 
