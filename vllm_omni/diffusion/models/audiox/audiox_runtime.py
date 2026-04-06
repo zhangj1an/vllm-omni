@@ -15,9 +15,9 @@ from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
     MultiConditioner,
     create_audiox_fixed_conditioner_from_conditioning_config,
+    create_pretransform_from_config,
 )
 from vllm_omni.diffusion.models.audiox.audiox_maf import MAF_Block
-from vllm_omni.diffusion.models.audiox.audiox_pretransform import create_pretransform_from_config
 from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
 from vllm_omni.diffusion.models.audiox.audiox_weights import strip_diffusion_model_config_for_audiox_dit
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin

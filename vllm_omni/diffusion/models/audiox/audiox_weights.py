@@ -96,7 +96,7 @@ def prepare_audiox_video_text_conditioner_configs(
     video_out = {
         k: video_cfg[k]
         for k in AUDIOX_VIDEO_PROMPT_CONFIG_KEYS_ALLOWED
-        if k in video_cfg and k != "clip_model_name"
+        if k in video_cfg
     }
     text_out = {k: text_cfg[k] for k in AUDIOX_TEXT_PROMPT_CONFIG_KEYS_ALLOWED if k in text_cfg}
     return video_out, text_out
