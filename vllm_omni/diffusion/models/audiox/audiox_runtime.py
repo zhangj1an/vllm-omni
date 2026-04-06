@@ -7,6 +7,7 @@ import typing as tp
 import k_diffusion as K
 import k_diffusion.sampling as ks
 import torch
+from diffusers import AutoencoderOobleck
 from k_diffusion.sampling import BrownianTreeNoiseSampler
 from torch import nn
 
@@ -16,10 +17,7 @@ from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
     create_audiox_fixed_conditioner_from_conditioning_config,
 )
 from vllm_omni.diffusion.models.audiox.audiox_maf import MAF_Block
-from vllm_omni.diffusion.models.audiox.audiox_pretransform import (
-    AudioXVAE,
-    create_pretransform_from_config,
-)
+from vllm_omni.diffusion.models.audiox.audiox_pretransform import create_pretransform_from_config
 from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
 
@@ -88,7 +86,7 @@ class ConditionedDiffusionModelWrapper(nn.Module):
         sample_rate,
         min_input_length: int,
         diffusion_objective: tp.Literal["v"] = "v",
-        pretransform: AudioXVAE | None = None,
+        pretransform: AutoencoderOobleck | None = None,
         cross_attn_cond_ids: list[str] | None = None,
         global_cond_ids: list[str] | None = None,
         od_config: OmniDiffusionConfig | None = None,
@@ -224,8 +222,8 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
     gate_type_config = diffusion_full.get("gate_type_config")
 
     pretransform_cfg = model_config["pretransform"]
-    pretransform = create_pretransform_from_config(pretransform_cfg, sample_rate, model=model_path)
-    min_input_length = pretransform.downsampling_ratio
+    pretransform = create_pretransform_from_config(pretransform_cfg, model=model_path)
+    min_input_length = int(pretransform.hop_length)
 
     min_input_length *= diffusion_model.patch_size
 
@@ -370,10 +368,10 @@ def generate_diffusion_cond(
     pt = model.pretransform
     if pt is None:
         raise RuntimeError("AudioX inference-only path requires an AudioX pretransform.")
-    if not isinstance(pt, AudioXVAE):
-        raise RuntimeError(f"Expected AudioXVAE pretransform, got {type(pt)!r}.")
+    if not isinstance(pt, AutoencoderOobleck):
+        raise RuntimeError(f"Expected AutoencoderOobleck pretransform, got {type(pt)!r}.")
 
-    sample_size = sample_size // pt.downsampling_ratio
+    sample_size = sample_size // int(pt.hop_length)
 
     if generator is None:
         raise ValueError("AudioX generation requires a torch.Generator.")
@@ -421,7 +419,9 @@ def generate_diffusion_cond(
         sampled = sampled.to(next(pt.parameters()).dtype)
         model.pretransform = pt.to(dtype=torch.float32).eval()
         with torch.cuda.amp.autocast(enabled=False):
-            sampled = model.pretransform.decode_scaled(sampled.to(dtype=torch.float32))
+            vae = model.pretransform
+            z = sampled.to(dtype=torch.float32)
+            sampled = vae.decode(z * float(vae.audiox_scaling_factor), return_dict=True).sample
 
     return sampled
 

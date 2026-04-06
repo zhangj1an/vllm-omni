@@ -274,7 +274,9 @@ class AudioAutoencoderConditionerv2(Conditioner):
         mask_ratio_start: float = 0.0,
         mask_ratio_end: float = 0.0,
     ):
-        super().__init__(pretransform.encoded_channels, output_dim)
+        icfg = pretransform.config
+        enc_ch = int(getattr(icfg, "latent_channels", getattr(icfg, "decoder_input_channels", 1)))
+        super().__init__(enc_ch, output_dim)
         self.pretransform = pretransform
         self.latent_seq_len = latent_seq_len
         self.mask_ratio_start = float(mask_ratio_start)
@@ -310,11 +312,13 @@ class AudioAutoencoderConditionerv2(Conditioner):
                 audio[i] = torch.nn.functional.pad(audio[i], (0, pad_len))
 
         audio = torch.cat(audio, dim=0)
-        audio = set_audio_channels(audio, self.pretransform.io_channels)
+        audio = set_audio_channels(audio, int(getattr(self.pretransform.config, "audio_channels", 2)))
         if self.mask_ratio_start < self.mask_ratio_end:
             audio, _mask_ratios = self.mask_audio(audio)
 
-        latents = self.pretransform.encode_scaled(audio)
+        vae = self.pretransform
+        z = vae.encode(audio, return_dict=True).latent_dist.sample()
+        latents = z / float(vae.audiox_scaling_factor)
         latents = self.proj_features_128(latents)
         latents = latents.permute(0, 2, 1)
         latents = self.proj_out(latents)
@@ -344,7 +348,6 @@ def _build_pretransform(conditioner_config: dict[str, tp.Any], *, model: str) ->
 
     pretransform = create_pretransform_from_config(
         conditioner_config.pop("pretransform_config"),
-        sample_rate,
         model=model,
     )
     return pretransform

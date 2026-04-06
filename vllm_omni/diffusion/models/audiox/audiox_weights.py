@@ -308,7 +308,7 @@ def _map_encoder_decoder_suffix(
 ) -> tuple[str, bool] | None:
     m = re.fullmatch(r"encoder\.layers\.0\.(weight_g|weight_v|bias)", suffix)
     if m:
-        return f"inner.encoder.conv1.{m.group(1)}", False
+        return f"encoder.conv1.{m.group(1)}", False
 
     for blk in range(num_blocks):
         base = blk + 1
@@ -318,67 +318,67 @@ def _map_encoder_decoder_suffix(
             inner_ru = ru
             m = re.fullmatch(rf"{bprefix}\.{inner_ru}\.layers\.0\.(alpha|beta)", suffix)
             if m:
-                return f"inner.encoder.block.{blk}.{ru_name}.snake1.{m.group(1)}", True
+                return f"encoder.block.{blk}.{ru_name}.snake1.{m.group(1)}", True
             m = re.fullmatch(rf"{bprefix}\.{inner_ru}\.layers\.1\.(weight_g|weight_v|bias)", suffix)
             if m:
-                return f"inner.encoder.block.{blk}.{ru_name}.conv1.{m.group(1)}", False
+                return f"encoder.block.{blk}.{ru_name}.conv1.{m.group(1)}", False
             m = re.fullmatch(rf"{bprefix}\.{inner_ru}\.layers\.2\.(alpha|beta)", suffix)
             if m:
-                return f"inner.encoder.block.{blk}.{ru_name}.snake2.{m.group(1)}", True
+                return f"encoder.block.{blk}.{ru_name}.snake2.{m.group(1)}", True
             m = re.fullmatch(rf"{bprefix}\.{inner_ru}\.layers\.3\.(weight_g|weight_v|bias)", suffix)
             if m:
-                return f"inner.encoder.block.{blk}.{ru_name}.conv2.{m.group(1)}", False
+                return f"encoder.block.{blk}.{ru_name}.conv2.{m.group(1)}", False
         m = re.fullmatch(rf"{bprefix}\.3\.(alpha|beta)", suffix)
         if m:
-            return f"inner.encoder.block.{blk}.snake1.{m.group(1)}", True
+            return f"encoder.block.{blk}.snake1.{m.group(1)}", True
         m = re.fullmatch(rf"{bprefix}\.4\.(weight_g|weight_v|bias)", suffix)
         if m:
-            return f"inner.encoder.block.{blk}.conv1.{m.group(1)}", False
+            return f"encoder.block.{blk}.conv1.{m.group(1)}", False
 
     tail_act = num_blocks + 1
     m = re.fullmatch(rf"encoder\.layers\.{tail_act}\.(alpha|beta)", suffix)
     if m:
-        return f"inner.encoder.snake1.{m.group(1)}", True
+        return f"encoder.snake1.{m.group(1)}", True
     m = re.fullmatch(rf"encoder\.layers\.{tail_act + 1}\.(weight_g|weight_v|bias)", suffix)
     if m:
-        return f"inner.encoder.conv2.{m.group(1)}", False
+        return f"encoder.conv2.{m.group(1)}", False
 
     m = re.fullmatch(r"decoder\.layers\.0\.(weight_g|weight_v|bias)", suffix)
     if m:
-        return f"inner.decoder.conv1.{m.group(1)}", False
+        return f"decoder.conv1.{m.group(1)}", False
 
     for blk in range(num_blocks):
         base = blk + 1
         bprefix = rf"decoder\.layers\.{base}\.layers"
         m = re.fullmatch(rf"{bprefix}\.0\.(alpha|beta)", suffix)
         if m:
-            return f"inner.decoder.block.{blk}.snake1.{m.group(1)}", True
+            return f"decoder.block.{blk}.snake1.{m.group(1)}", True
         m = re.fullmatch(rf"{bprefix}\.1\.(weight_g|weight_v|bias)", suffix)
         if m:
-            return f"inner.decoder.block.{blk}.conv_t1.{m.group(1)}", False
+            return f"decoder.block.{blk}.conv_t1.{m.group(1)}", False
         for ru in range(3):
             ru_name = f"res_unit{ru + 1}"
             inner_ru = 2 + ru
             m = re.fullmatch(rf"{bprefix}\.{inner_ru}\.layers\.0\.(alpha|beta)", suffix)
             if m:
-                return f"inner.decoder.block.{blk}.{ru_name}.snake1.{m.group(1)}", True
+                return f"decoder.block.{blk}.{ru_name}.snake1.{m.group(1)}", True
             m = re.fullmatch(rf"{bprefix}\.{inner_ru}\.layers\.1\.(weight_g|weight_v|bias)", suffix)
             if m:
-                return f"inner.decoder.block.{blk}.{ru_name}.conv1.{m.group(1)}", False
+                return f"decoder.block.{blk}.{ru_name}.conv1.{m.group(1)}", False
             m = re.fullmatch(rf"{bprefix}\.{inner_ru}\.layers\.2\.(alpha|beta)", suffix)
             if m:
-                return f"inner.decoder.block.{blk}.{ru_name}.snake2.{m.group(1)}", True
+                return f"decoder.block.{blk}.{ru_name}.snake2.{m.group(1)}", True
             m = re.fullmatch(rf"{bprefix}\.{inner_ru}\.layers\.3\.(weight_g|weight_v|bias)", suffix)
             if m:
-                return f"inner.decoder.block.{blk}.{ru_name}.conv2.{m.group(1)}", False
+                return f"decoder.block.{blk}.{ru_name}.conv2.{m.group(1)}", False
 
     tail0 = num_blocks + 1
     m = re.fullmatch(rf"decoder\.layers\.{tail0}\.(alpha|beta)", suffix)
     if m:
-        return f"inner.decoder.snake1.{m.group(1)}", True
+        return f"decoder.snake1.{m.group(1)}", True
     m = re.fullmatch(rf"decoder\.layers\.{tail0 + 1}\.(weight_g|weight_v|bias)", suffix)
     if m:
-        return f"inner.decoder.conv2.{m.group(1)}", False
+        return f"decoder.conv2.{m.group(1)}", False
 
     return None
 
