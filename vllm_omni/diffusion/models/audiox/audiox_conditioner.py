@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import typing as tp
 import warnings
@@ -12,12 +13,18 @@ from torch import einsum, nn
 from torchvision import transforms
 from transformers import (
     AutoConfig,
-    AutoTokenizer,
     CLIPVisionModelWithProjection,
     T5EncoderModel,
+    T5TokenizerFast,
 )
 
 from vllm_omni.diffusion.models.audiox.audiox_pretransform import create_pretransform_from_config
+from vllm_omni.diffusion.models.audiox.audiox_weights import (
+    filter_audio_prompt_config_after_pretransform_build,
+    prepare_audiox_video_text_conditioner_configs,
+    resolve_vae_audio_channels,
+    resolve_vae_latent_channels,
+)
 
 
 def set_audio_channels(audio: torch.Tensor, target_channels: int) -> torch.Tensor:
@@ -153,7 +160,6 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
         in_features = self.CLIP_PATCH_TOKENS * self.VIDEO_FPS * self.DURATION_SECONDS
 
         self.empty_visual_feat = nn.Parameter(torch.zeros(1, self.OUT_FEATURES, self.TEMPORAL_DIM), requires_grad=True)
-        nn.init.constant_(self.empty_visual_feat, 0)
         self.visual_encoder_model = CLIPVisionModelWithProjection.from_pretrained(self.CLIP_MODEL_NAME)
         self.proj = nn.Linear(in_features=in_features, out_features=self.OUT_FEATURES)
         self.proj_sync = nn.Linear(in_features=240, out_features=self.OUT_FEATURES)
@@ -172,6 +178,9 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
         self.preprocess_CLIP = transforms.Compose([transforms.Normalize(mean=clip_mean, std=clip_std)])
 
     def forward(self, video_list: list[torch.Tensor | dict], device: torch.device | str) -> list[torch.Tensor]:
+        self.to(device)
+        self.visual_encoder_model.eval()
+
         if isinstance(video_list[0], dict):
             video_tensors = [item["video_tensors"] for item in video_list]
             video_sync_frames = [item["video_sync_frames"] for item in video_list]
@@ -179,10 +188,7 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
         else:
             video_tensors = video_list
             batch_size = len(video_tensors)
-            video_sync_frames = torch.zeros(batch_size, 240, 768).to(device)
-
-        visual_encoder_model = self.visual_encoder_model.eval().to(device)
-        proj = self.proj.to(device)
+            video_sync_frames = torch.zeros(batch_size, 240, 768, device=device)
 
         original_videos = torch.cat(video_tensors, dim=0).to(device)
         batch_size, time_length, _, _, _ = original_videos.size()
@@ -193,13 +199,13 @@ class CLIPWithSyncWithEmptyFeatureConditioner(Conditioner):
         video_cond_pixel_values = self.preprocess_CLIP(video_tensors).to(device)
 
         with torch.no_grad():
-            outputs = visual_encoder_model(pixel_values=video_cond_pixel_values)
+            outputs = self.visual_encoder_model(pixel_values=video_cond_pixel_values)
         video_hidden = outputs.last_hidden_state
         video_hidden = einops.rearrange(video_hidden, "(b t) q h -> (b q) t h", b=batch_size, t=time_length)
         video_hidden = video_hidden + self.Temp_pos_embedding
         video_hidden = self.Temp_transformer(video_hidden)
         video_hidden = einops.rearrange(video_hidden, "(b q) t h -> b (t q) h", b=batch_size, t=time_length)
-        video_hidden = proj(video_hidden.view(-1, self.in_features))
+        video_hidden = self.proj(video_hidden.view(-1, self.in_features))
         video_hidden = video_hidden.view(batch_size, self.out_features, -1)
 
         video_sync_frames = self.proj_sync(video_sync_frames.view(-1, 240))
@@ -230,7 +236,7 @@ class T5Conditioner(Conditioner):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             try:
-                self.tokenizer = AutoTokenizer.from_pretrained(t5_model_name)
+                self.tokenizer = T5TokenizerFast.from_pretrained(t5_model_name)
                 self.model = (
                     T5EncoderModel.from_pretrained(t5_model_name).train(False).requires_grad_(False).to(torch.float16)
                 )
@@ -238,8 +244,8 @@ class T5Conditioner(Conditioner):
                 logging.disable(previous_level)
 
     def forward(self, texts: list[str], device: torch.device | str) -> list[torch.Tensor]:
-        self.model.to(device)
-        self.proj_out.to(device)
+        self.to(device)
+        dev = torch.device(device)
 
         encoded = self.tokenizer(
             texts,
@@ -250,15 +256,15 @@ class T5Conditioner(Conditioner):
         )
         input_ids = encoded["input_ids"].to(device)
         attention_mask = encoded["attention_mask"].to(device).to(torch.bool)
-        dev = torch.device(device)
 
         self.model.eval()
-        if dev.type == "cuda":
-            with torch.amp.autocast("cuda", dtype=torch.float16), torch.set_grad_enabled(False):
-                embeddings = self.model(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
-        else:
-            with torch.set_grad_enabled(False):
-                embeddings = self.model(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
+        ctx = (
+            torch.amp.autocast("cuda", dtype=torch.float16)
+            if dev.type == "cuda"
+            else contextlib.nullcontext()
+        )
+        with ctx, torch.set_grad_enabled(False):
+            embeddings = self.model(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
 
         embeddings = self.proj_out(embeddings.float())
         embeddings = embeddings * attention_mask.unsqueeze(-1).float()
@@ -275,7 +281,7 @@ class AudioAutoencoderConditionerv2(Conditioner):
         mask_ratio_end: float = 0.0,
     ):
         icfg = pretransform.config
-        enc_ch = int(getattr(icfg, "latent_channels", getattr(icfg, "decoder_input_channels", 1)))
+        enc_ch = resolve_vae_latent_channels(icfg)
         super().__init__(enc_ch, output_dim)
         self.pretransform = pretransform
         self.latent_seq_len = latent_seq_len
@@ -300,8 +306,7 @@ class AudioAutoencoderConditionerv2(Conditioner):
     def forward(
         self, audio: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor], device: torch.device | str
     ) -> list[torch.Tensor]:
-        self.pretransform.to(device)
-        self.proj_out.to(device)
+        self.to(device)
 
         bs = len(audio)
         max_len = max([a.shape[-1] for a in audio])
@@ -312,7 +317,7 @@ class AudioAutoencoderConditionerv2(Conditioner):
                 audio[i] = torch.nn.functional.pad(audio[i], (0, pad_len))
 
         audio = torch.cat(audio, dim=0)
-        audio = set_audio_channels(audio, int(getattr(self.pretransform.config, "audio_channels", 2)))
+        audio = set_audio_channels(audio, resolve_vae_audio_channels(self.pretransform.config))
         if self.mask_ratio_start < self.mask_ratio_end:
             audio, _mask_ratios = self.mask_audio(audio)
 
@@ -330,13 +335,19 @@ class MultiConditioner(nn.Module):
         super().__init__()
         self.conditioners = nn.ModuleDict(conditioners)
 
-    def forward(self, batch_metadata: list[dict[str, tp.Any]], device: torch.device | str) -> dict[str, tp.Any]:
+    def forward(
+        self,
+        batch_metadata: list[dict[str, tp.Any]],
+        device: torch.device | str,
+        *,
+        require_single_item_sequence: bool = False,
+    ) -> dict[str, tp.Any]:
         output = {}
         for key, conditioner in self.conditioners.items():
             conditioner_inputs = _gather_conditioner_inputs(
                 batch_metadata=batch_metadata,
                 key=key,
-                require_single_item_sequence=False,
+                require_single_item_sequence=require_single_item_sequence,
             )
             output[key] = conditioner(conditioner_inputs, device)
         return output
@@ -353,11 +364,9 @@ def _build_pretransform(conditioner_config: dict[str, tp.Any], *, model: str) ->
     return pretransform
 
 
-def _get_source_key(item: dict[str, tp.Any], key: str) -> str:
-    source_key = key
-    if source_key not in item:
+def _assert_conditioner_key_in_item(item: dict[str, tp.Any], key: str) -> None:
+    if key not in item:
         raise ValueError(f"Conditioner key {key} not found in batch metadata")
-    return source_key
 
 
 def _normalize_condition_value(value: tp.Any, *, source_key: str, require_single_item_sequence: bool) -> tp.Any:
@@ -379,10 +388,10 @@ def _gather_conditioner_inputs(
 ) -> list[tp.Any]:
     inputs: list[tp.Any] = []
     for item in batch_metadata:
-        source_key = _get_source_key(item, key)
+        _assert_conditioner_key_in_item(item, key)
         value = _normalize_condition_value(
-            item[source_key],
-            source_key=source_key,
+            item[key],
+            source_key=key,
             require_single_item_sequence=require_single_item_sequence,
         )
         inputs.append(value)
@@ -419,33 +428,15 @@ def create_audiox_fixed_conditioner_from_conditioning_config(
             "AudioX fixed conditioner ids must be exactly {'video_prompt', 'text_prompt', 'audio_prompt'}."
         )
 
-    video_cfg = _with_output_dim(cond_dim, by_id["video_prompt"])
-    text_cfg = _with_output_dim(cond_dim, by_id["text_prompt"])
-    audio_cfg = _with_output_dim(cond_dim, by_id["audio_prompt"])
-    video_allowed = {"output_dim", "project_out", "clip_model_name"}
-    video_extra = set(video_cfg) - video_allowed
-    if video_extra:
-        raise ValueError(f"Unsupported video_prompt config keys for AudioX inference: {sorted(video_extra)}")
-    video_cfg = {k: video_cfg[k] for k in video_allowed if k in video_cfg and k != "clip_model_name"}
-
-    text_allowed = {"output_dim", "t5_model_name", "max_length", "project_out"}
-    text_extra = set(text_cfg) - text_allowed
-    if text_extra:
-        raise ValueError(f"Unsupported text_prompt config keys for AudioX inference: {sorted(text_extra)}")
-    text_cfg = {k: text_cfg[k] for k in text_allowed if k in text_cfg}
+    audio_cfg: dict[str, tp.Any] = _with_output_dim(cond_dim, by_id["audio_prompt"])
+    video_cfg, text_cfg = prepare_audiox_video_text_conditioner_configs(
+        cond_dim=cond_dim,
+        video_prompt=by_id["video_prompt"],
+        text_prompt=by_id["text_prompt"],
+    )
 
     pretransform = _build_pretransform(audio_cfg, model=model)
-    audio_allowed = {
-        "output_dim",
-        "latent_seq_len",
-        "pretransform_ckpt_path",
-        "mask_ratio_start",
-        "mask_ratio_end",
-    }
-    audio_extra = set(audio_cfg) - audio_allowed
-    if audio_extra:
-        raise ValueError(f"Unsupported audio_prompt config keys for AudioX inference: {sorted(audio_extra)}")
-    audio_cfg = {k: audio_cfg[k] for k in audio_allowed if k in audio_cfg and k != "pretransform_ckpt_path"}
+    audio_cfg = filter_audio_prompt_config_after_pretransform_build(audio_cfg)
 
     conditioners: dict[str, Conditioner] = {
         "video_prompt": CLIPWithSyncWithEmptyFeatureConditioner(**video_cfg),
@@ -461,14 +452,8 @@ def encode_audiox_conditioning_tensors(
     batch_metadata: list[dict[str, Any]],
     device: torch.device,
 ) -> dict[str, tp.Any]:
-    output: dict[str, Any] = {}
-
-    for key, conditioner in multi_conditioner.conditioners.items():
-        conditioner_inputs = _gather_conditioner_inputs(
-            batch_metadata=batch_metadata,
-            key=key,
-            require_single_item_sequence=True,
-        )
-        output[key] = conditioner(conditioner_inputs, device)
-
-    return output
+    return multi_conditioner(
+        batch_metadata,
+        device,
+        require_single_item_sequence=True,
+    )

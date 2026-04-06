@@ -19,6 +19,7 @@ from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
 from vllm_omni.diffusion.models.audiox.audiox_maf import MAF_Block
 from vllm_omni.diffusion.models.audiox.audiox_pretransform import create_pretransform_from_config
 from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
+from vllm_omni.diffusion.models.audiox.audiox_weights import strip_diffusion_model_config_for_audiox_dit
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
 
 logger = logging.getLogger(__name__)
@@ -173,9 +174,7 @@ def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: Omni
     model_config = config["model"]
     diffusion_config = model_config["diffusion"]
     diffusion_model_config = diffusion_config["config"]
-    diffusion_model_config = dict(diffusion_model_config)
-    if diffusion_model_config.get("video_fps", None) is not None:
-        diffusion_model_config.pop("video_fps")
+    diffusion_model_config = strip_diffusion_model_config_for_audiox_dit(dict(diffusion_model_config))
 
     diffusion_build_kwargs = dict(diffusion_model_config)
     if od_config is not None:

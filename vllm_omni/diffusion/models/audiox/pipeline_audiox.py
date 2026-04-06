@@ -25,6 +25,7 @@ from vllm_omni.diffusion.models.audiox.audiox_runtime import (
     generate_diffusion_cond,
 )
 from vllm_omni.diffusion.models.audiox.audiox_weights import (
+    audio_conditioning_input_samples_from_model_config,
     build_sharded_component_sources,
     load_audiox_bundle_config,
     load_audiox_weights,
@@ -77,7 +78,7 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
     sample_rate = int(model_cfg.get("sample_rate", 48000))
     sample_size = int(model_cfg.get("sample_size", sample_rate * 10))
     video_fps = int(model_cfg.get("video_fps", 5))
-    ac_samples = _audio_conditioning_input_samples(model_cfg)
+    ac_samples = audio_conditioning_input_samples_from_model_config(model_cfg)
     audio_conditioning_samples = ac_samples if ac_samples is not None else sample_size
     seconds_model = float(sample_size) / float(sample_rate)
     clip_duration = 10.0
@@ -131,34 +132,6 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
         return request
 
     return pre_process_func
-
-
-def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int | None:
-    try:
-        m = model_config.get("model")
-        if not isinstance(m, dict):
-            return None
-        cond = m.get("conditioning")
-        if not isinstance(cond, dict):
-            return None
-        for item in cond.get("configs", []):
-            if not isinstance(item, dict) or item.get("id") != "audio_prompt":
-                continue
-            c = item.get("config")
-            if not isinstance(c, dict):
-                continue
-            ls = c.get("latent_seq_len")
-            pt = c.get("pretransform_config")
-            ds = None
-            if isinstance(pt, dict):
-                ptc = pt.get("config")
-                if isinstance(ptc, dict):
-                    ds = ptc.get("downsampling_ratio")
-            if ls is not None and ds is not None:
-                return int(ls) * int(ds)
-    except (TypeError, ValueError):
-        return None
-    return None
 
 
 def _conditioning_item(
@@ -259,7 +232,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         )
         sample_rate = int(self._model_config.get("sample_rate", 48000))
         sample_size = int(self._model_config.get("sample_size", sample_rate * 10))
-        ac_samples = _audio_conditioning_input_samples(self._model_config)
+        ac_samples = audio_conditioning_input_samples_from_model_config(self._model_config)
         audio_conditioning_samples = ac_samples if ac_samples is not None else sample_size
         self._sample_rate = sample_rate
         self._sample_size = sample_size

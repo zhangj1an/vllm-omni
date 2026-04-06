@@ -6,6 +6,11 @@ import typing as tp
 import torch
 from diffusers import AutoencoderOobleck
 
+from vllm_omni.diffusion.models.audiox.audiox_weights import (
+    resolve_pretransform_scale,
+    validate_audiox_pretransform_config_keys,
+)
+
 
 def create_pretransform_from_config(
     pretransform_config: dict[str, tp.Any],
@@ -16,10 +21,7 @@ def create_pretransform_from_config(
 
     Sets ``audiox_scaling_factor`` on the module; callers scale latents when encoding/decoding.
     """
-    allowed_keys = {"type", "config", "scale"}
-    extra_keys = set(pretransform_config) - allowed_keys
-    if extra_keys:
-        raise ValueError(f"Unsupported pretransform config keys for AudioX inference: {sorted(extra_keys)}")
+    validate_audiox_pretransform_config_keys(pretransform_config)
 
     pretransform_type = pretransform_config["type"]
 
@@ -36,7 +38,7 @@ def create_pretransform_from_config(
         local_files_only=local_files_only,
     )
     icfg = vae.config
-    scaling_factor = float(pretransform_config.get("scale", getattr(icfg, "scaling_factor", 1.0)))
+    scaling_factor = resolve_pretransform_scale(pretransform_config, icfg)
     vae.audiox_scaling_factor = scaling_factor  # type: ignore[attr-defined]
 
     vae.eval().requires_grad_(False)
