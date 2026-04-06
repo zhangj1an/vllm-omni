@@ -63,7 +63,8 @@ demo = [
 
 # AudioXPipeline (optional).
 audiox = [
-    "decord>=0.6.0",
+    # Video/audio decode via FFmpeg-backed TorchCodec (see https://github.com/pytorch/torchcodec).
+    "torchcodec>=0.4.0",
     "einops-exts>=0.0.4",
     "alias-free-torch>=0.0.6",
     "setuptools>=77.0.3,<81.0.0",

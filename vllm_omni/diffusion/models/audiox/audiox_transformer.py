@@ -118,23 +118,13 @@ class AudioXMMDiTBlock(nn.Module):
         dim: int,
         nhead: int,
         mlp_ratio: float = 4.0,
-        cross_attend: bool = False,
-        *,
-        self_attn_mode: str = "fork",
     ):
         super().__init__()
-        self._mm_self_attn = self_attn_mode if self_attn_mode in ("fork", "upstream") else "fork"
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False)
-        if self._mm_self_attn == "upstream":
-            from audiox.models.mm_transformer_layers import SelfAttention as UpSelf
+        self.attn = AudioXMMDiTSelfAttention(dim, nhead)
+        from audiox.models.mm_transformer_layers import CrossAttention as UpCross
 
-            self.attn = UpSelf(dim, nhead)
-        else:
-            self.attn = AudioXMMDiTSelfAttention(dim, nhead)
-        if cross_attend:
-            from audiox.models.mm_transformer_layers import CrossAttention as UpCross
-
-            self.cross_attn = UpCross(dim, nhead)
+        self.cross_attn = UpCross(dim, nhead)
         self.linear1 = AudioXMMChannelLastConv1d(dim, dim, kernel_size=3, padding=1)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False)
         self.ffn = AudioXMMConvFeedForward(dim, int(dim * mlp_ratio), kernel_size=3, padding=1)
@@ -151,8 +141,7 @@ class AudioXMMDiTBlock(nn.Module):
         (gate_msa, shift_mlp, scale_mlp, gate_mlp) = c
         x = x + self.linear1(attn_out) * gate_msa
 
-        if context is not None:
-            x = x + self.cross_attn(x, context=context)
+        x = x + self.cross_attn(x, context=context)
 
         r = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = x + self.ffn(r) * gate_mlp
@@ -166,12 +155,7 @@ class AudioXMMDiTBlock(nn.Module):
         context: torch.Tensor = None,
     ) -> torch.Tensor:
         x_qkv, x_conditions = self.pre_attention(x, cond, rot)
-        if self._mm_self_attn == "upstream":
-            from audiox.models.mm_transformer_layers import attention as ax_mm_attention
-
-            attn_out = ax_mm_attention(*x_qkv)
-        else:
-            attn_out = self.attn.apply_attention(*x_qkv)
+        attn_out = self.attn.apply_attention(*x_qkv)
         x = self.post_attention(x, attn_out, x_conditions, context=context)
         return x
 
@@ -189,22 +173,20 @@ class MMDiffusionTransformer(nn.Module):
         input_concat_dim=0,
         prepend_cond_dim=0,
         depth=12,
-        fusion_depth=6,
         num_heads=8,
         transformer_type: tp.Literal["continuous_transformer"] = "continuous_transformer",
-        condition_mask_type: None = None,
         global_cond_type: tp.Literal["prepend", "adaLN"] = "prepend",
         **kwargs,
     ):
         super().__init__()
+        if kwargs:
+            logger.debug("MMDiffusionTransformer ignoring unused config keys: %s", sorted(kwargs.keys()))
 
         self.cond_token_dim = cond_token_dim
         if patch_size != 1:
             raise ValueError("AudioX inference-only MMDiT requires patch_size=1.")
         if transformer_type != "continuous_transformer":
             raise ValueError("AudioX inference-only MMDiT requires transformer_type='continuous_transformer'.")
-        if condition_mask_type is not None:
-            raise ValueError("AudioX inference-only MMDiT does not support condition masks.")
         if global_cond_type != "prepend":
             raise ValueError("AudioX inference-only MMDiT requires global_cond_type='prepend'.")
         if not cond_token_dim > 0:
@@ -219,7 +201,7 @@ class MMDiffusionTransformer(nn.Module):
             in_features=1,
             embedding_size=timestep_features_dim // 2,
             scale=1.0,
-            trainable=True,
+            trainable=False,
         )
         self.to_timestep_embed = nn.Sequential(
             nn.Linear(timestep_features_dim, embed_dim, bias=True),
@@ -255,48 +237,15 @@ class MMDiffusionTransformer(nn.Module):
         self.input_concat_dim = input_concat_dim
         dim_in = io_channels + self.input_concat_dim
         self.patch_size = patch_size
-        self.condition_mask_type = condition_mask_type
         self.global_cond_type = global_cond_type
 
-        mm_stack = kwargs.pop("mm_stack", None) or "fork"
-        kwargs.pop("mm_cross_attn", None)
-        mm_self = kwargs.pop("mm_self_attn", None) or "fork"
-        if mm_stack != "fork" or mm_self != "fork":
-            logger.info(
-                "AudioX DiT MM ablation: mm_stack=%s mm_self_attn=%s",
-                mm_stack,
-                mm_self,
-            )
-
-        if mm_stack == "upstream":
-            from audiox.models.transformer import ContinuousMMDiTTransformer as UpstreamContinuousMMDiT
-
-            self.transformer = UpstreamContinuousMMDiT(
-                dim=embed_dim,
-                depth=depth,
-                fusion_depth=fusion_depth,
-                dim_heads=embed_dim // num_heads,
-                dim_in=dim_in * patch_size,
-                dim_out=io_channels * patch_size,
-                cross_attend=True,
-                cond_token_dim=cond_embed_dim,
-                global_cond_dim=None,
-                **kwargs,
-            )
-        else:
-            self.transformer = ContinuousMMDiTTransformer(
-                dim=embed_dim,
-                depth=depth,
-                fusion_depth=fusion_depth,
-                dim_heads=embed_dim // num_heads,
-                dim_in=dim_in * patch_size,
-                dim_out=io_channels * patch_size,
-                cross_attend=True,
-                cond_token_dim=cond_embed_dim,
-                global_cond_dim=None,
-                mm_self_attn=mm_self,
-                **kwargs,
-            )
+        self.transformer = ContinuousMMDiTTransformer(
+            dim=embed_dim,
+            depth=depth,
+            dim_heads=embed_dim // num_heads,
+            dim_in=dim_in * patch_size,
+            dim_out=io_channels * patch_size,
+        )
 
         self.preprocess_conv = nn.Conv1d(dim_in, dim_in, 1, bias=False)
         nn.init.zeros_(self.preprocess_conv.weight)
@@ -307,27 +256,19 @@ class MMDiffusionTransformer(nn.Module):
         self,
         x,
         t,
-        mask=None,
         cross_attn_cond=None,
-        cross_attn_cond_mask=None,
         input_concat_cond=None,
         global_embed=None,
         prepend_cond=None,
-        prepend_cond_mask=None,
-        return_info=False,
-        **kwargs,
     ):
         if global_embed is not None:
             global_embed = self.to_global_embed(global_embed)
 
         prepend_inputs = None
-        prepend_mask = None
         prepend_length = 0
         if prepend_cond is not None:
             prepend_cond = self.to_prepend_embed(prepend_cond)
             prepend_inputs = prepend_cond
-            if prepend_cond_mask is not None:
-                prepend_mask = prepend_cond_mask
 
         if input_concat_cond is not None:
             if input_concat_cond.shape[2] != x.shape[2]:
@@ -340,12 +281,8 @@ class MMDiffusionTransformer(nn.Module):
         if self.global_cond_type == "prepend":
             if prepend_inputs is None:
                 prepend_inputs = global_embed.unsqueeze(1)
-                prepend_mask = torch.ones((x.shape[0], 1), device=x.device, dtype=torch.bool)
             else:
                 prepend_inputs = torch.cat([prepend_inputs, global_embed.unsqueeze(1)], dim=1)
-                prepend_mask = torch.cat(
-                    [prepend_mask, torch.ones((x.shape[0], 1), device=x.device, dtype=torch.bool)], dim=1
-                )
             prepend_length = prepend_inputs.shape[1]
 
         x = self.preprocess_conv(x) + x
@@ -357,23 +294,13 @@ class MMDiffusionTransformer(nn.Module):
             x,
             prepend_embeds=prepend_inputs,
             context=cross_attn_cond,
-            context_mask=cross_attn_cond_mask,
-            mask=mask,
-            prepend_mask=prepend_mask,
-            return_info=return_info,
-            **kwargs,
         )
-
-        if return_info:
-            output, info = output
 
         output = rearrange(output, "b t c -> b c t")[:, :, prepend_length:]
         if self.patch_size > 1:
             output = rearrange(output, "b (c p) t -> b c (t p)", p=self.patch_size)
         output = self.postprocess_conv(output) + output
 
-        if return_info:
-            return output, info
         return output
 
     def forward(
@@ -381,33 +308,18 @@ class MMDiffusionTransformer(nn.Module):
         x,
         t,
         cross_attn_cond=None,
-        cross_attn_cond_mask=None,
         negative_cross_attn_cond=None,
         negative_cross_attn_mask=None,
         input_concat_cond=None,
         global_embed=None,
-        negative_global_embed=None,
         prepend_cond=None,
-        prepend_cond_mask=None,
         cfg_scale=1.0,
-        cfg_dropout_prob=0.0,
         causal=False,
         scale_phi=0.0,
-        mask=None,
-        return_info=False,
-        **_kwargs,
+        **kwargs,
     ):
+        """Inference-only forward; unknown keyword arguments are ignored."""
         assert not causal, "Causal mode is not supported for DiffusionTransformer"
-        if cfg_dropout_prob != 0.0:
-            raise ValueError(
-                "cfg_dropout_prob must be 0 for vLLM-Omni AudioX (inference-only; training-time CFG dropout was removed)."
-            )
-
-        if cross_attn_cond_mask is not None:
-            cross_attn_cond_mask = cross_attn_cond_mask.bool()
-
-        if prepend_cond_mask is not None:
-            prepend_cond_mask = prepend_cond_mask.bool()
 
         if cfg_scale != 1.0 and (cross_attn_cond is not None or prepend_cond is not None):
             batch_inputs = torch.cat([x, x], dim=0)
@@ -418,7 +330,6 @@ class MMDiffusionTransformer(nn.Module):
             )
 
             batch_cond = None
-            batch_cond_masks = None
             if cross_attn_cond is not None:
                 null_embed = torch.zeros_like(cross_attn_cond, device=cross_attn_cond.device)
                 if negative_cross_attn_cond is not None:
@@ -430,34 +341,20 @@ class MMDiffusionTransformer(nn.Module):
                     batch_cond = torch.cat([cross_attn_cond, negative_cross_attn_cond], dim=0)
                 else:
                     batch_cond = torch.cat([cross_attn_cond, null_embed], dim=0)
-                if cross_attn_cond_mask is not None:
-                    batch_cond_masks = torch.cat([cross_attn_cond_mask, cross_attn_cond_mask], dim=0)
 
             batch_prepend_cond = None
-            batch_prepend_cond_mask = None
             if prepend_cond is not None:
                 null_embed = torch.zeros_like(prepend_cond, device=prepend_cond.device)
                 batch_prepend_cond = torch.cat([prepend_cond, null_embed], dim=0)
-                if prepend_cond_mask is not None:
-                    batch_prepend_cond_mask = torch.cat([prepend_cond_mask, prepend_cond_mask], dim=0)
 
-            batch_masks = torch.cat([mask, mask], dim=0) if mask is not None else None
             batch_output = self._forward(
                 batch_inputs,
                 batch_timestep,
                 cross_attn_cond=batch_cond,
-                cross_attn_cond_mask=batch_cond_masks,
-                mask=batch_masks,
                 input_concat_cond=batch_input_concat_cond,
                 global_embed=batch_global_cond,
                 prepend_cond=batch_prepend_cond,
-                prepend_cond_mask=batch_prepend_cond_mask,
-                return_info=return_info,
-                **_kwargs,
             )
-
-            if return_info:
-                batch_output, info = batch_output
 
             cond_output, uncond_output = torch.chunk(batch_output, 2, dim=0)
             cfg_output = uncond_output + (cond_output - uncond_output) * cfg_scale
@@ -469,22 +366,15 @@ class MMDiffusionTransformer(nn.Module):
             else:
                 output = cfg_output
 
-            if return_info:
-                return output, info
             return output
 
         return self._forward(
             x,
             t,
             cross_attn_cond=cross_attn_cond,
-            cross_attn_cond_mask=cross_attn_cond_mask,
             input_concat_cond=input_concat_cond,
             global_embed=global_embed,
             prepend_cond=prepend_cond,
-            prepend_cond_mask=prepend_cond_mask,
-            mask=mask,
-            return_info=return_info,
-            **_kwargs,
         )
 
 
@@ -493,28 +383,16 @@ class ContinuousMMDiTTransformer(nn.Module):
         self,
         dim,
         depth,
-        fusion_depth,
         *,
         dim_in=None,
         dim_out=None,
         dim_heads=64,
-        cross_attend=False,
-        cond_token_dim=None,
-        global_cond_dim=None,
-        causal=False,
-        rotary_pos_emb=True,
-        zero_init_branch_outputs=True,
-        conformer=False,
         _latent_seq_len=237,
-        mm_self_attn: str = "fork",
-        **_kwargs,
     ):
         super().__init__()
 
         self.dim = dim
         self.depth = depth
-        self.causal = False
-        self._mm_self_attn = mm_self_attn if mm_self_attn in ("fork", "upstream") else "fork"
 
         self.project_in = nn.Linear(dim_in, dim, bias=False) if dim_in is not None else nn.Identity()
         self.project_out = nn.Linear(dim, dim_out, bias=False) if dim_out is not None else nn.Identity()
@@ -522,9 +400,6 @@ class ContinuousMMDiTTransformer(nn.Module):
         hidden_dim = dim
         num_heads = dim_heads
         mlp_ratio = 4.0
-        fused_depth = depth
-        cross_attend = True
-        self.cross_attend = cross_attend
         self._latent_seq_len = _latent_seq_len
 
         self.layers = nn.ModuleList(
@@ -533,10 +408,8 @@ class ContinuousMMDiTTransformer(nn.Module):
                     hidden_dim,
                     num_heads,
                     mlp_ratio=mlp_ratio,
-                    cross_attend=cross_attend,
-                    self_attn_mode=self._mm_self_attn,
                 )
-                for _ in range(fused_depth)
+                for _ in range(depth)
             ]
         )
         self.proj_mm_tokens = nn.Linear(768, hidden_dim) if dim != 768 else nn.Identity()
@@ -559,20 +432,13 @@ class ContinuousMMDiTTransformer(nn.Module):
     def forward(
         self,
         x,
-        mask=None,
         prepend_embeds=None,
-        prepend_mask=None,
-        global_cond=None,
         context=None,
-        context_mask=None,
-        return_info=False,
-        **_kwargs,
     ):
-        info = {"hidden_states": []}
         x = self.project_in(x)
 
         if prepend_embeds is not None:
-            prepend_length, prepend_dim = prepend_embeds.shape[1:]
+            prepend_dim = prepend_embeds.shape[-1]
             assert prepend_dim == x.shape[-1], "prepend dimension must match sequence dimension"
             x = torch.cat((prepend_embeds, x), dim=-2)
 
@@ -590,8 +456,6 @@ class ContinuousMMDiTTransformer(nn.Module):
             x = block(x, mm_tokens, rot, context=time_cond)
 
         x = self.project_out(x)
-        if return_info:
-            return x, info
         return x
 
 

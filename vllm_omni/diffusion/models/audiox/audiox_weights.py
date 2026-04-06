@@ -35,8 +35,6 @@ AUDIOX_AUDIO_PROMPT_CONFIG_KEYS_ALLOWED: frozenset[str] = frozenset(
         "output_dim",
         "latent_seq_len",
         "pretransform_ckpt_path",
-        "mask_ratio_start",
-        "mask_ratio_end",
     }
 )
 
@@ -104,6 +102,10 @@ def prepare_audiox_video_text_conditioner_configs(
 
 def filter_audio_prompt_config_after_pretransform_build(audio_cfg: Mapping[str, Any]) -> dict[str, Any]:
     """Call after ``_build_pretransform`` pops ``sample_rate`` and ``pretransform_config`` from ``audio_cfg``."""
+    audio_cfg = dict(audio_cfg)
+    # Upstream training configs may list mask-ratio schedule keys; inference does not use them.
+    audio_cfg.pop("mask_ratio_start", None)
+    audio_cfg.pop("mask_ratio_end", None)
     _validate_subconfig_keys(
         label="audio_prompt",
         cfg=audio_cfg,
@@ -116,11 +118,21 @@ def filter_audio_prompt_config_after_pretransform_build(audio_cfg: Mapping[str, 
     }
 
 
-AUDIOX_DIFFUSION_MODEL_CONFIG_KEYS_NOT_FOR_DIT: frozenset[str] = frozenset({"video_fps"})
+AUDIOX_DIFFUSION_MODEL_CONFIG_KEYS_NOT_FOR_DIT: frozenset[str] = frozenset(
+    {
+        "video_fps",
+        # Training / ablation / unused keys sometimes bundled with upstream-style configs:
+        "fusion_depth",
+        "mm_stack",
+        "mm_self_attn",
+        "mm_cross_attn",
+        "condition_mask_type",
+    }
+)
 
 
 def strip_diffusion_model_config_for_audiox_dit(diffusion_model_config: dict[str, Any]) -> dict[str, Any]:
-    """Remove keys present in JSON but not accepted by ``MMDiffusionTransformer`` constructors."""
+    """Remove keys present in JSON but not used by inference-only ``MMDiffusionTransformer``."""
     out = dict(diffusion_model_config)
     for k in AUDIOX_DIFFUSION_MODEL_CONFIG_KEYS_NOT_FOR_DIT:
         out.pop(k, None)
@@ -129,30 +141,30 @@ def strip_diffusion_model_config_for_audiox_dit(diffusion_model_config: dict[str
 
 def audio_conditioning_input_samples_from_model_config(model_config: dict[str, Any]) -> int | None:
     """Samples length for audio conditioning from bundle ``config.json`` (``latent_seq_len`` × downsampling)."""
-    try:
-        m = model_config.get("model")
-        if not isinstance(m, dict):
-            return None
-        cond = m.get("conditioning")
-        if not isinstance(cond, dict):
-            return None
-        for item in cond.get("configs", []):
-            if not isinstance(item, dict) or item.get("id") != "audio_prompt":
-                continue
-            c = item.get("config")
-            if not isinstance(c, dict):
-                continue
-            ls = c.get("latent_seq_len")
-            pt = c.get("pretransform_config")
-            ds = None
-            if isinstance(pt, dict):
-                ptc = pt.get("config")
-                if isinstance(ptc, dict):
-                    ds = ptc.get("downsampling_ratio")
-            if ls is not None and ds is not None:
-                return int(ls) * int(ds)
-    except (TypeError, ValueError):
+    m = model_config.get("model")
+    if not isinstance(m, dict):
         return None
+    cond = m.get("conditioning")
+    if not isinstance(cond, dict):
+        return None
+    for item in cond.get("configs", []):
+        if not isinstance(item, dict) or item.get("id") != "audio_prompt":
+            continue
+        c = item.get("config")
+        if not isinstance(c, dict):
+            continue
+        ls = c.get("latent_seq_len")
+        pt = c.get("pretransform_config")
+        ds = None
+        if isinstance(pt, dict):
+            ptc = pt.get("config")
+            if isinstance(ptc, dict):
+                ds = ptc.get("downsampling_ratio")
+        if ls is None or ds is None:
+            continue
+        if not isinstance(ls, (int, float)) or not isinstance(ds, (int, float)):
+            continue
+        return int(ls) * int(ds)
     return None
 
 

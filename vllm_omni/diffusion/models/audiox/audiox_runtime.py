@@ -53,9 +53,6 @@ class ConditionedDiffusionModel(nn.Module):
         prepend_cond: torch.Tensor = None,
         prepend_cond_mask: torch.Tensor = None,
         cfg_scale: float = 1.0,
-        cfg_dropout_prob: float = 0.0,
-        batch_cfg: bool = False,
-        rescale_cfg: bool = False,
         **kwargs,
     ):
         raise NotImplementedError()
@@ -341,8 +338,6 @@ def generate_diffusion_cond(
         **conditioning_inputs,
         **negative_conditioning_tensors,
         cfg_scale=cfg_scale,
-        batch_cfg=True,
-        rescale_cfg=True,
         device=device,
         generator=generator,
     )

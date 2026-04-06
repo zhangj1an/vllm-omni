@@ -11,7 +11,7 @@ Architecture:
 
 - **AudioX-specific glue** (kept because it is weight- and numerics-sensitive): the ``SA_*``
   temporal transformer stack (manual attention — do not swap for SDPA; see module comments),
-  sync-frame fusion, empty-video fallback, and :class:`MultiConditioner` batch assembly.
+  sync-frame fusion, empty-video placeholders, and :class:`MultiConditioner` batch assembly.
 """
 
 from __future__ import annotations
@@ -95,14 +95,15 @@ class SA_PreNorm(nn.Module):
 
 
 class SA_FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout=0.0):
+    def __init__(self, dim, hidden_dim):
         super().__init__()
+        # Dropout p=0 preserves upstream ``net.{2,4}`` state-dict keys; inference is identical to no dropout.
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
-            nn.Dropout(dropout),
+            nn.Dropout(0.0),
             nn.Linear(hidden_dim, dim),
-            nn.Dropout(dropout),
+            nn.Dropout(0.0),
         )
 
     def forward(self, x):
@@ -111,7 +112,7 @@ class SA_FeedForward(nn.Module):
 
 # Manual einsum+softmax only. SDPA/diffusion Attention here degrades conditioning vs upstream and output quality.
 class SA_Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
+    def __init__(self, dim, heads=8, dim_head=64):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
@@ -124,7 +125,7 @@ class SA_Attention(nn.Module):
         self.to_out = (
             nn.Sequential(
                 nn.Linear(inner_dim, dim),
-                nn.Dropout(dropout),
+                nn.Dropout(0.0),
             )
             if project_out
             else nn.Identity()
@@ -146,7 +147,7 @@ class SA_Attention(nn.Module):
 
 
 class SA_Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim):
         super().__init__()
         self.layers = nn.ModuleList([])
         self.norm = nn.LayerNorm(dim)
@@ -154,8 +155,8 @@ class SA_Transformer(nn.Module):
             self.layers.append(
                 nn.ModuleList(
                     [
-                        SA_PreNorm(dim, SA_Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout)),
-                        SA_PreNorm(dim, SA_FeedForward(dim, mlp_dim, dropout=dropout)),
+                        SA_PreNorm(dim, SA_Attention(dim, heads=heads, dim_head=dim_head)),
+                        SA_PreNorm(dim, SA_FeedForward(dim, mlp_dim)),
                     ]
                 )
             )
@@ -184,7 +185,7 @@ class Conditioner(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# CLIP video: upstream ViT + temporal / sync / empty-feature glue (trained weights)
+# CLIP video: upstream ViT + temporal / sync / empty-feature glue
 # ---------------------------------------------------------------------------
 
 _CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -217,7 +218,9 @@ class CLIPVideoTemporalSyncConditioner(Conditioner):
         hidden_scale = 4
         in_features = self.CLIP_PATCH_TOKENS * self.VIDEO_FPS * self.DURATION_SECONDS
 
-        self.empty_visual_feat = nn.Parameter(torch.zeros(1, self.OUT_FEATURES, self.TEMPORAL_DIM), requires_grad=True)
+        self.empty_visual_feat = nn.Parameter(
+            torch.zeros(1, self.OUT_FEATURES, self.TEMPORAL_DIM), requires_grad=False
+        )
         self.visual_encoder_model = CLIPVisionModelWithProjection.from_pretrained(name)
         self.proj = nn.Linear(in_features=in_features, out_features=self.OUT_FEATURES)
         self.proj_sync = nn.Linear(in_features=240, out_features=self.OUT_FEATURES)
@@ -225,7 +228,7 @@ class CLIPVideoTemporalSyncConditioner(Conditioner):
         self.in_features = in_features
         self.out_features = self.OUT_FEATURES
         self.Temp_transformer = SA_Transformer(
-            self.TEMPORAL_DIM, sa_depth, num_heads, dim_head, self.TEMPORAL_DIM * hidden_scale, 0.0
+            self.TEMPORAL_DIM, sa_depth, num_heads, dim_head, self.TEMPORAL_DIM * hidden_scale
         )
         self.Temp_pos_embedding = nn.Parameter(
             torch.randn(1, self.DURATION_SECONDS * self.VIDEO_FPS, self.TEMPORAL_DIM)
@@ -251,7 +254,7 @@ class CLIPVideoTemporalSyncConditioner(Conditioner):
         is_zero = torch.all(original_videos == 0, dim=(1, 2, 3, 4))
 
         video_tensors = einops.rearrange(original_videos, "b t c h w -> (b t) c h w")
-        # Video frames are expected in [0, 1] float (e.g. from `prepare_video_reference`).
+        # Video frames are expected in [0, 1] float (e.g. from `audiox_reference_media.prepare_video_reference`).
         video_cond_pixel_values = self._clip_normalize(video_tensors).to(device)
 
         with torch.no_grad():
@@ -343,31 +346,13 @@ class AudioVaePromptAdapter(Conditioner):
         pretransform: tp.Any,
         output_dim: int,
         latent_seq_len: int = 237,
-        mask_ratio_start: float = 0.0,
-        mask_ratio_end: float = 0.0,
     ):
         icfg = pretransform.config
         enc_ch = resolve_vae_latent_channels(icfg)
         super().__init__(enc_ch, output_dim)
         self.pretransform = pretransform
         self.latent_seq_len = latent_seq_len
-        self.mask_ratio_start = float(mask_ratio_start)
-        self.mask_ratio_end = float(mask_ratio_end)
         self.proj_features_128 = nn.Linear(in_features=self.latent_seq_len, out_features=128)
-
-    def mask_audio(self, audio: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size, _channels, seq_len = audio.shape
-        device = audio.device
-        mask_ratios = (
-            torch.rand(batch_size, device=device) * (self.mask_ratio_end - self.mask_ratio_start)
-            + self.mask_ratio_start
-        )
-        masked_audio = audio.clone()
-        for i in range(batch_size):
-            mask_len = int(seq_len * mask_ratios[i])
-            start_pos = torch.randint(0, seq_len - mask_len + 1, (1,), device=device)
-            masked_audio[i, :, start_pos : start_pos + mask_len] = 0
-        return masked_audio, mask_ratios
 
     def forward(
         self, audio: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor], device: torch.device | str
@@ -381,8 +366,6 @@ class AudioVaePromptAdapter(Conditioner):
             audio_t = audio.to(device)
 
         audio_t = set_audio_channels(audio_t, resolve_vae_audio_channels(self.pretransform.config))
-        if self.mask_ratio_start < self.mask_ratio_end:
-            audio_t, _mask_ratios = self.mask_audio(audio_t)
 
         vae = self.pretransform
         z = vae.encode(audio_t, return_dict=True).latent_dist.sample()

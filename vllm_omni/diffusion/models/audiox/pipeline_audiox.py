@@ -14,10 +14,12 @@ from torch import nn
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
-from vllm_omni.diffusion.media.audio import prepare_audio_reference
-from vllm_omni.diffusion.media.video import prepare_video_reference
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
     encode_audiox_conditioning_tensors,
+)
+from vllm_omni.diffusion.models.audiox.audiox_reference_media import (
+    prepare_audio_reference,
+    prepare_video_reference,
 )
 from vllm_omni.diffusion.models.audiox.audiox_runtime import (
     create_model_from_config,
@@ -306,18 +308,15 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             if src is None:
                 out.append(torch.zeros(2, target_len, device=device, dtype=cond_dtype))
                 continue
-            try:
-                out.append(
-                    prepare_audio_reference(
-                        src,
-                        model_sample_rate=sample_rate,
-                        seconds_start=seconds_start,
-                        seconds_total=cond_seconds,
-                        device=device,
-                    ).to(dtype=cond_dtype)
-                )
-            except (OSError, TypeError, ValueError) as e:
-                raise ValueError(f"Failed to load AudioX reference audio for batch item {i}: {e}") from e
+            out.append(
+                prepare_audio_reference(
+                    src,
+                    model_sample_rate=sample_rate,
+                    seconds_start=seconds_start,
+                    seconds_total=cond_seconds,
+                    device=device,
+                ).to(dtype=cond_dtype)
+            )
         return out
 
     def _video_feature_tensors(
