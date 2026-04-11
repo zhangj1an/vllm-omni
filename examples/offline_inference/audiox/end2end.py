@@ -87,30 +87,33 @@ TEXT_TASKS = frozenset({"t2a", "t2m", "tv2a", "tv2m"})
 ALL_TASKS_ORDERED = ("t2a", "t2m", "v2a", "v2m", "tv2a", "tv2m")
 
 
-def _audiox_bundle_is_sharded(weights_dir: Path) -> bool:
-    from vllm_omni.diffusion.models.audiox.audiox_weights import resolve_audiox_bundle_paths
+_REQUIRED_AUDIOX_FILES = (
+    "config.json",
+    "transformer/diffusion_pytorch_model.safetensors",
+)
 
-    try:
-        resolve_audiox_bundle_paths(str(weights_dir.resolve()))
-        return True
-    except (OSError, ValueError):
-        return False
+
+def _audiox_bundle_is_valid(weights_dir: Path) -> bool:
+    root = weights_dir.resolve()
+    return all((root / rel).is_file() for rel in _REQUIRED_AUDIOX_FILES)
 
 
 def _get_audiox_model_sample_rate(weights_dir: Path) -> int:
-    from vllm_omni.diffusion.models.audiox.audiox_weights import load_audiox_bundle_config
+    import json
 
-    _, model_cfg, _ = load_audiox_bundle_config(str(weights_dir.resolve()))
+    with open(weights_dir.resolve() / "config.json", encoding="utf-8") as f:
+        model_cfg = json.load(f)
     return int(model_cfg.get("sample_rate", 48000))
 
 
-def _require_sharded_audiox_weights(weights_dir: Path) -> None:
-    """vLLM-Omni loads only component safetensors (``model_index.json`` + shard files)."""
-    if _audiox_bundle_is_sharded(weights_dir):
+def _require_audiox_weights(weights_dir: Path) -> None:
+    """vLLM-Omni loads the AudioX bundle from a single merged safetensors file."""
+    if _audiox_bundle_is_valid(weights_dir):
         return
+    missing = [rel for rel in _REQUIRED_AUDIOX_FILES if not (weights_dir.resolve() / rel).is_file()]
     raise SystemExit(
-        f"Missing vLLM-Omni sharded weights under {weights_dir}. "
-        "Expected model_index.json plus transformer/conditioners safetensor shards (and vae/ if pretransform). "
+        f"Missing AudioX bundle files under {weights_dir}: {missing}. "
+        "Expected config.json + transformer/diffusion_pytorch_model.safetensors (and vae/ for the pretransform). "
         "Download a bundle, for example:\n"
         f"  huggingface-cli download zhangj1an/AudioX --local-dir {weights_dir}"
     )
@@ -189,7 +192,7 @@ def run_single_inference(
         raise SystemExit(f"task {task} requires a video path.")
 
     wd = Path(os.path.abspath(os.path.expanduser(model_dir)))
-    _require_sharded_audiox_weights(wd)
+    _require_audiox_weights(wd)
 
     prompt_text = prompt if task in TEXT_TASKS else ""
     model_sample_rate = _get_audiox_model_sample_rate(wd)
@@ -332,8 +335,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     if not video_path:
         video_path = str(assets_dir / f"sample_{clip}.mp4")
 
-    if not _audiox_bundle_is_sharded(weights_dir):
-        _require_sharded_audiox_weights(weights_dir)
+    if not _audiox_bundle_is_valid(weights_dir):
+        _require_audiox_weights(weights_dir)
 
     v2_needed = False
     tasks_cfg = r.get("tasks")

@@ -16,6 +16,7 @@ Architecture:
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import typing as tp
@@ -24,9 +25,9 @@ from typing import Any
 
 import einops
 import torch
+from diffusers import AutoencoderOobleck
 from einops import rearrange
 from torch import einsum, nn
-from diffusers import AutoencoderOobleck
 from torchvision import transforms
 from transformers import (
     AutoConfig,
@@ -35,14 +36,20 @@ from transformers import (
     T5TokenizerFast,
 )
 
-from vllm_omni.diffusion.models.audiox.audiox_weights import (
-    filter_audio_prompt_config_after_pretransform_build,
-    prepare_audiox_video_text_conditioner_configs,
-    resolve_pretransform_scale,
-    resolve_vae_audio_channels,
-    resolve_vae_latent_channels,
-    validate_audiox_pretransform_config_keys,
-)
+
+def _kwargs_for(cls: type, cfg: dict[str, Any]) -> dict[str, Any]:
+    """Filter ``cfg`` to just the keyword arguments accepted by ``cls.__init__``.
+
+    Upstream AudioX configs ship training-only knobs (e.g. ``mask_ratio_*``, ``project_out``)
+    alongside inference-relevant keys. Rather than maintain a whitelist, walk the constructor
+    signature and drop anything that isn't a named parameter. Constructors that take ``**kwargs``
+    are handled by the caller (no filtering needed).
+    """
+    sig = inspect.signature(cls.__init__)
+    accepted = {
+        name for name, param in sig.parameters.items() if name != "self" and param.kind != inspect.Parameter.VAR_KEYWORD
+    }
+    return {k: v for k, v in cfg.items() if k in accepted}
 
 
 # ---------------------------------------------------------------------------
@@ -61,9 +68,7 @@ def set_audio_channels(audio: torch.Tensor, target_channels: int) -> torch.Tenso
     return audio
 
 
-def _stack_pad_audio_list(
-    audio: list[torch.Tensor], device: torch.device | str
-) -> torch.Tensor:
+def _stack_pad_audio_list(audio: list[torch.Tensor], device: torch.device | str) -> torch.Tensor:
     bs = len(audio)
     max_len = max(a.shape[-1] for a in audio)
     padded: list[torch.Tensor] = []
@@ -218,9 +223,7 @@ class CLIPVideoTemporalSyncConditioner(Conditioner):
         hidden_scale = 4
         in_features = self.CLIP_PATCH_TOKENS * self.VIDEO_FPS * self.DURATION_SECONDS
 
-        self.empty_visual_feat = nn.Parameter(
-            torch.zeros(1, self.OUT_FEATURES, self.TEMPORAL_DIM), requires_grad=False
-        )
+        self.empty_visual_feat = nn.Parameter(torch.zeros(1, self.OUT_FEATURES, self.TEMPORAL_DIM), requires_grad=False)
         self.visual_encoder_model = CLIPVisionModelWithProjection.from_pretrained(name)
         self.proj = nn.Linear(in_features=in_features, out_features=self.OUT_FEATURES)
         self.proj_sync = nn.Linear(in_features=240, out_features=self.OUT_FEATURES)
@@ -348,7 +351,7 @@ class AudioVaePromptAdapter(Conditioner):
         latent_seq_len: int = 237,
     ):
         icfg = pretransform.config
-        enc_ch = resolve_vae_latent_channels(icfg)
+        enc_ch = int(getattr(icfg, "latent_channels", getattr(icfg, "decoder_input_channels", 1)))
         super().__init__(enc_ch, output_dim)
         self.pretransform = pretransform
         self.latent_seq_len = latent_seq_len
@@ -365,7 +368,7 @@ class AudioVaePromptAdapter(Conditioner):
         else:
             audio_t = audio.to(device)
 
-        audio_t = set_audio_channels(audio_t, resolve_vae_audio_channels(self.pretransform.config))
+        audio_t = set_audio_channels(audio_t, int(getattr(self.pretransform.config, "audio_channels", 2)))
 
         vae = self.pretransform
         z = vae.encode(audio_t, return_dict=True).latent_dist.sample()
@@ -413,9 +416,7 @@ def create_pretransform_from_config(
 
     Sets ``audiox_scaling_factor`` on the module; callers scale latents when encoding/decoding.
     """
-    validate_audiox_pretransform_config_keys(pretransform_config)
-
-    pretransform_type = pretransform_config["type"]
+    pretransform_type = pretransform_config.get("type", "autoencoder")
 
     if pretransform_type != "autoencoder":
         raise NotImplementedError(
@@ -430,7 +431,7 @@ def create_pretransform_from_config(
         local_files_only=local_files_only,
     )
     icfg = vae.config
-    scaling_factor = resolve_pretransform_scale(pretransform_config, icfg)
+    scaling_factor = float(pretransform_config.get("scale", getattr(icfg, "scaling_factor", 1.0)))
     vae.audiox_scaling_factor = scaling_factor  # type: ignore[attr-defined]
 
     vae.eval().requires_grad_(False)
@@ -512,15 +513,12 @@ def create_audiox_fixed_conditioner_from_conditioning_config(
             "AudioX fixed conditioner ids must be exactly {'video_prompt', 'text_prompt', 'audio_prompt'}."
         )
 
-    audio_cfg: dict[str, tp.Any] = _with_output_dim(cond_dim, by_id["audio_prompt"])
-    video_cfg, text_cfg = prepare_audiox_video_text_conditioner_configs(
-        cond_dim=cond_dim,
-        video_prompt=by_id["video_prompt"],
-        text_prompt=by_id["text_prompt"],
-    )
+    audio_cfg = _with_output_dim(cond_dim, by_id["audio_prompt"])
+    video_cfg = _kwargs_for(CLIPVideoTemporalSyncConditioner, _with_output_dim(cond_dim, by_id["video_prompt"]))
+    text_cfg = _kwargs_for(T5TextEncoderAdapter, _with_output_dim(cond_dim, by_id["text_prompt"]))
 
     pretransform = _build_pretransform(audio_cfg, model=model)
-    audio_cfg = filter_audio_prompt_config_after_pretransform_build(audio_cfg)
+    audio_cfg = _kwargs_for(AudioVaePromptAdapter, audio_cfg)
 
     conditioners: dict[str, Conditioner] = {
         "video_prompt": CLIPVideoTemporalSyncConditioner(**video_cfg),

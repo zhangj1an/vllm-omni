@@ -16,7 +16,6 @@ from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
 )
 from vllm_omni.diffusion.models.audiox.audiox_maf import MAF_Block
 from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
-from vllm_omni.diffusion.models.audiox.audiox_weights import strip_diffusion_model_config_for_audiox_dit
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
 
 _PROGRESS = ProgressBarMixin()
@@ -150,12 +149,9 @@ class ConditionedDiffusionModelWrapper(nn.Module):
 def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: OmniDiffusionConfig | None = None):
     model_config = config["model"]
     diffusion_config = model_config["diffusion"]
-    diffusion_model_config = diffusion_config["config"]
-    diffusion_model_config = strip_diffusion_model_config_for_audiox_dit(dict(diffusion_model_config))
+    diffusion_model_config = dict(diffusion_config["config"])
 
-    diffusion_build_kwargs = dict(diffusion_model_config)
-
-    diffusion_model = MMDiffusionTransformer(**diffusion_build_kwargs)
+    diffusion_model = MMDiffusionTransformer(**diffusion_model_config)
 
     io_channels = model_config["io_channels"]
     sample_rate = config["sample_rate"]
@@ -343,9 +339,10 @@ def generate_diffusion_cond(
     )
 
     if not return_latents:
-        sampled = sampled.to(next(pt.parameters()).dtype)
-        model.pretransform = pt.to(dtype=torch.float32).eval()
-        vae = model.pretransform
+        dev = sampled.device
+        # Second AutoencoderOobleck (decode-only); conditioner VAE is moved in its own forward.
+        vae = pt.to(device=dev, dtype=torch.float32).eval()
+        model.pretransform = vae
         z = sampled.to(dtype=torch.float32)
         sampled = vae.decode(z * float(vae.audiox_scaling_factor), return_dict=True).sample
 

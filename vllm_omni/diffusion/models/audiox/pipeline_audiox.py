@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterable
 from typing import Any, ClassVar
@@ -12,8 +13,10 @@ import torch
 from scipy.signal import resample_poly
 from torch import nn
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
+from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
     encode_audiox_conditioning_tensors,
 )
@@ -24,12 +27,6 @@ from vllm_omni.diffusion.models.audiox.audiox_reference_media import (
 from vllm_omni.diffusion.models.audiox.audiox_runtime import (
     create_model_from_config,
     generate_diffusion_cond,
-)
-from vllm_omni.diffusion.models.audiox.audiox_weights import (
-    audio_conditioning_input_samples_from_model_config,
-    build_sharded_component_sources,
-    load_audiox_bundle_config,
-    load_audiox_weights,
 )
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
@@ -51,6 +48,38 @@ def _default_audiox_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda", torch.cuda.current_device())
     return torch.device("cpu")
+
+
+def _load_audiox_bundle_config(model_root: str) -> dict[str, Any]:
+    """Load the upstream AudioX bundle config from ``<model_root>/config.json``."""
+    with open(os.path.join(os.path.abspath(model_root), "config.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int | None:
+    """``latent_seq_len × downsampling_ratio`` from the nested ``audio_prompt`` conditioning config."""
+    m = model_config.get("model")
+    if not isinstance(m, dict):
+        return None
+    cond = m.get("conditioning")
+    if not isinstance(cond, dict):
+        return None
+    for item in cond.get("configs", []):
+        if not isinstance(item, dict) or item.get("id") != "audio_prompt":
+            continue
+        c = item.get("config")
+        if not isinstance(c, dict):
+            continue
+        ls = c.get("latent_seq_len")
+        pt = c.get("pretransform_config")
+        ds = None
+        if isinstance(pt, dict):
+            ptc = pt.get("config")
+            if isinstance(ptc, dict):
+                ds = ptc.get("downsampling_ratio")
+        if isinstance(ls, (int, float)) and isinstance(ds, (int, float)):
+            return int(ls) * int(ds)
+    return None
 
 
 def resample_audiox_waveform_poly(audio_data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
@@ -84,12 +113,12 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
         raise ValueError("AudioX pre-process requires od_config.model.")
 
     model_root = os.path.abspath(od_config.model)
-    _, model_cfg, _ = load_audiox_bundle_config(model_root)
+    model_cfg = _load_audiox_bundle_config(model_root)
 
     sample_rate = int(model_cfg.get("sample_rate", 48000))
     sample_size = int(model_cfg.get("sample_size", sample_rate * 10))
     video_fps = int(model_cfg.get("video_fps", 5))
-    ac_samples = audio_conditioning_input_samples_from_model_config(model_cfg)
+    ac_samples = _audio_conditioning_input_samples(model_cfg)
     audio_conditioning_samples = ac_samples if ac_samples is not None else sample_size
     seconds_model = float(sample_size) / float(sample_rate)
     clip_duration = 10.0
@@ -228,19 +257,24 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             )
 
         self._model_root = os.path.abspath(od_config.model)
-        config_path, self._model_config, _ = load_audiox_bundle_config(self._model_root)
+        self._model_config = _load_audiox_bundle_config(self._model_root)
 
         self._generate_diffusion_cond = generate_diffusion_cond
         self._model = create_model_from_config(self._model_config, od_config=od_config)
-        logger.debug("AudioX conditioned model built from %s", config_path)
+        logger.debug("AudioX conditioned model built from %s", self._model_root)
 
-        self.weights_sources = build_sharded_component_sources(
-            model_root=self._model_root,
-            od_config=od_config,
-        )
+        self.weights_sources = [
+            DiffusersPipelineLoader.ComponentSource(
+                model_or_path=self._model_root,
+                subfolder="transformer",
+                revision=getattr(od_config, "revision", None),
+                prefix="_model.",
+                fall_back_to_pt=True,
+            ),
+        ]
         sample_rate = int(self._model_config.get("sample_rate", 48000))
         sample_size = int(self._model_config.get("sample_size", sample_rate * 10))
-        ac_samples = audio_conditioning_input_samples_from_model_config(self._model_config)
+        ac_samples = _audio_conditioning_input_samples(self._model_config)
         audio_conditioning_samples = ac_samples if ac_samples is not None else sample_size
         self._sample_rate = sample_rate
         self._sample_size = sample_size
@@ -253,7 +287,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        load_audiox_weights(self, weights)
+        AutoWeightsLoader(self).load_weights(weights)
 
         self._model.to(torch.float32)
         self._model.eval().requires_grad_(False)
