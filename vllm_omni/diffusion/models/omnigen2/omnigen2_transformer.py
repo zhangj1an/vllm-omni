@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import vllm._custom_ops as ops
 from diffusers.models.activations import get_activation
 from diffusers.models.embeddings import Timesteps, get_1d_rotary_pos_embed
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
@@ -19,8 +20,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
-import vllm._custom_ops as ops
 
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.platforms import current_omni_platform
@@ -55,9 +54,7 @@ def _patch_cutlass_padded_fp8():
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0:
-            return _orig_cutlass_scaled_mm(
-                a, b, scale_a, scale_b, out_dtype, bias
-            )
+            return _orig_cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
         # Reshape to 2D (mirrors the original function)
         target_shape = (*a.shape[:-1], b.shape[1])
@@ -90,22 +87,27 @@ def _patch_cutlass_padded_fp8():
                 )
 
             _weight_cache[key] = (
-                b_pad, bias_pad, scale_b_pad, pad_k, pad_n, orig_n,
+                b_pad,
+                bias_pad,
+                scale_b_pad,
+                pad_k,
+                pad_n,
+                orig_n,
             )
 
-        b_pad, bias_pad, scale_b_pad, pad_k, pad_n, orig_n = (
-            _weight_cache[key]
-        )
+        b_pad, bias_pad, scale_b_pad, pad_k, pad_n, orig_n = _weight_cache[key]
 
         # Pad activations on K dimension (cheap — activations are small).
         if pad_k > 0:
             a = F.pad(a, (0, pad_k)).contiguous()
 
-        out = torch.empty(
-            (a.shape[0], b_pad.shape[1]), dtype=out_dtype, device=a.device
-        )
+        out = torch.empty((a.shape[0], b_pad.shape[1]), dtype=out_dtype, device=a.device)
         torch.ops._C.cutlass_scaled_mm(
-            out, a, b_pad, scale_a, scale_b_pad,
+            out,
+            a,
+            b_pad,
+            scale_a,
+            scale_b_pad,
             bias_pad if bias is not None else None,
         )
 
