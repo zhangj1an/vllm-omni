@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers.models.activations import get_activation
 from diffusers.models.embeddings import Timesteps, get_1d_rotary_pos_embed
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
@@ -20,6 +21,76 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.platforms import current_omni_platform
+
+
+def _patch_cutlass_padded_fp8():
+    """Monkey-patch vllm._custom_ops.cutlass_scaled_mm to pad tensors whose
+    dimensions are not multiples of 16, so the CUTLASS FP8 kernel is used.
+
+    OmniGen2 has hidden_size=2520 (2520 % 16 == 8).  Without this patch,
+    vLLM's cutlass_scaled_mm falls back to a Triton scaled_mm kernel for
+    every FP8 linear layer (QKV, attn output, gate_up_proj, down_proj),
+    which is dramatically slower than the native CUTLASS FP8 tensor-core
+    path on H100/H200 GPUs.
+    """
+    import vllm._custom_ops as ops
+
+    _orig_cutlass_scaled_mm = ops.cutlass_scaled_mm
+
+    def _padded_cutlass_scaled_mm(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        out_dtype: torch.dtype,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0:
+            return _orig_cutlass_scaled_mm(
+                a, b, scale_a, scale_b, out_dtype, bias
+            )
+
+        # Reshape to 2D (mirrors the original function)
+        target_shape = (*a.shape[:-1], b.shape[1])
+        a = a.view(-1, a.shape[-1])
+
+        orig_n = b.shape[1]
+        pad_k = (16 - b.shape[0] % 16) % 16
+        pad_n = (16 - orig_n % 16) % 16
+
+        if pad_k > 0:
+            a = F.pad(a, (0, pad_k))
+            b = F.pad(b, (0, 0, 0, pad_k))
+        if pad_n > 0:
+            b = F.pad(b, (0, pad_n))
+            if bias is not None:
+                bias = F.pad(bias, (0, pad_n))
+            if scale_b.numel() > 1:
+                scale_b = F.pad(
+                    scale_b.view(-1, scale_b.shape[-1]),
+                    (0, pad_n),
+                    value=1.0,
+                )
+
+        # CUTLASS requires b to be column-major (stride(0) == 1).
+        # F.pad produces row-major output, so restore column-major layout.
+        a = a.contiguous()
+        b = b.t().contiguous().t()
+
+        out = torch.empty(
+            (a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device
+        )
+        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+
+        if pad_n > 0:
+            out = out[:, :orig_n]
+
+        return out.view(*target_shape)
+
+    ops.cutlass_scaled_mm = _padded_cutlass_scaled_mm
+
+
+_patch_cutlass_padded_fp8()
 
 
 class OmniGen2Attention(nn.Module):
@@ -92,6 +163,9 @@ class OmniGen2Attention(nn.Module):
         """
         batch_size = hidden_states.shape[0]
 
+        # Contiguous layout for FP8 quantized linear GEMMs (matches FLUX DiT).
+        hidden_states = hidden_states.contiguous()
+
         # Get Query-Key-Value Pair
         qkv, _ = self.to_qkv(hidden_states)
 
@@ -135,7 +209,7 @@ class OmniGen2Attention(nn.Module):
         hidden_states = hidden_states.reshape(batch_size, -1, self.num_heads * self.head_dim)
         hidden_states = hidden_states.to(dtype)
 
-        hidden_states = self.to_out[0](hidden_states)
+        hidden_states = self.to_out[0](hidden_states.contiguous())
 
         return hidden_states
 
