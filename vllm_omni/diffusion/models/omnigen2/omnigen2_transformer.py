@@ -120,16 +120,7 @@ def _patch_cutlass_padded_fp8():
     )
 
 
-_CUTLASS_PATCHED = False
-
-
-def _maybe_patch_cutlass_padded_fp8():
-    """Apply the CUTLASS FP8 padding patch once, only when FP8 is actually used."""
-    global _CUTLASS_PATCHED
-    if _CUTLASS_PATCHED:
-        return
-    _CUTLASS_PATCHED = True
-    _patch_cutlass_padded_fp8()
+_patch_cutlass_padded_fp8()
 
 
 class OmniGen2Attention(nn.Module):
@@ -863,9 +854,6 @@ class OmniGen2Transformer2DModel(nn.Module):
     ) -> None:
         """Initialize the OmniGen2 transformer model."""
         super().__init__()
-
-        if quant_config is not None:
-            _maybe_patch_cutlass_padded_fp8()
 
         # Validate configuration
         if (hidden_size // num_attention_heads) != sum(axes_dim_rope):
