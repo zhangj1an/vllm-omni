@@ -15,9 +15,13 @@ from torch import nn
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
+import einops
+from torchvision import transforms
+from transformers import AutoConfig, CLIPVisionModelWithProjection, T5EncoderModel, T5TokenizerFast
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
+    SA_Transformer,
     create_audiox_fixed_conditioner_from_conditioning_config,
     create_pretransform_from_config,
     encode_audiox_conditioning_tensors,
@@ -269,6 +273,32 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             model_config["conditioning"],
         )
 
+        # T5 text encoder — used directly, no adapter wrapper.
+        cond_configs = {c["id"]: c.get("config", {}) for c in model_config["conditioning"]["configs"]}
+        t5_name = cond_configs.get("text_prompt", {}).get("t5_model_name", "t5-base")
+        self._t5_max_length = int(cond_configs.get("text_prompt", {}).get("max_length", 128))
+        self.tokenizer = T5TokenizerFast.from_pretrained(t5_name)
+        t5_config = AutoConfig.from_pretrained(t5_name)
+        self.text_encoder = T5EncoderModel(t5_config).train(False).requires_grad_(False).to(torch.float16)
+
+        # CLIP video encoder + temporal fusion — used directly, no adapter wrapper.
+        clip_name = cond_configs.get("video_prompt", {}).get("clip_model_name", "openai/clip-vit-base-patch32")
+        clip_config = AutoConfig.from_pretrained(clip_name)
+        self.clip_encoder = CLIPVisionModelWithProjection(clip_config)
+        _CLIP_PATCH_TOKENS, _VIDEO_FPS, _DURATION_SEC, _DIM = 50, 5, 10, 768
+        _in_features = _CLIP_PATCH_TOKENS * _VIDEO_FPS * _DURATION_SEC
+        self._clip_in_features = _in_features
+        self._clip_out_features = 128
+        self.clip_proj = nn.Linear(_in_features, self._clip_out_features)
+        self.clip_proj_sync = nn.Linear(240, self._clip_out_features)
+        self.clip_sync_weight = nn.Parameter(torch.tensor(0.0))
+        self.clip_temp_transformer = SA_Transformer(_DIM, depth=4, heads=16, dim_head=64, mlp_dim=_DIM * 4)
+        self.clip_temp_pos_embedding = nn.Parameter(torch.randn(1, _VIDEO_FPS * _DURATION_SEC, _DIM))
+        self.clip_empty_visual_feat = nn.Parameter(torch.zeros(1, self._clip_out_features, _DIM), requires_grad=False)
+        _CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+        _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+        self._clip_normalize = transforms.Compose([transforms.Normalize(mean=list(_CLIP_MEAN), std=list(_CLIP_STD))])
+
         pretransform_cfg = model_config["pretransform"]
         self.pretransform = create_pretransform_from_config(pretransform_cfg)
 
@@ -315,13 +345,9 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         loaded = AutoWeightsLoader(self).load_weights(weights)
 
         # T5EncoderModel ties shared.weight ↔ encoder.embed_tokens.weight.
-        # The unified safetensors omits shared.weight to avoid duplication;
-        # reconstruct the tie here so the encoder works correctly.
-        t5_enc = getattr(self.conditioner.conditioners, "text_prompt", None)
-        if t5_enc is not None:
-            encoder = getattr(t5_enc, "encoder", None)
-            if encoder is not None and hasattr(encoder, "shared"):
-                encoder.shared.weight = encoder.encoder.embed_tokens.weight
+        # The unified safetensors omits shared.weight; reconstruct the tie.
+        if hasattr(self.text_encoder, "shared"):
+            self.text_encoder.shared.weight = self.text_encoder.encoder.embed_tokens.weight
 
         self.to(torch.float32)
         self.eval().requires_grad_(False)
@@ -479,12 +505,72 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             scale_phi=cfg_rescale,
         )
 
+    def _encode_text(self, texts: list[str], device: torch.device) -> list[torch.Tensor]:
+        """Tokenize and encode text with T5 directly."""
+        self.text_encoder.to(device)
+        encoded = self.tokenizer(
+            texts,
+            truncation=True,
+            max_length=self._t5_max_length,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device).to(torch.bool)
+
+        self.text_encoder.eval()
+        with torch.no_grad():
+            embeddings = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
+
+        embeddings = embeddings.float() * attention_mask.unsqueeze(-1).float()
+        return [embeddings, attention_mask]
+
+    def _encode_video(self, video_list: list[dict], device: torch.device) -> list[torch.Tensor]:
+        """Encode video with CLIP + temporal transformer + sync fusion."""
+        self.clip_encoder.to(device).eval()
+
+        video_tensors = [item["video_tensors"] for item in video_list]
+        video_sync_frames = torch.cat([item["video_sync_frames"] for item in video_list], dim=0).to(device)
+
+        original_videos = torch.cat(video_tensors, dim=0).to(device)
+        batch_size, time_length, _, _, _ = original_videos.size()
+        is_zero = torch.all(original_videos == 0, dim=(1, 2, 3, 4))
+
+        frames = einops.rearrange(original_videos, "b t c h w -> (b t) c h w")
+        pixel_values = self._clip_normalize(frames).to(device)
+
+        with torch.no_grad():
+            outputs = self.clip_encoder(pixel_values=pixel_values)
+        hidden = outputs.last_hidden_state
+        hidden = einops.rearrange(hidden, "(b t) q h -> (b q) t h", b=batch_size, t=time_length)
+        hidden = hidden + self.clip_temp_pos_embedding
+        hidden = self.clip_temp_transformer(hidden)
+        hidden = einops.rearrange(hidden, "(b q) t h -> b (t q) h", b=batch_size, t=time_length)
+        hidden = self.clip_proj(hidden.view(-1, self._clip_in_features))
+        hidden = hidden.view(batch_size, self._clip_out_features, -1)
+
+        sync = self.clip_proj_sync(video_sync_frames.view(-1, 240))
+        sync = sync.view(batch_size, self._clip_out_features, -1)
+        hidden = hidden + self.clip_sync_weight * sync
+
+        empty = self.clip_empty_visual_feat.expand(batch_size, -1, -1)
+        hidden = torch.where(is_zero.view(batch_size, 1, 1), empty, hidden)
+        return [hidden, torch.ones(batch_size, 1, device=device)]
+
     def _encode_conditioning_tensors(self, batch_metadata: list[dict[str, Any]]) -> dict[str, Any]:
-        return encode_audiox_conditioning_tensors(
+        # Encode audio through the MultiConditioner.
+        output = encode_audiox_conditioning_tensors(
             self.conditioner,
             batch_metadata=batch_metadata,
             device=self.device,
         )
+        # Encode text directly with T5.
+        texts = [item["text_prompt"] for item in batch_metadata]
+        output["text_prompt"] = self._encode_text(texts, self.device)
+        # Encode video directly with CLIP.
+        video_inputs = [item["video_prompt"] for item in batch_metadata]
+        output["video_prompt"] = self._encode_video(video_inputs, self.device)
+        return output
 
     def _build_conditioning_batch(
         self,

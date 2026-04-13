@@ -20,18 +20,10 @@ import inspect
 import typing as tp
 from typing import Any
 
-import einops
 import torch
 from diffusers import AutoencoderOobleck
 from einops import rearrange
 from torch import einsum, nn
-from torchvision import transforms
-from transformers import (
-    AutoConfig,
-    CLIPVisionModelWithProjection,
-    T5EncoderModel,
-    T5TokenizerFast,
-)
 
 
 def _kwargs_for(cls: type, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -184,150 +176,6 @@ class Conditioner(nn.Module):
 
     def forward(self, x: tp.Any) -> tp.Any:
         raise NotImplementedError()
-
-
-# ---------------------------------------------------------------------------
-# CLIP video: upstream ViT + temporal / sync / empty-feature glue
-# ---------------------------------------------------------------------------
-
-_CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
-_CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
-
-
-class CLIPVideoTemporalSyncConditioner(Conditioner):
-    """``CLIPVisionModelWithProjection`` + SA temporal stack, sync fusion, and zero-video masking."""
-
-    DEFAULT_CLIP_MODEL = "openai/clip-vit-base-patch32"
-    VIDEO_FPS = 5
-    DURATION_SECONDS = 10
-    TEMPORAL_DIM = 768
-    OUT_FEATURES = 128
-    CLIP_PATCH_TOKENS = 50
-
-    def __init__(
-        self,
-        output_dim: int,
-        project_out: bool = False,
-        *,
-        clip_model_name: str | None = None,
-    ):
-        super().__init__(dim=768, output_dim=output_dim, project_out=project_out)
-
-        name = clip_model_name or self.DEFAULT_CLIP_MODEL
-        sa_depth = 4
-        num_heads = 16
-        dim_head = 64
-        hidden_scale = 4
-        in_features = self.CLIP_PATCH_TOKENS * self.VIDEO_FPS * self.DURATION_SECONDS
-
-        self.empty_visual_feat = nn.Parameter(torch.zeros(1, self.OUT_FEATURES, self.TEMPORAL_DIM), requires_grad=False)
-        clip_config = AutoConfig.from_pretrained(name)
-        self.visual_encoder_model = CLIPVisionModelWithProjection(clip_config)
-        self.proj = nn.Linear(in_features=in_features, out_features=self.OUT_FEATURES)
-        self.proj_sync = nn.Linear(in_features=240, out_features=self.OUT_FEATURES)
-        self.sync_weight = nn.Parameter(torch.tensor(0.0))
-        self.in_features = in_features
-        self.out_features = self.OUT_FEATURES
-        self.Temp_transformer = SA_Transformer(
-            self.TEMPORAL_DIM, sa_depth, num_heads, dim_head, self.TEMPORAL_DIM * hidden_scale
-        )
-        self.Temp_pos_embedding = nn.Parameter(
-            torch.randn(1, self.DURATION_SECONDS * self.VIDEO_FPS, self.TEMPORAL_DIM)
-        )
-
-        self._clip_normalize = transforms.Compose([transforms.Normalize(mean=list(_CLIP_MEAN), std=list(_CLIP_STD))])
-
-    def forward(self, video_list: list[torch.Tensor | dict], device: torch.device | str) -> list[torch.Tensor]:
-        self.to(device)
-        self.visual_encoder_model.eval()
-
-        if isinstance(video_list[0], dict):
-            video_tensors = [item["video_tensors"] for item in video_list]
-            video_sync_frames = [item["video_sync_frames"] for item in video_list]
-            video_sync_frames = torch.cat(video_sync_frames, dim=0).to(device)
-        else:
-            video_tensors = video_list
-            batch_size = len(video_tensors)
-            video_sync_frames = torch.zeros(batch_size, 240, 768, device=device)
-
-        original_videos = torch.cat(video_tensors, dim=0).to(device)
-        batch_size, time_length, _, _, _ = original_videos.size()
-        is_zero = torch.all(original_videos == 0, dim=(1, 2, 3, 4))
-
-        video_tensors = einops.rearrange(original_videos, "b t c h w -> (b t) c h w")
-        # Video frames are expected in [0, 1] float (e.g. from `audiox_reference_media.prepare_video_reference`).
-        video_cond_pixel_values = self._clip_normalize(video_tensors).to(device)
-
-        with torch.no_grad():
-            outputs = self.visual_encoder_model(pixel_values=video_cond_pixel_values)
-        video_hidden = outputs.last_hidden_state
-        video_hidden = einops.rearrange(video_hidden, "(b t) q h -> (b q) t h", b=batch_size, t=time_length)
-        video_hidden = video_hidden + self.Temp_pos_embedding
-        video_hidden = self.Temp_transformer(video_hidden)
-        video_hidden = einops.rearrange(video_hidden, "(b q) t h -> b (t q) h", b=batch_size, t=time_length)
-        video_hidden = self.proj(video_hidden.view(-1, self.in_features))
-        video_hidden = video_hidden.view(batch_size, self.out_features, -1)
-
-        video_sync_frames = self.proj_sync(video_sync_frames.view(-1, 240))
-        video_sync_frames = video_sync_frames.view(batch_size, self.out_features, -1)
-        video_hidden = video_hidden + self.sync_weight * video_sync_frames
-
-        empty_visual_feat = self.empty_visual_feat.expand(batch_size, -1, -1)
-        is_zero_expanded = is_zero.view(batch_size, 1, 1)
-        video_hidden = torch.where(is_zero_expanded, empty_visual_feat, video_hidden)
-        return [video_hidden, torch.ones(video_hidden.shape[0], 1).to(device)]
-
-
-# ---------------------------------------------------------------------------
-# T5 text: upstream encoder + projection / mask (no custom T5 blocks)
-# ---------------------------------------------------------------------------
-
-
-def _load_t5_tokenizer_and_encoder(model_name: str) -> tuple[T5TokenizerFast, T5EncoderModel]:
-    tokenizer = T5TokenizerFast.from_pretrained(model_name)
-    # Create T5 encoder from config only — weights are loaded later
-    # through the unified load_weights path.
-    t5_config = AutoConfig.from_pretrained(model_name)
-    encoder = T5EncoderModel(t5_config).train(False).requires_grad_(False).to(torch.float16)
-    return tokenizer, encoder
-
-
-class T5TextEncoderAdapter(Conditioner):
-    """Thin wrapper: tokenize, ``T5EncoderModel`` forward, project to ``cond_dim``, mask padding."""
-
-    def __init__(
-        self,
-        output_dim: int,
-        t5_model_name: str = "t5-base",
-        max_length: int = 128,
-        project_out: bool = False,
-    ):
-        hidden_size = AutoConfig.from_pretrained(t5_model_name).hidden_size
-        super().__init__(hidden_size, output_dim, project_out=project_out)
-
-        self.max_length = max_length
-        self.tokenizer, self.encoder = _load_t5_tokenizer_and_encoder(t5_model_name)
-
-    def forward(self, texts: list[str], device: torch.device | str) -> list[torch.Tensor]:
-        self.to(device)
-
-        encoded = self.tokenizer(
-            texts,
-            truncation=True,
-            max_length=self.max_length,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        input_ids = encoded["input_ids"].to(device)
-        attention_mask = encoded["attention_mask"].to(device).to(torch.bool)
-
-        self.encoder.eval()
-        with torch.set_grad_enabled(False):
-            embeddings = self.encoder(input_ids=input_ids, attention_mask=attention_mask)["last_hidden_state"]
-
-        embeddings = self.proj_out(embeddings.float())
-        embeddings = embeddings * attention_mask.unsqueeze(-1).float()
-        return [embeddings, attention_mask]
 
 
 # ---------------------------------------------------------------------------
@@ -488,13 +336,11 @@ def _with_output_dim(cond_dim: int, cfg: dict[str, tp.Any]) -> dict[str, tp.Any]
 def create_audiox_fixed_conditioner_from_conditioning_config(
     config: dict[str, tp.Any],
 ) -> MultiConditioner:
+    """Create audio conditioner.  T5 text and CLIP video encoding are handled directly by the pipeline."""
     cond_dim = config["cond_dim"]
-    configs = config["configs"]
-    if len(configs) != 3:
-        raise ValueError("AudioX fixed conditioner expects exactly 3 configs: video_prompt/text_prompt/audio_prompt.")
 
     by_id: dict[str, dict[str, tp.Any]] = {}
-    for item in configs:
+    for item in config["configs"]:
         if not isinstance(item, dict):
             raise ValueError("Each conditioning config entry must be a dict.")
         cid = item.get("id")
@@ -503,22 +349,11 @@ def create_audiox_fixed_conditioner_from_conditioning_config(
             raise ValueError("Each conditioning config must include string 'id' and dict 'config'.")
         by_id[cid] = dict(cconf)
 
-    expected_ids = {"video_prompt", "text_prompt", "audio_prompt"}
-    if set(by_id) != expected_ids:
-        raise ValueError(
-            "AudioX fixed conditioner ids must be exactly {'video_prompt', 'text_prompt', 'audio_prompt'}."
-        )
-
     audio_cfg = _with_output_dim(cond_dim, by_id["audio_prompt"])
-    video_cfg = _kwargs_for(CLIPVideoTemporalSyncConditioner, _with_output_dim(cond_dim, by_id["video_prompt"]))
-    text_cfg = _kwargs_for(T5TextEncoderAdapter, _with_output_dim(cond_dim, by_id["text_prompt"]))
-
     pretransform = _build_pretransform(audio_cfg)
     audio_cfg = _kwargs_for(AudioVaePromptAdapter, audio_cfg)
 
     conditioners: dict[str, Conditioner] = {
-        "video_prompt": CLIPVideoTemporalSyncConditioner(**video_cfg),
-        "text_prompt": T5TextEncoderAdapter(**text_cfg),
         "audio_prompt": AudioVaePromptAdapter(pretransform, **audio_cfg),
     }
     return MultiConditioner(conditioners)
