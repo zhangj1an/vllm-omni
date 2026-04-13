@@ -1,4 +1,5 @@
 import itertools
+import logging
 from collections.abc import Iterable
 from types import SimpleNamespace
 
@@ -19,8 +20,12 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+import vllm._custom_ops as ops
+
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.platforms import current_omni_platform
+
+logger = logging.getLogger(__name__)
 
 
 def _patch_cutlass_padded_fp8():
@@ -37,10 +42,6 @@ def _patch_cutlass_padded_fp8():
     versions are computed once and cached by data_ptr to avoid repeated
     allocation and column-major conversion overhead.
     """
-    import logging
-
-    import vllm._custom_ops as ops
-
     _orig_cutlass_scaled_mm = ops.cutlass_scaled_mm
     # Cache: data_ptr → (padded_b, padded_bias, padded_scale_b, pad_k, pad_n, orig_n)
     _weight_cache: dict[int, tuple] = {}
@@ -114,7 +115,7 @@ def _patch_cutlass_padded_fp8():
         return out.view(*target_shape)
 
     ops.cutlass_scaled_mm = _padded_cutlass_scaled_mm
-    logging.getLogger(__name__).info(
+    logger.info(
         "Patched vllm._custom_ops.cutlass_scaled_mm with CUTLASS-padded FP8 "
         "variant (avoids slow Triton fallback for non-%%16 dimensions)"
     )
@@ -163,7 +164,7 @@ class OmniGen2Attention(nn.Module):
                     input_is_parallel=False,
                     quant_config=quant_config,
                     return_bias=False,
-                    prefix=f"{prefix}.to_out",
+                    prefix=f"{prefix}.to_out.0",
                 )
             ]
         )
