@@ -12,7 +12,6 @@ from einops import rearrange, repeat
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
@@ -121,7 +120,16 @@ def _patch_cutlass_padded_fp8():
     )
 
 
-_patch_cutlass_padded_fp8()
+_CUTLASS_PATCHED = False
+
+
+def _maybe_patch_cutlass_padded_fp8():
+    """Apply the CUTLASS FP8 padding patch once, only when FP8 is actually used."""
+    global _CUTLASS_PATCHED
+    if _CUTLASS_PATCHED:
+        return
+    _CUTLASS_PATCHED = True
+    _patch_cutlass_padded_fp8()
 
 
 class OmniGen2Attention(nn.Module):
@@ -161,7 +169,7 @@ class OmniGen2Attention(nn.Module):
                     dim,
                     dim,
                     bias=False,
-                    input_is_parallel=True,
+                    input_is_parallel=False,
                     quant_config=quant_config,
                     return_bias=False,
                     prefix=f"{prefix}.to_out",
@@ -352,13 +360,10 @@ class LuminaRMSNormZero(nn.Module):
         embedding_dim: int,
         norm_eps: float,
         norm_elementwise_affine: bool,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
+        **kwargs,
     ):
         super().__init__()
         self.silu = nn.SiLU()
-        # Modulation linear is kept at full precision — it produces
-        # scale/gate values (via tanh) that are precision-sensitive.
         self.linear = nn.Linear(
             min(embedding_dim, 1024),
             4 * embedding_dim,
@@ -480,8 +485,7 @@ class LuminaFeedForward(nn.Module):
     def forward(self, x):
         x = self.gate_up_proj(x)
         x = self.act_fn(x)
-        x = self.down_proj(x)
-        return x
+        return self.down_proj(x)
 
 
 class Lumina2CombinedTimestepCaptionEmbedding(nn.Module):
@@ -503,8 +507,7 @@ class Lumina2CombinedTimestepCaptionEmbedding(nn.Module):
         )
 
         self.timestep_embedder = TimestepEmbedding(
-            in_channels=frequency_embedding_size,
-            time_embed_dim=min(hidden_size, 1024),
+            in_channels=frequency_embedding_size, time_embed_dim=min(hidden_size, 1024)
         )
 
         self.caption_embedder = nn.Sequential(
@@ -861,6 +864,9 @@ class OmniGen2Transformer2DModel(nn.Module):
         """Initialize the OmniGen2 transformer model."""
         super().__init__()
 
+        if quant_config is not None:
+            _maybe_patch_cutlass_padded_fp8()
+
         # Validate configuration
         if (hidden_size // num_attention_heads) != sum(axes_dim_rope):
             raise ValueError(
@@ -889,13 +895,11 @@ class OmniGen2Transformer2DModel(nn.Module):
         self.x_embedder = nn.Linear(
             in_features=patch_size * patch_size * in_channels,
             out_features=hidden_size,
-            bias=True,
         )
 
         self.ref_image_patch_embedder = nn.Linear(
             in_features=patch_size * patch_size * in_channels,
             out_features=hidden_size,
-            bias=True,
         )
 
         self.time_caption_embed = Lumina2CombinedTimestepCaptionEmbedding(

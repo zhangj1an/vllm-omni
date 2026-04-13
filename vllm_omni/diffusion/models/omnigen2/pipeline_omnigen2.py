@@ -1268,10 +1268,6 @@ class OmniGen2Pipeline(CFGParallelMixin, nn.Module):
             prompt_attention_mask,
             **optional_kwargs,
         )
-
-        if hasattr(model_pred, "sample"):
-            model_pred = model_pred.sample
-
         return model_pred
 
     def predict_noise(self, **kwargs):
