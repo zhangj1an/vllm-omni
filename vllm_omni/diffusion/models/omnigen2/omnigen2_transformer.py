@@ -357,13 +357,12 @@ class LuminaRMSNormZero(nn.Module):
     ):
         super().__init__()
         self.silu = nn.SiLU()
-        self.linear = ColumnParallelLinear(
+        # Modulation linear is kept at full precision — it produces
+        # scale/gate values (via tanh) that are precision-sensitive.
+        self.linear = nn.Linear(
             min(embedding_dim, 1024),
             4 * embedding_dim,
             bias=True,
-            return_bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.linear",
         )
 
         self.norm = RMSNorm(embedding_dim, eps=norm_eps)
