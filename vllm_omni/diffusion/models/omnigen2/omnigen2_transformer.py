@@ -47,9 +47,7 @@ def _patch_cutlass_padded_fp8():
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0:
-            return _orig_cutlass_scaled_mm(
-                a, b, scale_a, scale_b, out_dtype, bias
-            )
+            return _orig_cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
         # Reshape to 2D (mirrors the original function)
         target_shape = (*a.shape[:-1], b.shape[1])
@@ -78,9 +76,7 @@ def _patch_cutlass_padded_fp8():
         a = a.contiguous()
         b = b.t().contiguous().t()
 
-        out = torch.empty(
-            (a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device
-        )
+        out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
         torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
         if pad_n > 0:
