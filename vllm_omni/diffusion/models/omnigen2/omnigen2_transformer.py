@@ -12,6 +12,7 @@ from einops import rearrange, repeat
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
@@ -321,13 +322,18 @@ class LuminaRMSNormZero(nn.Module):
         embedding_dim: int,
         norm_eps: float,
         norm_elementwise_affine: bool,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.silu = nn.SiLU()
-        self.linear = nn.Linear(
+        self.linear = ColumnParallelLinear(
             min(embedding_dim, 1024),
             4 * embedding_dim,
             bias=True,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear",
         )
 
         self.norm = RMSNorm(embedding_dim, eps=norm_eps)
@@ -720,6 +726,8 @@ class OmniGen2TransformerBlock(nn.Module):
                 embedding_dim=dim,
                 norm_eps=norm_eps,
                 norm_elementwise_affine=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.norm1",
             )
         else:
             self.norm1 = RMSNorm(dim, eps=norm_eps)
