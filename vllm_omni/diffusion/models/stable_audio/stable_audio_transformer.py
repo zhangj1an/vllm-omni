@@ -372,6 +372,8 @@ class StableAudioDiTModel(nn.Module):
     - Output: [B, out_channels, L]
     """
 
+    _repeated_blocks = ["StableAudioDiTBlock"]
+
     def __init__(
         self,
         od_config: OmniDiffusionConfig | None = None,
