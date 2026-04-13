@@ -18,16 +18,17 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
+    create_audiox_fixed_conditioner_from_conditioning_config,
+    create_pretransform_from_config,
     encode_audiox_conditioning_tensors,
 )
+from vllm_omni.diffusion.models.audiox.audiox_maf import MAF_Block
 from vllm_omni.diffusion.models.audiox.audiox_reference_media import (
     prepare_audio_reference,
     prepare_video_reference,
 )
-from vllm_omni.diffusion.models.audiox.audiox_runtime import (
-    create_model_from_config,
-    generate_diffusion_cond,
-)
+from vllm_omni.diffusion.models.audiox.audiox_runtime import generate_diffusion_cond
+from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
@@ -252,24 +253,48 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         self.device = _default_audiox_device()
         if od_config.model is None:
             raise ValueError(
-                "AudioXPipeline requires od_config.model (directory with component-sharded safetensors; "
+                "AudioXPipeline requires od_config.model (directory with unified safetensors; "
                 "see https://huggingface.co/zhangj1an/AudioX)."
             )
 
         self._model_root = os.path.abspath(od_config.model)
         self._model_config = _load_audiox_bundle_config(self._model_root)
 
-        self._generate_diffusion_cond = generate_diffusion_cond
-        self._model = create_model_from_config(self._model_config, od_config=od_config)
-        logger.debug("AudioX conditioned model built from %s", self._model_root)
+        # --- Build sub-modules directly (no wrapper) ---
+        model_config = self._model_config["model"]
+        diffusion_config = model_config["diffusion"]
+
+        self.model = MMDiffusionTransformer(**dict(diffusion_config["config"]))
+        self.conditioner = create_audiox_fixed_conditioner_from_conditioning_config(
+            model_config["conditioning"],
+        )
+
+        pretransform_cfg = model_config["pretransform"]
+        self.pretransform = create_pretransform_from_config(pretransform_cfg)
+
+        self.io_channels = model_config["io_channels"]
+        self.diffusion_objective = "v"
+
+        gate = bool(diffusion_config.get("gate", False))
+        gate_type_config = diffusion_config.get("gate_type_config") or {}
+        self.maf_block: MAF_Block | None = None
+        if gate and diffusion_config.get("gate_type") == "MAF":
+            self.maf_block = MAF_Block(
+                dim=768,
+                num_experts_per_modality=int(gate_type_config.get("num_experts_per_modality", 64)),
+                num_heads=int(gate_type_config.get("num_heads", 24)),
+                num_fusion_layers=int(gate_type_config.get("num_fusion_layers", 8)),
+                mlp_ratio=float(gate_type_config.get("mlp_ratio", 4.0)),
+            )
+
+        logger.debug("AudioX model built from %s", self._model_root)
 
         self.weights_sources = [
             DiffusersPipelineLoader.ComponentSource(
                 model_or_path=self._model_root,
                 subfolder="transformer",
                 revision=getattr(od_config, "revision", None),
-                prefix="_model.",
-                fall_back_to_pt=True,
+                prefix="",
             ),
         ]
         sample_rate = int(self._model_config.get("sample_rate", 48000))
@@ -287,17 +312,24 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        AutoWeightsLoader(self).load_weights(weights)
+        loaded = AutoWeightsLoader(self).load_weights(weights)
 
-        self._model.to(torch.float32)
-        self._model.eval().requires_grad_(False)
+        # T5EncoderModel ties shared.weight ↔ encoder.embed_tokens.weight.
+        # The unified safetensors omits shared.weight to avoid duplication;
+        # reconstruct the tie here so the encoder works correctly.
+        t5_enc = getattr(self.conditioner.conditioners, "text_prompt", None)
+        if t5_enc is not None:
+            encoder = getattr(t5_enc, "encoder", None)
+            if encoder is not None and hasattr(encoder, "shared"):
+                encoder.shared.weight = encoder.encoder.embed_tokens.weight
 
-        names = {n for n, _ in self.named_parameters()}
-        names.update(n for n, _ in self.named_buffers())
-        return names
+        self.to(torch.float32)
+        self.eval().requires_grad_(False)
+
+        return loaded
 
     def _conditioning_dtype(self) -> torch.dtype:
-        p = next(self._model.parameters())
+        p = next(self.model.parameters())
         return p.dtype if p.dtype.is_floating_point else torch.float32
 
     @staticmethod
@@ -386,6 +418,39 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             tensors.append(vt.to(device=device, dtype=cond_dtype))
         return tensors
 
+    def get_conditioning_inputs(self, conditioning_tensors: dict[str, Any], negative: bool = False) -> dict[str, Any]:
+        """Extract and fuse cross-attention / global conditioning from encoded tensors."""
+        cross_attention_input: list[torch.Tensor] = []
+        cross_attention_masks: list[torch.Tensor] = []
+
+        for key in ("video_prompt", "text_prompt", "audio_prompt"):
+            cross_attn_in, cross_attn_mask = conditioning_tensors[key]
+            if len(cross_attn_in.shape) == 2:
+                cross_attn_in = cross_attn_in.unsqueeze(1)
+                cross_attn_mask = cross_attn_mask.unsqueeze(1)
+            cross_attention_input.append(cross_attn_in)
+            cross_attention_masks.append(cross_attn_mask)
+
+        video_feature, text_feature, audio_feature = cross_attention_input
+        if self.maf_block is not None:
+            refined = self.maf_block(text_feature, video_feature, audio_feature)
+            fused = torch.cat(list(refined.values()), dim=1)
+        else:
+            fused = torch.cat([video_feature, text_feature, audio_feature], dim=1)
+        masks = torch.cat(cross_attention_masks, dim=1)
+
+        if negative:
+            return {
+                "negative_cross_attn_cond": fused,
+                "negative_cross_attn_mask": masks,
+                "negative_global_embed": None,
+            }
+        return {
+            "cross_attn_cond": fused,
+            "cross_attn_cond_mask": masks,
+            "global_embed": None,
+        }
+
     def diffuse(
         self,
         *,
@@ -399,8 +464,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         generator: torch.Generator,
         cfg_rescale: float,
     ) -> torch.Tensor:
-        return self._generate_diffusion_cond(
-            self._model,
+        return generate_diffusion_cond(
+            self,
             steps=steps,
             cfg_scale=guidance_scale,
             conditioning_tensors=conditioning_tensors,
@@ -416,7 +481,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
     def _encode_conditioning_tensors(self, batch_metadata: list[dict[str, Any]]) -> dict[str, Any]:
         return encode_audiox_conditioning_tensors(
-            getattr(self._model, "conditioner", None),
+            self.conditioner,
             batch_metadata=batch_metadata,
             device=self.device,
         )

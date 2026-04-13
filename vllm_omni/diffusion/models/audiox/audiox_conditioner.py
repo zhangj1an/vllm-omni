@@ -17,10 +17,7 @@ Architecture:
 from __future__ import annotations
 
 import inspect
-import logging
-import os
 import typing as tp
-import warnings
 from typing import Any
 
 import einops
@@ -224,7 +221,8 @@ class CLIPVideoTemporalSyncConditioner(Conditioner):
         in_features = self.CLIP_PATCH_TOKENS * self.VIDEO_FPS * self.DURATION_SECONDS
 
         self.empty_visual_feat = nn.Parameter(torch.zeros(1, self.OUT_FEATURES, self.TEMPORAL_DIM), requires_grad=False)
-        self.visual_encoder_model = CLIPVisionModelWithProjection.from_pretrained(name)
+        clip_config = AutoConfig.from_pretrained(name)
+        self.visual_encoder_model = CLIPVisionModelWithProjection(clip_config)
         self.proj = nn.Linear(in_features=in_features, out_features=self.OUT_FEATURES)
         self.proj_sync = nn.Linear(in_features=240, out_features=self.OUT_FEATURES)
         self.sync_weight = nn.Parameter(torch.tensor(0.0))
@@ -286,15 +284,11 @@ class CLIPVideoTemporalSyncConditioner(Conditioner):
 
 
 def _load_t5_tokenizer_and_encoder(model_name: str) -> tuple[T5TokenizerFast, T5EncoderModel]:
-    previous_level = logging.root.manager.disable
-    logging.disable(logging.ERROR)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            tokenizer = T5TokenizerFast.from_pretrained(model_name)
-            encoder = T5EncoderModel.from_pretrained(model_name).train(False).requires_grad_(False).to(torch.float16)
-        finally:
-            logging.disable(previous_level)
+    tokenizer = T5TokenizerFast.from_pretrained(model_name)
+    # Create T5 encoder from config only — weights are loaded later
+    # through the unified load_weights path.
+    t5_config = AutoConfig.from_pretrained(model_name)
+    encoder = T5EncoderModel(t5_config).train(False).requires_grad_(False).to(torch.float16)
     return tokenizer, encoder
 
 
@@ -407,12 +401,22 @@ class MultiConditioner(nn.Module):
         return output
 
 
+_AUDIOX_VAE_CONFIG = {
+    "audio_channels": 2,
+    "channel_multiples": [1, 2, 4, 8, 16],
+    "decoder_channels": 128,
+    "decoder_input_channels": 64,
+    "downsampling_ratios": [2, 4, 4, 8, 8],
+    "encoder_hidden_size": 128,
+    "sampling_rate": 44100,
+}
+
+
 def create_pretransform_from_config(
     pretransform_config: dict[str, tp.Any],
-    *,
-    model: str,
 ) -> AutoencoderOobleck:
-    """Load ``AutoencoderOobleck`` (``from_pretrained(model, subfolder="vae")``).
+    """Create ``AutoencoderOobleck`` from config only — weights are loaded later
+    through the unified ``load_weights`` path.
 
     Sets ``audiox_scaling_factor`` on the module; callers scale latents when encoding/decoding.
     """
@@ -423,13 +427,8 @@ def create_pretransform_from_config(
             f"AudioX HKUST weights only use pretransform type 'autoencoder'; got {pretransform_type!r}"
         )
 
-    local_files_only = os.path.exists(model)
-    vae = AutoencoderOobleck.from_pretrained(
-        model,
-        subfolder="vae",
-        torch_dtype=torch.float32,
-        local_files_only=local_files_only,
-    )
+    vae = AutoencoderOobleck(**_AUDIOX_VAE_CONFIG)
+
     icfg = vae.config
     scaling_factor = float(pretransform_config.get("scale", getattr(icfg, "scaling_factor", 1.0)))
     vae.audiox_scaling_factor = scaling_factor  # type: ignore[attr-defined]
@@ -438,13 +437,10 @@ def create_pretransform_from_config(
     return vae
 
 
-def _build_pretransform(conditioner_config: dict[str, tp.Any], *, model: str) -> tp.Any:
-    sample_rate = conditioner_config.pop("sample_rate", None)
-    assert sample_rate is not None, "Sample rate must be specified for pretransform conditioners"
-
+def _build_pretransform(conditioner_config: dict[str, tp.Any]) -> tp.Any:
+    conditioner_config.pop("sample_rate", None)
     pretransform = create_pretransform_from_config(
         conditioner_config.pop("pretransform_config"),
-        model=model,
     )
     return pretransform
 
@@ -490,7 +486,7 @@ def _with_output_dim(cond_dim: int, cfg: dict[str, tp.Any]) -> dict[str, tp.Any]
 
 
 def create_audiox_fixed_conditioner_from_conditioning_config(
-    config: dict[str, tp.Any], *, model: str
+    config: dict[str, tp.Any],
 ) -> MultiConditioner:
     cond_dim = config["cond_dim"]
     configs = config["configs"]
@@ -517,7 +513,7 @@ def create_audiox_fixed_conditioner_from_conditioning_config(
     video_cfg = _kwargs_for(CLIPVideoTemporalSyncConditioner, _with_output_dim(cond_dim, by_id["video_prompt"]))
     text_cfg = _kwargs_for(T5TextEncoderAdapter, _with_output_dim(cond_dim, by_id["text_prompt"]))
 
-    pretransform = _build_pretransform(audio_cfg, model=model)
+    pretransform = _build_pretransform(audio_cfg)
     audio_cfg = _kwargs_for(AudioVaePromptAdapter, audio_cfg)
 
     conditioners: dict[str, Conditioner] = {

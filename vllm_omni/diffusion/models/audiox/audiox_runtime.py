@@ -1,201 +1,14 @@
 from __future__ import annotations
 
 import math
-import typing as tp
 
 import torch
 from diffusers import AutoencoderOobleck
 from diffusers.schedulers import EDMDPMSolverMultistepScheduler
-from torch import nn
 
-from vllm_omni.diffusion.data import OmniDiffusionConfig
-from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
-    MultiConditioner,
-    create_audiox_fixed_conditioner_from_conditioning_config,
-    create_pretransform_from_config,
-)
-from vllm_omni.diffusion.models.audiox.audiox_maf import MAF_Block
-from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
 from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
 
 _PROGRESS = ProgressBarMixin()
-
-
-def create_model_from_config(model_config, od_config: OmniDiffusionConfig | None = None):
-    return create_diffusion_cond_from_config(model_config, od_config=od_config)
-
-
-class ConditionedDiffusionModel(nn.Module):
-    def __init__(
-        self,
-        *args,
-        supports_cross_attention: bool = False,
-        supports_input_concat: bool = False,
-        supports_global_cond: bool = False,
-        supports_prepend_cond: bool = False,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.supports_cross_attention = supports_cross_attention
-        self.supports_input_concat = supports_input_concat
-        self.supports_global_cond = supports_global_cond
-        self.supports_prepend_cond = supports_prepend_cond
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        t: torch.Tensor,
-        cross_attn_cond: torch.Tensor = None,
-        cross_attn_mask: torch.Tensor = None,
-        input_concat_cond: torch.Tensor = None,
-        global_embed: torch.Tensor = None,
-        prepend_cond: torch.Tensor = None,
-        prepend_cond_mask: torch.Tensor = None,
-        cfg_scale: float = 1.0,
-        **kwargs,
-    ):
-        raise NotImplementedError()
-
-
-class ConditionedDiffusionModelWrapper(nn.Module):
-    def __init__(
-        self,
-        model: ConditionedDiffusionModel,
-        conditioner: MultiConditioner,
-        io_channels,
-        sample_rate,
-        min_input_length: int,
-        diffusion_objective: tp.Literal["v"] = "v",
-        pretransform: AutoencoderOobleck | None = None,
-        cross_attn_cond_ids: list[str] | None = None,
-        global_cond_ids: list[str] | None = None,
-        *,
-        gate: bool = False,
-        gate_type: str | None = None,
-        gate_type_config: dict[str, tp.Any] | None = None,
-    ):
-        super().__init__()
-        self.model = model
-        self.conditioner = conditioner
-        self.io_channels = io_channels
-        self.sample_rate = sample_rate
-        self.diffusion_objective = diffusion_objective
-        self.pretransform = pretransform
-        self.cross_attn_cond_ids = cross_attn_cond_ids or []
-        self.global_cond_ids = global_cond_ids or []
-        self.min_input_length = min_input_length
-
-        self.maf_block: MAF_Block | None = None
-        if gate and gate_type == "MAF":
-            gtc = gate_type_config or {}
-            self.maf_block = MAF_Block(
-                dim=768,
-                num_experts_per_modality=int(gtc.get("num_experts_per_modality", 64)),
-                num_heads=int(gtc.get("num_heads", 24)),
-                num_fusion_layers=int(gtc.get("num_fusion_layers", 8)),
-                mlp_ratio=float(gtc.get("mlp_ratio", 4.0)),
-            )
-
-    def get_conditioning_inputs(self, conditioning_tensors: dict[torch.Tensor, tp.Any], negative=False):
-        cross_attention_input = None
-        cross_attention_masks = None
-        global_cond = None
-
-        if len(self.cross_attn_cond_ids) > 0:
-            cross_attention_input = []
-            cross_attention_masks = []
-
-            for key in self.cross_attn_cond_ids:
-                cross_attn_in, cross_attn_mask = conditioning_tensors[key]
-                if len(cross_attn_in.shape) == 2:
-                    cross_attn_in = cross_attn_in.unsqueeze(1)
-                    cross_attn_mask = cross_attn_mask.unsqueeze(1)
-                cross_attention_input.append(cross_attn_in)
-                cross_attention_masks.append(cross_attn_mask)
-
-            video_feature, text_feature, audio_feature = cross_attention_input
-            if self.maf_block is not None:
-                refined_branches = self.maf_block(text_feature, video_feature, audio_feature)
-                cross_attention_input = torch.cat(list(refined_branches.values()), dim=1)
-            else:
-                cross_attention_input = torch.cat([video_feature, text_feature, audio_feature], dim=1)
-            cross_attention_masks = torch.cat(cross_attention_masks, dim=1)
-
-        if len(self.global_cond_ids) > 0:
-            global_conds = []
-            for key in self.global_cond_ids:
-                global_cond_input = conditioning_tensors[key][0]
-                global_conds.append(global_cond_input)
-            global_cond = torch.cat(global_conds, dim=-1)
-            if len(global_cond.shape) == 3:
-                global_cond = global_cond.squeeze(1)
-
-        if negative:
-            return {
-                "negative_cross_attn_cond": cross_attention_input,
-                "negative_cross_attn_mask": cross_attention_masks,
-                "negative_global_embed": global_cond,
-            }
-        return {
-            "cross_attn_cond": cross_attention_input,
-            "cross_attn_cond_mask": cross_attention_masks,
-            "global_embed": global_cond,
-        }
-
-    def forward(self, x: torch.Tensor, t: torch.Tensor, cond: dict[str, tp.Any], **kwargs):
-        return self.model(x, t, **self.get_conditioning_inputs(cond), **kwargs)
-
-
-def create_diffusion_cond_from_config(config: dict[str, tp.Any], od_config: OmniDiffusionConfig | None = None):
-    model_config = config["model"]
-    diffusion_config = model_config["diffusion"]
-    diffusion_model_config = dict(diffusion_config["config"])
-
-    diffusion_model = MMDiffusionTransformer(**diffusion_model_config)
-
-    io_channels = model_config["io_channels"]
-    sample_rate = config["sample_rate"]
-
-    diffusion_objective: tp.Literal["v"] = "v"
-
-    if od_config is None or not getattr(od_config, "model", None):
-        raise ValueError(
-            "AudioX requires OmniDiffusionConfig.model (Hugging Face repo id or local path with Diffusers layout "
-            "including vae/) to load AutoencoderOobleck — same contract as Stable Audio Open."
-        )
-    model_path = od_config.model
-
-    conditioning_config = model_config["conditioning"]
-    conditioner = create_audiox_fixed_conditioner_from_conditioning_config(conditioning_config, model=model_path)
-
-    cross_attention_ids = ["video_prompt", "text_prompt", "audio_prompt"]
-    global_cond_ids: list[str] = []
-
-    diffusion_full = model_config.get("diffusion") or {}
-    gate = bool(diffusion_full.get("gate", False))
-    gate_type = diffusion_full.get("gate_type")
-    gate_type_config = diffusion_full.get("gate_type_config")
-
-    pretransform_cfg = model_config["pretransform"]
-    pretransform = create_pretransform_from_config(pretransform_cfg, model=model_path)
-    min_input_length = int(pretransform.hop_length)
-
-    min_input_length *= diffusion_model.patch_size
-
-    return ConditionedDiffusionModelWrapper(
-        diffusion_model,
-        conditioner,
-        min_input_length=min_input_length,
-        sample_rate=sample_rate,
-        cross_attn_cond_ids=cross_attention_ids,
-        global_cond_ids=global_cond_ids,
-        pretransform=pretransform,
-        io_channels=io_channels,
-        diffusion_objective=diffusion_objective,
-        gate=gate,
-        gate_type=gate_type,
-        gate_type_config=gate_type_config,
-    )
 
 
 def _append_zero(sigmas: torch.Tensor) -> torch.Tensor:
@@ -286,7 +99,7 @@ def sample_k(
 
 
 def generate_diffusion_cond(
-    model,
+    pipeline,
     steps: int = 250,
     cfg_scale=6,
     conditioning_tensors: dict | None = None,
@@ -295,12 +108,16 @@ def generate_diffusion_cond(
     sample_size: int = 2097152,
     device: str | torch.device = "cuda",
     generator: torch.Generator | None = None,
-    return_latents: bool = False,
     **sample_kwargs,
 ) -> torch.Tensor:
-    pt = model.pretransform
+    """Run diffusion sampling using the AudioXPipeline.
+
+    ``pipeline`` must expose ``.pretransform``, ``.io_channels``, ``.model``,
+    ``.diffusion_objective``, and ``.get_conditioning_inputs()``.
+    """
+    pt = pipeline.pretransform
     if pt is None:
-        raise RuntimeError("AudioX inference-only path requires an AudioX pretransform.")
+        raise RuntimeError("AudioX inference-only path requires a pretransform.")
     if not isinstance(pt, AutoencoderOobleck):
         raise RuntimeError(f"Expected AutoencoderOobleck pretransform, got {type(pt)!r}.")
 
@@ -308,26 +125,21 @@ def generate_diffusion_cond(
 
     if generator is None:
         raise ValueError("AudioX generation requires a torch.Generator.")
-    noise = torch.randn([batch_size, model.io_channels, sample_size], device=device, generator=generator)
+    noise = torch.randn([batch_size, pipeline.io_channels, sample_size], device=device, generator=generator)
 
-    conditioning_inputs = model.get_conditioning_inputs(conditioning_tensors)
+    conditioning_inputs = pipeline.get_conditioning_inputs(conditioning_tensors)
 
     if negative_conditioning_tensors is not None:
-        negative_conditioning_tensors = model.get_conditioning_inputs(negative_conditioning_tensors, negative=True)
+        negative_conditioning_tensors = pipeline.get_conditioning_inputs(negative_conditioning_tensors, negative=True)
     else:
         negative_conditioning_tensors = {}
 
-    model_dtype = next(model.model.parameters()).dtype
+    model_dtype = next(pipeline.model.parameters()).dtype
     noise = noise.type(model_dtype)
     conditioning_inputs = {k: v.type(model_dtype) if v is not None else v for k, v in conditioning_inputs.items()}
 
-    if model.diffusion_objective != "v":
-        raise ValueError(
-            f"Unsupported diffusion objective for inference-only AudioX path: {model.diffusion_objective!r}. "
-            "Expected 'v'."
-        )
     sampled = sample_k(
-        model.model,
+        pipeline.model,
         noise,
         steps,
         **sample_kwargs,
@@ -338,22 +150,16 @@ def generate_diffusion_cond(
         generator=generator,
     )
 
-    if not return_latents:
-        dev = sampled.device
-        # Second AutoencoderOobleck (decode-only); conditioner VAE is moved in its own forward.
-        vae = pt.to(device=dev, dtype=torch.float32).eval()
-        model.pretransform = vae
-        z = sampled.to(dtype=torch.float32)
-        sampled = vae.decode(z * float(vae.audiox_scaling_factor), return_dict=True).sample
+    dev = sampled.device
+    vae = pt.to(device=dev, dtype=torch.float32).eval()
+    pipeline.pretransform = vae
+    z = sampled.to(dtype=torch.float32)
+    sampled = vae.decode(z * float(vae.audiox_scaling_factor), return_dict=True).sample
 
     return sampled
 
 
 __all__ = [
-    "ConditionedDiffusionModel",
-    "ConditionedDiffusionModelWrapper",
-    "create_diffusion_cond_from_config",
-    "create_model_from_config",
     "generate_diffusion_cond",
     "sample_k",
     "set_audio_channels",

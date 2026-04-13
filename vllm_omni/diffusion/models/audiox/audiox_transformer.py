@@ -2,15 +2,77 @@ from __future__ import annotations
 
 import logging
 import typing as tp
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from audiox.models.mm_embeddings import apply_rope, compute_rope_rotations
 from einops import rearrange
 from einops.layers.torch import Rearrange
+from torch import Tensor
 from torch.nn import functional as F
-
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
+
+
+def compute_rope_rotations(
+    length: int,
+    dim: int,
+    theta: int,
+    *,
+    freq_scaling: float = 1.0,
+    device: torch.device | str = "cpu",
+) -> Tensor:
+    assert dim % 2 == 0
+
+    with torch.amp.autocast(device_type="cuda", enabled=False):
+        pos = torch.arange(length, dtype=torch.float32, device=device)
+        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
+        freqs = freqs * freq_scaling
+
+        rot = torch.einsum("..., f -> ... f", pos, freqs)
+        rot = torch.stack([torch.cos(rot), -torch.sin(rot), torch.sin(rot), torch.cos(rot)], dim=-1)
+        rot = rearrange(rot, "n d (i j) -> 1 n d i j", i=2, j=2)
+        return rot
+
+
+def apply_rope(x: Tensor, rot: Tensor) -> Tensor:
+    with torch.amp.autocast(device_type="cuda", enabled=False):
+        _x = x.float()
+        _x = _x.view(*_x.shape[:-1], -1, 1, 2)
+        x_out = rot[..., 0] * _x[..., 0] + rot[..., 1] * _x[..., 1]
+        return x_out.reshape(*x.shape).to(dtype=x.dtype)
+
+class AudioXCrossAttention(nn.Module):
+    def __init__(self, dim: int, nheads: int):
+        super().__init__()
+        self.dim = dim
+        self.nheads = nheads
+
+        self.to_q = nn.Linear(dim, dim, bias=False)
+        self.to_kv = nn.Linear(dim, dim * 2, bias=False)
+        self.q_norm = AudioXRMSNorm(dim // nheads)
+        self.k_norm = AudioXRMSNorm(dim // nheads)
+
+        self.split_q_into_heads = Rearrange("b n (h d) -> b h n d", h=nheads, d=dim // nheads)
+        self.split_kv_into_heads = Rearrange("b n (h d j) -> b h n d j", h=nheads, d=dim // nheads, j=2)
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
+        q = self.to_q(x)
+        kv = self.to_kv(context)
+        q = self.split_q_into_heads(q)
+        k, v = self.split_kv_into_heads(kv).chunk(2, dim=-1)
+        q = q.squeeze(-1)
+        k = k.squeeze(-1)
+        v = v.squeeze(-1)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = rearrange(out, "b h n d -> b n (h d)").contiguous()
+        return out
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +184,7 @@ class AudioXMMDiTBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False)
         self.attn = AudioXMMDiTSelfAttention(dim, nhead)
-        from audiox.models.mm_transformer_layers import CrossAttention as UpCross
-
-        self.cross_attn = UpCross(dim, nhead)
+        self.cross_attn = AudioXCrossAttention(dim, nhead)
         self.linear1 = AudioXMMChannelLastConv1d(dim, dim, kernel_size=3, padding=1)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False)
         self.ffn = AudioXMMConvFeedForward(dim, int(dim * mlp_ratio), kernel_size=3, padding=1)
@@ -251,6 +311,26 @@ class MMDiffusionTransformer(nn.Module):
         nn.init.zeros_(self.preprocess_conv.weight)
         self.postprocess_conv = nn.Conv1d(io_channels, io_channels, 1, bias=False)
         nn.init.zeros_(self.postprocess_conv.weight)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load weights from a pretrained model.
+
+        Returns:
+            Set of parameter names that were successfully loaded.
+        """
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            if name in params_dict:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+                loaded_params.add(name)
+            else:
+                logger.debug("Skipping weight %s - not found in model", name)
+
+        return loaded_params
 
     def _forward(
         self,
