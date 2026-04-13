@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Stable Audio offline e2e: real weights, FP8 + TeaCache (single job to save GPU)."""
+"""Stable Audio offline e2e: real weights, FP8 + TeaCache (single job to save GPU).
+
+NOTE: This test instantiates Omni directly instead of using the omni_runner
+fixture (introduced in PR #2711) because the fixture's parametrize interface
+only accepts (model, stage_config_path) and does not support extra kwargs like
+quantization, cache_backend, or cache_config.
+"""
 
 from __future__ import annotations
 
