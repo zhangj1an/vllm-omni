@@ -33,10 +33,18 @@ def _patch_cutlass_padded_fp8():
     every FP8 linear layer (QKV, attn output, gate_up_proj, down_proj),
     which is dramatically slower than the native CUTLASS FP8 tensor-core
     path on H100/H200 GPUs.
+
+    Weight tensors (b) are constant across forward passes, so padded
+    versions are computed once and cached by data_ptr to avoid repeated
+    allocation and column-major conversion overhead.
     """
+    import logging
+
     import vllm._custom_ops as ops
 
     _orig_cutlass_scaled_mm = ops.cutlass_scaled_mm
+    # Cache: data_ptr → (padded_b, padded_bias, padded_scale_b, pad_k, pad_n, orig_n)
+    _weight_cache: dict[int, tuple] = {}
 
     def _padded_cutlass_scaled_mm(
         a: torch.Tensor,
@@ -47,37 +55,59 @@ def _patch_cutlass_padded_fp8():
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0:
-            return _orig_cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+            return _orig_cutlass_scaled_mm(
+                a, b, scale_a, scale_b, out_dtype, bias
+            )
 
         # Reshape to 2D (mirrors the original function)
         target_shape = (*a.shape[:-1], b.shape[1])
         a = a.view(-1, a.shape[-1])
-
         orig_n = b.shape[1]
-        pad_k = (16 - b.shape[0] % 16) % 16
-        pad_n = (16 - orig_n % 16) % 16
 
-        if pad_k > 0:
-            a = F.pad(a, (0, pad_k))
-            b = F.pad(b, (0, 0, 0, pad_k))
-        if pad_n > 0:
-            b = F.pad(b, (0, pad_n))
-            if bias is not None:
-                bias = F.pad(bias, (0, pad_n))
-            if scale_b.numel() > 1:
-                scale_b = F.pad(
+        # Cache the padded weight — it's a model parameter that never changes.
+        key = b.data_ptr()
+        if key not in _weight_cache:
+            pad_k = (16 - b.shape[0] % 16) % 16
+            pad_n = (16 - orig_n % 16) % 16
+            b_pad = b
+            if pad_k > 0:
+                b_pad = F.pad(b_pad, (0, 0, 0, pad_k))
+            if pad_n > 0:
+                b_pad = F.pad(b_pad, (0, pad_n))
+            # CUTLASS requires b column-major (stride(0)==1).
+            b_pad = b_pad.t().contiguous().t()
+
+            bias_pad = None
+            if bias is not None and pad_n > 0:
+                bias_pad = F.pad(bias, (0, pad_n))
+
+            scale_b_pad = scale_b
+            if scale_b.numel() > 1 and pad_n > 0:
+                scale_b_pad = F.pad(
                     scale_b.view(-1, scale_b.shape[-1]),
                     (0, pad_n),
                     value=1.0,
                 )
 
-        # CUTLASS requires b to be column-major (stride(0) == 1).
-        # F.pad produces row-major output, so restore column-major layout.
-        a = a.contiguous()
-        b = b.t().contiguous().t()
+            _weight_cache[key] = (
+                b_pad, bias_pad, scale_b_pad, pad_k, pad_n, orig_n,
+            )
 
-        out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
-        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+        b_pad, bias_pad, scale_b_pad, pad_k, pad_n, orig_n = (
+            _weight_cache[key]
+        )
+
+        # Pad activations on K dimension (cheap — activations are small).
+        if pad_k > 0:
+            a = F.pad(a, (0, pad_k)).contiguous()
+
+        out = torch.empty(
+            (a.shape[0], b_pad.shape[1]), dtype=out_dtype, device=a.device
+        )
+        torch.ops._C.cutlass_scaled_mm(
+            out, a, b_pad, scale_a, scale_b_pad,
+            bias_pad if bias is not None else None,
+        )
 
         if pad_n > 0:
             out = out[:, :orig_n]
@@ -85,6 +115,10 @@ def _patch_cutlass_padded_fp8():
         return out.view(*target_shape)
 
     ops.cutlass_scaled_mm = _padded_cutlass_scaled_mm
+    logging.getLogger(__name__).info(
+        "Patched vllm._custom_ops.cutlass_scaled_mm with CUTLASS-padded FP8 "
+        "variant (avoids slow Triton fallback for non-%%16 dimensions)"
+    )
 
 
 _patch_cutlass_padded_fp8()
