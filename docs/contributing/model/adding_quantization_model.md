@@ -156,7 +156,7 @@ Some layers degrade output quality when quantized. Common sensitive layers:
 |-------|--------|-----------|----------------------|----------------|
 | Qwen-Image-2512 | Int8 | LPIPS 0.0197 | 0.0027 (skip `img_mlp`) | Skip `img_mlp` |
 | Z-Image-Turbo | Int8 | LPIPS 0.1597 | 0.0290 (skip `feed_forward`) | Skip `feed_forward` |
-| Z-Image-Turbo | FP8 | LPIPS ~0.005 | — | All layers OK |
+| Z-Image-Turbo | FP8 | LPIPS ~0.005 | — | Modulation / embedders / final layer stay BF16 in code ([#2728](https://github.com/vllm-project/vllm-omni/pull/2728)) |
 
 To identify sensitive layers for a new model:
 
@@ -400,7 +400,7 @@ aggressive quantization methods (Int8, NVFP4).
 |-------|--------|-------------------|----------------------|---------------------|
 | Qwen-Image-2512 | Int8 | 0.0197 | 0.0027 | `img_mlp` |
 | Z-Image-Turbo | Int8 | 0.1597 | 0.0290 | `feed_forward` |
-| Z-Image-Turbo | FP8 | ~0.005 | — | None needed |
+| Z-Image-Turbo | FP8 | ~0.005 | — | Built-in BF16 for modulation, embedders, final layer ([#2728](https://github.com/vllm-project/vllm-omni/pull/2728)) |
 
 ### What to Verify (Checklist)
 
@@ -459,8 +459,9 @@ aggressive quantization methods (Int8, NVFP4).
 
 | Model | Pipeline File | Transformer File | Notes |
 |-------|-------------|-----------------|-------|
-| **Z-Image** | `models/z_image/pipeline_z_image.py` | `models/z_image/z_image_transformer.py` | DiT + text encoder FP8 |
-| **Qwen-Image** | `models/qwen_image/pipeline_qwen_image.py` | `models/qwen_image/qwen_image_transformer.py` | DiT + text encoder + VAE FP8 |
+| **Z-Image** | `models/z_image/pipeline_z_image.py` | `models/z_image/z_image_transformer.py` | DiT blocks + text encoder FP8; modulation, embedders, final layer BF16 ([#2728](https://github.com/vllm-project/vllm-omni/pull/2728)) |
+| **Qwen-Image** | `models/qwen_image/pipeline_qwen_image.py` | `models/qwen_image/qwen_image_transformer.py` | DiT blocks + text encoder + VAE FP8; timestep MLP, modulation linears, `img_in`/`txt_in`, `norm_out`/`proj_out` BF16 ([#2728](https://github.com/vllm-project/vllm-omni/pull/2728)) |
+| **FLUX.1-dev** | `models/flux/pipeline_flux.py` | `models/flux/flux_transformer.py` | Single-stream blocks FP8; dual-stream blocks + final `norm_out` BF16 ([#2728](https://github.com/vllm-project/vllm-omni/pull/2728)) |
 
 All files are under `vllm_omni/diffusion/`.
 
