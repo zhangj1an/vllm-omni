@@ -4,11 +4,9 @@
 
 FP8 quantization converts BF16/FP16 weights to FP8 at model load time. No calibration or pre-quantized checkpoint needed.
 
-Depending on the model, either most linear layers are quantized with a few **built-in** BF16 exceptions in code (`quant_config=None`), or you must add extra skips via `ignored_layers`. See the [per-model table](#supported-models).
+Depending on the model, either all layers can be quantized, or some sensitive layers should stay in BF16. See the [per-model table](#supported-models) for which case applies.
 
-Built-in BF16 is used where small linear layers drive **timestep conditioning**, **per-block modulation** (scale/shift/gate), **input embedders**, or the **final latent projection**. Quantizing those paths caused visible noise or color drift on Z-Image, Qwen-Image, and FLUX.1-dev ([PR #2728](https://github.com/vllm-project/vllm-omni/pull/2728)); they stay in full precision automatically—you do not name them in `ignored_layers`.
-
-Beyond that, common user-controlled skips include **image-stream MLPs** (`img_mlp`) on Qwen-Image: they see shifting latent statistics and benefit from `ignored_layers` for best quality. **Attention projections** (`to_qkv`, `to_out`) and **text-stream MLPs** (`txt_mlp`) are usually fine in FP8 when modulation and embedders stay BF16.
+Common sensitive layers in DiT-based diffusion models include **image-stream MLPs** (`img_mlp`). These are particularly vulnerable to FP8 precision loss because they process denoising latents whose dynamic range shifts significantly across timesteps, and unlike attention projections (which benefit from QK-Norm stabilization), MLPs have no built-in normalization to absorb quantization error. In deep architectures (e.g., 60+ residual blocks), small per-layer errors compound and degrade output quality. Other layers such as **attention projections** (`to_qkv`, `to_out`) and **text-stream MLPs** (`txt_mlp`) are generally more robust due to normalization or more stable input statistics.
 
 ## Configuration
 
@@ -60,11 +58,11 @@ The available `ignored_layers` names depend on the model architecture (e.g., `to
 
 ## Supported Models
 
-| Model | HF Models | FP8 scope | `ignored_layers` (optional) |
-|-------|-----------|-----------|------------------------------|
-| Z-Image | `Tongyi-MAI/Z-Image-Turbo` | Main blocks (attention + FFN) use FP8. **Always BF16 in code:** timestep MLP, per-block adaLN modulation linear, patch and caption embedders, final layer (modulation + `proj_out`). | None required for those paths |
-| Qwen-Image | `Qwen/Qwen-Image`, `Qwen/Qwen-Image-2512` | Joint attention and MLPs can use FP8. **Always BF16 in code:** timestep MLP, per-block `img_mod` / `txt_mod` linears, `img_in` / `txt_in`, `norm_out.linear`, `proj_out`. | Still recommend `img_mlp` for quality |
-| Flux | `black-forest-labs/FLUX.1-dev` | **Single-stream** blocks (`single_transformer_blocks`) use FP8. **Always BF16 in code:** all **dual-stream** blocks (`transformer_blocks`, joint attention path), AdaLayerNormZeroSingle modulation in single blocks, and `norm_out` before final `proj_out`. | None required for those paths |
+| Model | HF Models | Recommendation | `ignored_layers` |
+|-------|-----------|---------------|------------------|
+| Z-Image | `Tongyi-MAI/Z-Image-Turbo` | All layers | None |
+| Qwen-Image | `Qwen/Qwen-Image`, `Qwen/Qwen-Image-2512` | Skip sensitive layers | `img_mlp` |
+| Flux | `black-forest-labs/FLUX.1-dev` | All layers | None |
 | HunyuanImage-3 | `tencent/HunyuanImage3` | All layers | None |
 | HunyuanVideo-1.5 | `hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v`, `720p_t2v`, `480p_i2v` | All layers | None |
 | Helios | `BestWishYsh/Helios-Base`, `BestWishYsh/Helios-Mid`, `BestWishYsh/Helios-Distilled` | All layers | None |

@@ -53,7 +53,7 @@ When `--quantization fp8` is enabled for diffusion models:
 
 | Component | What Gets Quantized | Mechanism |
 |-----------|-------------------|-----------|
-| **DiT (transformer)** | `nn.Linear` layers (minus [built-in BF16 submodules](fp8.md#supported-models) on Z-Image, Qwen-Image, FLUX.1-dev) | vLLM W8A8 FP8 compute (Ada/Hopper) or weight-only (older GPUs) |
+| **DiT (transformer)** | `nn.Linear` layers | vLLM W8A8 FP8 compute (Ada/Hopper) or weight-only (older GPUs) |
 | **Text encoder** | `nn.Linear` layers | FP8 weight storage, BF16 compute |
 | **VAE** | `nn.Conv2d`, `nn.Conv3d` layers | FP8 weight storage, BF16 compute |
 
