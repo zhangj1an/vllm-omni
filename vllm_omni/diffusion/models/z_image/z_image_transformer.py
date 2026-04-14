@@ -214,12 +214,24 @@ class TimestepEmbedder(nn.Module):
         super().__init__()
         if mid_size is None:
             mid_size = out_size
-        # Time embedding MLP is kept full precision — small layers that
-        # feed adaLN; precision-sensitive (see issue #2728).
+        # Time embedding MLP is kept full precision (quant_config=None) —
+        # small layers that feed adaLN; precision-sensitive (see #2728).
         self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, mid_size, bias=True),
+            ReplicatedLinear(
+                frequency_embedding_size,
+                mid_size,
+                bias=True,
+                quant_config=None,
+                return_bias=False,
+            ),
             nn.SiLU(),
-            nn.Linear(mid_size, out_size, bias=True),
+            ReplicatedLinear(
+                mid_size,
+                out_size,
+                bias=True,
+                quant_config=None,
+                return_bias=False,
+            ),
         )
 
         self.frequency_embedding_size = frequency_embedding_size
@@ -416,11 +428,17 @@ class ZImageTransformerBlock(nn.Module):
 
         self.modulation = modulation
         if modulation:
-            # Modulation linear is kept at full precision — it produces
-            # scale/gate values that are precision-sensitive (mirrors the
-            # OmniGen2 FP8 fix; see issue #2728).
+            # Modulation linear is kept at full precision (quant_config=None)
+            # — it produces scale/gate values that are precision-sensitive
+            # (see #2728, mirrors OmniGen2 fix).
             self.adaLN_modulation = nn.Sequential(
-                nn.Linear(min(dim, ADALN_EMBED_DIM), 4 * dim, bias=True),
+                ReplicatedLinear(
+                    min(dim, ADALN_EMBED_DIM),
+                    4 * dim,
+                    bias=True,
+                    quant_config=None,
+                    return_bias=False,
+                ),
             )
 
     def forward(
@@ -477,12 +495,24 @@ class FinalLayer(nn.Module):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         # Final output projection and its modulation are precision-sensitive
-        # (map latents -> image); keep at full precision (see issue #2728).
-        self.linear = nn.Linear(hidden_size, out_channels, bias=True)
+        # (produce the output latent); keep at full precision (see #2728).
+        self.linear = ReplicatedLinear(
+            hidden_size,
+            out_channels,
+            bias=True,
+            quant_config=None,
+            return_bias=False,
+        )
 
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(min(hidden_size, ADALN_EMBED_DIM), hidden_size, bias=True),
+            ReplicatedLinear(
+                min(hidden_size, ADALN_EMBED_DIM),
+                hidden_size,
+                bias=True,
+                quant_config=None,
+                return_bias=False,
+            ),
         )
 
     def forward(self, x, c):
@@ -663,11 +693,13 @@ class ZImageTransformer2DModel(CachedTransformer):
         all_final_layer = {}
         for patch_idx, (patch_size, f_patch_size) in enumerate(zip(all_patch_size, all_f_patch_size)):
             # x_embedder (patch embed) is a small precision-sensitive entry
-            # layer; keep full precision (see issue #2728).
-            x_embedder = nn.Linear(
+            # layer; keep full precision (see #2728).
+            x_embedder = ReplicatedLinear(
                 f_patch_size * patch_size * patch_size * in_channels,
                 dim,
                 bias=True,
+                quant_config=None,
+                return_bias=False,
             )
             all_x_embedder[f"{patch_size}-{f_patch_size}"] = x_embedder
 
@@ -710,10 +742,16 @@ class ZImageTransformer2DModel(CachedTransformer):
         )
         self.t_embedder = TimestepEmbedder(min(dim, ADALN_EMBED_DIM), mid_size=1024, quant_config=quant_config)
         # Caption embedder maps text features -> hidden; keep full precision
-        # (see issue #2728).
+        # (see #2728).
         self.cap_embedder = nn.Sequential(
             RMSNorm(cap_feat_dim, eps=norm_eps),
-            nn.Linear(cap_feat_dim, dim, bias=True),
+            ReplicatedLinear(
+                cap_feat_dim,
+                dim,
+                bias=True,
+                quant_config=None,
+                return_bias=False,
+            ),
         )
 
         self.x_pad_token = nn.Parameter(torch.empty((1, dim)))

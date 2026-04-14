@@ -169,10 +169,25 @@ class QwenTimestepProjEmbeddings(nn.Module):
 
         self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0, scale=1000)
         self.timestep_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
-        # Time embedding MLP is kept full precision — small layers that
-        # feed the per-block modulation; precision-sensitive (see issue #2728).
-        self.timestep_embedder.linear_1 = nn.Linear(256, embedding_dim, bias=True)
-        self.timestep_embedder.linear_2 = nn.Linear(embedding_dim, embedding_dim, bias=True)
+        # Time embedding MLP is kept full precision (quant_config=None) —
+        # small layers that feed per-block modulation; precision-sensitive
+        # (see #2728).
+        self.timestep_embedder.linear_1 = ReplicatedLinear(
+            256,
+            embedding_dim,
+            bias=True,
+            return_bias=False,
+            quant_config=None,
+            prefix="timestep_embedder.linear_1",
+        )
+        self.timestep_embedder.linear_2 = ReplicatedLinear(
+            embedding_dim,
+            embedding_dim,
+            bias=True,
+            return_bias=False,
+            quant_config=None,
+            prefix="timestep_embedder.linear_2",
+        )
         self.use_additional_t_cond = use_additional_t_cond
         if use_additional_t_cond:
             self.addition_t_embedding = nn.Embedding(2, embedding_dim)
@@ -690,11 +705,19 @@ class QwenImageTransformerBlock(nn.Module):
         self.attention_head_dim = attention_head_dim
 
         # Image processing modules.
-        # Modulation linears are kept full precision — they produce
-        # shift/scale/gate values that are precision-sensitive (see #2728).
+        # Modulation linear is kept full precision (quant_config=None) — it
+        # produces shift/scale/gate values that are precision-sensitive
+        # (see #2728).
         self.img_mod = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(dim, 6 * dim, bias=True),
+            ReplicatedLinear(
+                dim,
+                6 * dim,
+                bias=True,
+                return_bias=False,
+                quant_config=None,
+                prefix="img_mod.1",
+            ),
         )
         self.img_norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
         self.attn = QwenImageCrossAttention(
@@ -711,7 +734,14 @@ class QwenImageTransformerBlock(nn.Module):
         # Text processing modules.
         self.txt_mod = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(dim, 6 * dim, bias=True),
+            ReplicatedLinear(
+                dim,
+                6 * dim,
+                bias=True,
+                return_bias=False,
+                quant_config=None,
+                prefix="txt_mod.1",
+            ),
         )
         self.txt_norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
         # Text doesn't need separate attention - it's handled by img_attn joint computation
@@ -934,10 +964,24 @@ class QwenImageTransformer2DModel(CachedTransformer):
 
         self.txt_norm = RMSNorm(joint_attention_dim, eps=1e-6)
 
-        # Entry projections (image/text) are kept full precision — small
-        # sensitive layers at the network boundary (see #2728).
-        self.img_in = nn.Linear(in_channels, self.inner_dim, bias=True)
-        self.txt_in = nn.Linear(joint_attention_dim, self.inner_dim, bias=True)
+        # Entry projections (image/text) are kept full precision —
+        # small sensitive layers at the network boundary (see #2728).
+        self.img_in = ReplicatedLinear(
+            in_channels,
+            self.inner_dim,
+            bias=True,
+            return_bias=False,
+            quant_config=None,
+            prefix="img_in",
+        )
+        self.txt_in = ReplicatedLinear(
+            joint_attention_dim,
+            self.inner_dim,
+            bias=True,
+            return_bias=False,
+            quant_config=None,
+            prefix="txt_in",
+        )
 
         self.transformer_blocks = nn.ModuleList(
             [
@@ -956,8 +1000,22 @@ class QwenImageTransformer2DModel(CachedTransformer):
         # they produce the output latent and are precision-sensitive
         # (see #2728).
         self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6)
-        self.norm_out.linear = nn.Linear(self.inner_dim, 2 * self.inner_dim, bias=True)
-        self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
+        self.norm_out.linear = ReplicatedLinear(
+            self.inner_dim,
+            2 * self.inner_dim,
+            bias=True,
+            return_bias=False,
+            quant_config=None,
+            prefix="norm_out.linear",
+        )
+        self.proj_out = ReplicatedLinear(
+            self.inner_dim,
+            patch_size * patch_size * self.out_channels,
+            bias=True,
+            return_bias=False,
+            quant_config=None,
+            prefix="proj_out",
+        )
 
         self.gradient_checkpointing = False
         self.zero_cond_t = zero_cond_t
