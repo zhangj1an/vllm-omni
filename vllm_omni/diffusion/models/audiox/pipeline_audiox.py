@@ -205,6 +205,52 @@ def prepare_video_reference(
     return frames
 
 
+def _load_audio_source(source: Any, *, target_sample_rate: int | None = None) -> torch.Tensor:
+    """Path / tensor / ndarray → ``[channels, samples]`` float32, optionally resampled.
+
+    Audio paths use ``torchaudio.load`` (ffmpeg-backed via torchcodec); only loaded when
+    a path is actually passed, so tensor / ndarray callers don't need ffmpeg installed.
+    """
+    if isinstance(source, str):
+        import torchaudio
+
+        wav, sr = torchaudio.load(source)
+        if target_sample_rate is not None and sr != target_sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, target_sample_rate)
+        return wav.float()
+    if isinstance(source, torch.Tensor):
+        return source.float()
+    if isinstance(source, np.ndarray):
+        return torch.from_numpy(source).float()
+    raise TypeError(f"Unsupported audio source type: {type(source)!r}")
+
+
+def prepare_audio_reference(
+    source: Any,
+    *,
+    model_sample_rate: int,
+    seconds_start: float,
+    seconds_total: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """Load a reference audio clip into ``[2, target_len]`` at ``model_sample_rate``."""
+    target_len = int(model_sample_rate * seconds_total)
+    start = int(model_sample_rate * seconds_start)
+    wav = _load_audio_source(source, target_sample_rate=model_sample_rate)
+    if wav.dim() == 1:
+        wav = wav.unsqueeze(0)
+    # Force 2 channels: mono → stereo (repeat); >2 → keep first 2.
+    if wav.shape[0] == 1:
+        wav = wav.repeat(2, 1)
+    elif wav.shape[0] > 2:
+        wav = wav[:2]
+    # Crop / left-pad to target_len.
+    wav = wav[:, start : start + target_len]
+    if wav.shape[1] < target_len:
+        wav = F.pad(wav, (target_len - wav.shape[1], 0))
+    return wav.to(device=device, dtype=torch.float32)
+
+
 # ---------------------------------------------------------------------------
 # Multi-modal conditioning (T5 / CLIP encoders are wired directly in the pipeline;
 # this section provides the audio VAE adapter, the SA_* temporal stack used for
@@ -664,14 +710,36 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
     def _audio_prompt_tensors(
         self,
         *,
-        batch_size: int,
+        raw_prompts: list[Any],
+        extra: dict[str, Any],
         device: torch.device,
         cond_dtype: torch.dtype = torch.float32,
     ) -> list[torch.Tensor]:
-        # AudioX supports the 6 t2*/v2*/tv2* tasks where audio is the model output, so the
-        # audio_prompt conditioning slot the architecture requires is always fed zeros.
+        """Per-prompt audio conditioning tensors.
+
+        Looks up an optional reference clip via ``multi_modal_data['audio']`` /
+        ``extra_args['audio_path']`` / ``extra_args['audio_paths'][i]``; falls back to
+        silence (zeros) — the architecture's ``audio_prompt`` slot always needs a tensor.
+        """
         target_len = self._audio_conditioning_samples
-        return [torch.zeros(2, target_len, device=device, dtype=cond_dtype) for _ in range(batch_size)]
+        sample_rate = self._sample_rate
+        seconds_start = float(extra.get("seconds_start", 0.0))
+        seconds_total = float(target_len) / float(sample_rate)
+        out: list[torch.Tensor] = []
+        for i, raw in enumerate(raw_prompts):
+            src = _mm_path_lookup(raw, extra, i, mm_key="audio", paths_key="audio_paths", single_key="audio_path")
+            if src is None:
+                out.append(torch.zeros(2, target_len, device=device, dtype=cond_dtype))
+                continue
+            wav = prepare_audio_reference(
+                src,
+                model_sample_rate=sample_rate,
+                seconds_start=seconds_start,
+                seconds_total=seconds_total,
+                device=device,
+            )
+            out.append(wav.to(dtype=cond_dtype))
+        return out
 
     def _video_feature_tensors(
         self,
@@ -939,7 +1007,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         sync_features = torch.zeros(1, self._VIDEO_SYNC_FRAME_COUNT, 768, device=device, dtype=cond_dtype)
 
         audio_prompt_list = self._audio_prompt_tensors(
-            batch_size=len(normalized_prompts),
+            raw_prompts=normalized_prompts,
+            extra=extra_args,
             device=device,
             cond_dtype=cond_dtype,
         )

@@ -59,6 +59,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", type=str, default=str(ROOT / "audiox_weights"), help="Path to AudioX weight bundle.")
     p.add_argument("--tasks", nargs="+", default=list(ALL_TASKS), choices=ALL_TASKS, help="Subset of tasks to run.")
     p.add_argument("--video", type=str, default=str(ROOT / "assets" / "sample_animal.mp4"), help="Video for v2*/tv2*.")
+    p.add_argument(
+        "--reference-audio", type=str, default="", help="Optional audio clip for audio-conditioned generation."
+    )
     p.add_argument("--output-dir", type=str, default=str(ROOT / "audiox_task_outputs"))
     p.add_argument("--num-inference-steps", type=int, default=50)
     p.add_argument("--seconds-total", type=float, default=2.0)
@@ -118,6 +121,8 @@ def generate_audio(omni: Omni, task: str, video: str, args: argparse.Namespace) 
     extra: dict = {"audiox_task": task, "seconds_start": 0.0, "seconds_total": float(args.seconds_total)}
     if task in VIDEO_TASKS:
         extra["video_path"] = video
+    if args.reference_audio:
+        extra["audio_path"] = args.reference_audio
     prompt = SAMPLE_PROMPTS[task] if task in TEXT_TASKS else ""
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(args.seed)
     outputs = omni.generate(
