@@ -423,6 +423,6 @@ def get_diffusion_post_process_func(od_config: OmniDiffusionConfig):
 
 def get_diffusion_pre_process_func(od_config: OmniDiffusionConfig):
     if od_config.model_class_name not in _DIFFUSION_PRE_PROCESS_FUNCS:
-        return None
+        return None  # Return None if no pre-processing function is registered (for backward compatibility)
     func_name = _DIFFUSION_PRE_PROCESS_FUNCS[od_config.model_class_name]
     return _load_process_func(od_config, func_name)
