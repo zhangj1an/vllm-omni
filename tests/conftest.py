@@ -8,6 +8,7 @@ import os
 import random
 import re
 import tempfile
+import wave
 
 import requests
 
@@ -164,8 +165,17 @@ def assert_audio_diffusion_response(
 ) -> None:
     """
     Validate audio diffusion response.
+
+    `response.audios` carries one entry per choice, each a `dict` with raw WAV
+    bytes (`wav_bytes`) and the OpenAI audio metadata (`id`, `expires_at`).
     """
-    raise NotImplementedError("Audio validation is not implemented yet")
+    assert response.audios, "Audio response is empty"
+    for audio in response.audios:
+        wav_bytes = audio.get("wav_bytes")
+        assert wav_bytes, "Audio entry missing decoded WAV bytes"
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+            assert wav_file.getnframes() > 0, "Decoded WAV has zero frames"
+            assert wav_file.getframerate() > 0, "Decoded WAV has invalid sample rate"
 
 
 def _maybe_int(value: Any) -> int | None:
@@ -2384,7 +2394,8 @@ class OpenAIClientHandler:
 
         try:
             images = []
-            # [TODO] reading video and audio output from API response for later validation
+            audios = []
+            # [TODO] reading video output from API response for later validation
 
             for choice in chat_completion.choices:
                 if hasattr(choice.message, "content") and choice.message.content is not None:
@@ -2401,8 +2412,21 @@ class OpenAIClientHandler:
                                 img = decode_b64_image(b64_data)
                                 images.append(img)
 
+                # OpenAI audio responses (e.g. AudioX text-to-audio) populate `message.audio`.
+                audio_obj = getattr(choice.message, "audio", None)
+                audio_b64 = getattr(audio_obj, "data", None) if audio_obj is not None else None
+                if audio_b64:
+                    audios.append(
+                        {
+                            "wav_bytes": base64.b64decode(audio_b64),
+                            "id": getattr(audio_obj, "id", None),
+                            "expires_at": getattr(audio_obj, "expires_at", None),
+                        }
+                    )
+
             result.e2e_latency = time.perf_counter() - start_time
             result.images = images if images else None
+            result.audios = audios if audios else None
             result.success = True
 
         except Exception as e:
