@@ -30,7 +30,6 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
-from vllm_omni.diffusion.models.progress_bar import ProgressBarMixin
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
@@ -728,19 +727,6 @@ def create_audiox_fixed_conditioner_from_conditioning_config(
     return MultiConditioner(conditioners)
 
 
-def encode_audiox_conditioning_tensors(
-    multi_conditioner: MultiConditioner,
-    *,
-    batch_metadata: list[dict[str, Any]],
-    device: torch.device,
-) -> dict[str, tp.Any]:
-    return multi_conditioner(
-        batch_metadata,
-        device,
-        require_single_item_sequence=True,
-    )
-
-
 # ---------------------------------------------------------------------------
 # MAF (Multimodal Adaptive Fusion) block
 # ---------------------------------------------------------------------------
@@ -908,8 +894,6 @@ class MAF_Block(nn.Module):
 # Diffusion sampling runtime: polyexponential sigma schedule + EDM-DPM++ scheduler
 # ---------------------------------------------------------------------------
 
-_PROGRESS = ProgressBarMixin()
-
 
 def _append_zero(sigmas: torch.Tensor) -> torch.Tensor:
     return torch.cat([sigmas, sigmas.new_zeros(1)])
@@ -963,26 +947,23 @@ def sample_k(
 
     latents = noise * sigmas_full[0].to(device=noise.device, dtype=noise.dtype)
 
-    _PROGRESS.set_progress_bar_config(disable=False)
-    with _PROGRESS.progress_bar(total=len(scheduler.timesteps)) as pbar:
-        for t in scheduler.timesteps:
-            latent_in = scheduler.scale_model_input(latents, t)
-            sigma = scheduler.sigmas[scheduler.step_index].to(device=latent_in.device, dtype=latent_in.dtype)
-            s_in = latent_in.new_ones([latent_in.shape[0]])
-            t_cond = _sigma_to_t_vdiffusion(sigma * s_in)
-            model_output = model_fn(latent_in, t_cond, **extra_args)
-            if callback is not None:
-                callback(
-                    {
-                        "x": latents,
-                        "i": int(scheduler.step_index),
-                        "sigma": sigma,
-                        "sigma_hat": sigma,
-                        "denoised": None,
-                    }
-                )
-            latents = scheduler.step(model_output, t, latents, generator=generator).prev_sample
-            pbar.update()
+    for t in scheduler.timesteps:
+        latent_in = scheduler.scale_model_input(latents, t)
+        sigma = scheduler.sigmas[scheduler.step_index].to(device=latent_in.device, dtype=latent_in.dtype)
+        s_in = latent_in.new_ones([latent_in.shape[0]])
+        t_cond = _sigma_to_t_vdiffusion(sigma * s_in)
+        model_output = model_fn(latent_in, t_cond, **extra_args)
+        if callback is not None:
+            callback(
+                {
+                    "x": latents,
+                    "i": int(scheduler.step_index),
+                    "sigma": sigma,
+                    "sigma_hat": sigma,
+                    "denoised": None,
+                }
+            )
+        latents = scheduler.step(model_output, t, latents, generator=generator).prev_sample
 
     return latents
 
@@ -1369,11 +1350,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
     def _encode_conditioning_tensors(self, batch_metadata: list[dict[str, Any]]) -> dict[str, Any]:
         # Encode audio through the MultiConditioner.
-        output = encode_audiox_conditioning_tensors(
-            self.conditioner,
-            batch_metadata=batch_metadata,
-            device=self.device,
-        )
+        output = self.conditioner(batch_metadata, self.device, require_single_item_sequence=True)
         # Encode text directly with T5.
         texts = [item["text_prompt"] for item in batch_metadata]
         output["text_prompt"] = self._encode_text(texts, self.device)
