@@ -18,7 +18,6 @@ import torch.nn.functional as F
 from diffusers import AutoencoderOobleck
 from diffusers.schedulers import EDMDPMSolverMultistepScheduler
 from einops import rearrange
-from scipy.signal import resample_poly
 from torch import einsum, nn
 from torchvision import transforms
 from transformers import AutoConfig, CLIPVisionModelWithProjection, T5EncoderModel, T5TokenizerFast
@@ -77,13 +76,6 @@ def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int | Non
     return None
 
 
-def resample_audiox_waveform_poly(audio_data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    if src_rate == dst_rate:
-        return audio_data
-
-    return resample_poly(audio_data.astype(np.float32), up=int(dst_rate), down=int(src_rate), axis=0)
-
-
 def get_audiox_post_process_func(_od_config: OmniDiffusionConfig):
     def post_process_func(audio: torch.Tensor, output_type: str = "np"):
         if output_type in ("latent", "pt"):
@@ -103,8 +95,6 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
     sample_rate = int(model_cfg.get("sample_rate", 48000))
     sample_size = int(model_cfg.get("sample_size", sample_rate * 10))
     video_fps = int(model_cfg.get("video_fps", 5))
-    ac_samples = _audio_conditioning_input_samples(model_cfg)
-    audio_conditioning_samples = ac_samples if ac_samples is not None else sample_size
     seconds_model = float(sample_size) / float(sample_rate)
     clip_duration = 10.0
 
@@ -115,7 +105,6 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
         extra = sp.extra_args or {}
         seconds_start = float(extra.get("seconds_start", 0.0))
         user_seconds_total = float(extra.get("seconds_total", seconds_model))
-        cond_seconds = float(audio_conditioning_samples) / float(sample_rate)
 
         task_norm = AudioXPipeline._normalize_task(extra.get("audiox_task"))
 
@@ -135,16 +124,6 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
                         seek_time=seconds_start,
                     ).to(device=cpu, dtype=torch.float32)
 
-            asrc = _mm_path_lookup(p, extra, i, mm_key="audio", paths_key="audio_paths", single_key="audio_path")
-            if asrc is not None:
-                mm["audio"] = prepare_audio_reference(
-                    asrc,
-                    model_sample_rate=sample_rate,
-                    seconds_start=seconds_start,
-                    seconds_total=cond_seconds,
-                    device=cpu,
-                )
-
             ai["audiox_preprocess"] = {
                 "seconds_model": seconds_model,
                 "user_seconds_total": user_seconds_total,
@@ -157,27 +136,6 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
         return request
 
     return pre_process_func
-
-
-def _conditioning_item(
-    *,
-    text: str,
-    video_tensor: torch.Tensor,
-    audio_tensor: torch.Tensor,
-    sync_features: torch.Tensor,
-    seconds_start: float,
-    seconds_model: float,
-) -> dict[str, Any]:
-    return {
-        "video_prompt": {
-            "video_tensors": video_tensor.unsqueeze(0),
-            "video_sync_frames": sync_features,
-        },
-        "text_prompt": text,
-        "audio_prompt": audio_tensor.unsqueeze(0),
-        "seconds_start": seconds_start,
-        "seconds_total": seconds_model,
-    }
 
 
 def _mm_path_lookup(
@@ -221,35 +179,13 @@ def _normalize_prompts(prompts: list[Any]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Reference media loading: audio/video paths or tensors → torch tensors
-# Audio file paths use ``torchaudio.load_with_torchcodec``. Video file paths use
-# ``torchcodec.decoders.VideoDecoder``. Static images use ``torchvision.io.read_image``.
+# Reference media loading: video/image paths or tensors → torch tensors.
+# Video file paths use ``torchcodec.decoders.VideoDecoder``; static images use
+# ``torchvision.io.read_image``. AudioX supports the 6 t2*/v2*/tv2* tasks where
+# audio is the model output, so no audio-input loaders are needed here.
 # ---------------------------------------------------------------------------
 
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png"})
-
-
-def _load_audio_path_str(path: str) -> tuple[torch.Tensor, int]:
-    """Load [C, T] float32 audio from a file path via TorchCodec."""
-    from torchaudio import load_with_torchcodec
-
-    return load_with_torchcodec(path)
-
-
-def load_audio_source(source: Any, *, target_sample_rate: int | None = None) -> torch.Tensor:
-    """Load audio from path/tensor/ndarray into a torch tensor [C, T]."""
-    if isinstance(source, str):
-        import torchaudio
-
-        wav, sr = _load_audio_path_str(source)
-        if target_sample_rate is not None and sr != target_sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, target_sample_rate)
-        return wav
-    if isinstance(source, torch.Tensor):
-        return source
-    if isinstance(source, np.ndarray):
-        return torch.from_numpy(source)
-    raise TypeError(f"Unsupported audio source type: {type(source)!r}")
 
 
 def _load_image_path_torchvision(path: str) -> torch.Tensor:
@@ -313,44 +249,6 @@ def load_video_source(
     if isinstance(source, np.ndarray):
         return torch.from_numpy(source)
     raise TypeError(f"Unsupported video source type: {type(source)!r}")
-
-
-def to_2ch_audio(x: torch.Tensor) -> torch.Tensor:
-    x = x.float()
-    if x.dim() == 1:
-        x = x.unsqueeze(0)
-    if x.shape[0] == 1:
-        x = x.repeat(2, 1)
-    elif x.shape[0] > 2:
-        x = x[:2]
-    return x
-
-
-def crop_or_pad_1d(x: torch.Tensor, start: int, target_len: int) -> torch.Tensor:
-    x = x[:, start : start + target_len]
-    cur = x.shape[1]
-    if cur < target_len:
-        x = F.pad(x, (target_len - cur, 0))
-    else:
-        x = x[:, :target_len]
-    return x
-
-
-def prepare_audio_reference(
-    source: Any,
-    *,
-    model_sample_rate: int,
-    seconds_start: float,
-    seconds_total: float,
-    device: torch.device,
-) -> torch.Tensor:
-    target_len = int(model_sample_rate * seconds_total)
-    start = int(model_sample_rate * seconds_start)
-    wav = load_audio_source(source, target_sample_rate=model_sample_rate)
-
-    wav = to_2ch_audio(wav)
-    wav = crop_or_pad_1d(wav, start, target_len)
-    return wav.to(device=device, dtype=torch.float32)
 
 
 def normalize_video_tensor(frames: torch.Tensor, size: int = 224) -> torch.Tensor:
@@ -1160,31 +1058,14 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
     def _audio_prompt_tensors(
         self,
         *,
-        raw_prompts: list[Any],
-        extra: dict[str, Any],
-        seconds_start: float,
-        sample_rate: int,
+        batch_size: int,
         device: torch.device,
         cond_dtype: torch.dtype = torch.float32,
     ) -> list[torch.Tensor]:
-        out: list[torch.Tensor] = []
+        # AudioX supports the 6 t2*/v2*/tv2* tasks where audio is the model output, so the
+        # audio_prompt conditioning slot the architecture requires is always fed zeros.
         target_len = self._audio_conditioning_samples
-        cond_seconds = float(target_len) / float(sample_rate)
-        for i, _raw in enumerate(raw_prompts):
-            src = _mm_path_lookup(_raw, extra, i, mm_key="audio", paths_key="audio_paths", single_key="audio_path")
-            if src is None:
-                out.append(torch.zeros(2, target_len, device=device, dtype=cond_dtype))
-                continue
-            out.append(
-                prepare_audio_reference(
-                    src,
-                    model_sample_rate=sample_rate,
-                    seconds_start=seconds_start,
-                    seconds_total=cond_seconds,
-                    device=device,
-                ).to(dtype=cond_dtype)
-            )
-        return out
+        return [torch.zeros(2, target_len, device=device, dtype=cond_dtype) for _ in range(batch_size)]
 
     def _video_feature_tensors(
         self,
@@ -1359,14 +1240,16 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         for i, text in enumerate(texts):
             for _ in range(num_outputs_per_prompt):
                 batch.append(
-                    _conditioning_item(
-                        text=self._text_for_task(task_norm, text),
-                        video_tensor=video_tensors_list[i],
-                        audio_tensor=audio_prompt_list[i],
-                        sync_features=sync_features,
-                        seconds_start=seconds_start,
-                        seconds_model=seconds_model,
-                    )
+                    {
+                        "video_prompt": {
+                            "video_tensors": video_tensors_list[i].unsqueeze(0),
+                            "video_sync_frames": sync_features,
+                        },
+                        "text_prompt": self._text_for_task(task_norm, text),
+                        "audio_prompt": audio_prompt_list[i].unsqueeze(0),
+                        "seconds_start": seconds_start,
+                        "seconds_total": seconds_model,
+                    }
                 )
         return batch
 
@@ -1410,10 +1293,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         sync_features = torch.zeros(1, self._VIDEO_SYNC_FRAME_COUNT, 768, device=device, dtype=cond_dtype)
 
         audio_prompt_list = self._audio_prompt_tensors(
-            raw_prompts=normalized_prompts,
-            extra=extra_args,
-            seconds_start=seconds_start,
-            sample_rate=sample_rate,
+            batch_size=len(normalized_prompts),
             device=device,
             cond_dtype=cond_dtype,
         )

@@ -256,9 +256,9 @@ def run_single_inference(
 
     # Preserve duration when output sample rate differs from model-native rate.
     if model_sample_rate != sample_rate:
-        from vllm_omni.diffusion.models.audiox.pipeline_audiox import resample_audiox_waveform_poly
+        from scipy.signal import resample_poly
 
-        audio = resample_audiox_waveform_poly(audio, src_rate=model_sample_rate, dst_rate=sample_rate)
+        audio = resample_poly(audio.astype(np.float32), up=sample_rate, down=model_sample_rate, axis=0)
 
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
