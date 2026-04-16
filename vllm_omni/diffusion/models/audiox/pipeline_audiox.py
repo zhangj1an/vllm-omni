@@ -3,11 +3,9 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import math
 import os
-import typing as tp
 from collections.abc import Iterable
 from typing import Any, ClassVar
 
@@ -48,92 +46,11 @@ def _load_audiox_bundle_config(model_root: str) -> dict[str, Any]:
         return json.load(f)
 
 
-def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int | None:
-    """``latent_seq_len × downsampling_ratio`` from the nested ``audio_prompt`` conditioning config."""
-    m = model_config.get("model")
-    if not isinstance(m, dict):
-        return None
-    cond = m.get("conditioning")
-    if not isinstance(cond, dict):
-        return None
-    for item in cond.get("configs", []):
-        if not isinstance(item, dict) or item.get("id") != "audio_prompt":
-            continue
-        c = item.get("config")
-        if not isinstance(c, dict):
-            continue
-        ls = c.get("latent_seq_len")
-        pt = c.get("pretransform_config")
-        ds = None
-        if isinstance(pt, dict):
-            ptc = pt.get("config")
-            if isinstance(ptc, dict):
-                ds = ptc.get("downsampling_ratio")
-        if isinstance(ls, (int, float)) and isinstance(ds, (int, float)):
-            return int(ls) * int(ds)
-    return None
-
-
-def get_audiox_post_process_func(_od_config: OmniDiffusionConfig):
-    def post_process_func(audio: torch.Tensor, output_type: str = "np"):
-        if output_type in ("latent", "pt"):
-            return audio
-        return audio.detach().cpu().float().numpy()
-
-    return post_process_func
-
-
-def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
-    if od_config.model is None:
-        raise ValueError("AudioX pre-process requires od_config.model.")
-
-    model_root = os.path.abspath(od_config.model)
-    model_cfg = _load_audiox_bundle_config(model_root)
-
-    sample_rate = int(model_cfg.get("sample_rate", 48000))
-    sample_size = int(model_cfg.get("sample_size", sample_rate * 10))
-    video_fps = int(model_cfg.get("video_fps", 5))
-    seconds_model = float(sample_size) / float(sample_rate)
-    clip_duration = 10.0
-
-    cpu = torch.device("cpu")
-
-    def pre_process_func(request: OmniDiffusionRequest) -> OmniDiffusionRequest:
-        sp = request.sampling_params
-        extra = sp.extra_args or {}
-        seconds_start = float(extra.get("seconds_start", 0.0))
-        user_seconds_total = float(extra.get("seconds_total", seconds_model))
-
-        task_norm = AudioXPipeline._normalize_task(extra.get("audiox_task"))
-
-        normalized = _normalize_prompts(list(request.prompts))
-        new_prompts: list[Any] = []
-        for i, p in enumerate(normalized):
-            mm = p["multi_modal_data"]
-            ai = p["additional_information"]
-
-            if task_norm in _VIDEO_CONDITIONED_TASKS:
-                vsrc = _mm_path_lookup(p, extra, i, mm_key="video", paths_key="video_paths", single_key="video_path")
-                if vsrc is not None:
-                    mm["video"] = prepare_video_reference(
-                        vsrc,
-                        duration=float(clip_duration),
-                        target_fps=video_fps,
-                        seek_time=seconds_start,
-                    ).to(device=cpu, dtype=torch.float32)
-
-            ai["audiox_preprocess"] = {
-                "seconds_model": seconds_model,
-                "user_seconds_total": user_seconds_total,
-                "sample_rate": sample_rate,
-                "video_fps": video_fps,
-            }
-            new_prompts.append(p)
-
-        request.prompts = new_prompts
-        return request
-
-    return pre_process_func
+def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int:
+    """``latent_seq_len × downsampling_ratio`` from the ``audio_prompt`` conditioning config."""
+    configs = model_config["model"]["conditioning"]["configs"]
+    cfg = next(c["config"] for c in configs if c["id"] == "audio_prompt")
+    return int(cfg["latent_seq_len"]) * int(cfg["pretransform_config"]["config"]["downsampling_ratio"])
 
 
 def _mm_path_lookup(
@@ -296,42 +213,6 @@ def prepare_video_reference(
 # ---------------------------------------------------------------------------
 
 
-def _kwargs_for(cls: type, cfg: dict[str, Any]) -> dict[str, Any]:
-    """Filter ``cfg`` to just the keyword arguments accepted by ``cls.__init__``.
-
-    Upstream AudioX configs ship training-only knobs alongside inference-relevant keys.
-    """
-    sig = inspect.signature(cls.__init__)
-    accepted = {
-        name for name, param in sig.parameters.items() if name != "self" and param.kind != inspect.Parameter.VAR_KEYWORD
-    }
-    return {k: v for k, v in cfg.items() if k in accepted}
-
-
-def set_audio_channels(audio: torch.Tensor, target_channels: int) -> torch.Tensor:
-    if target_channels == 1:
-        audio = audio.mean(1, keepdim=True)
-    elif target_channels == 2:
-        if audio.shape[1] == 1:
-            audio = audio.repeat(1, 2, 1)
-        elif audio.shape[1] > 2:
-            audio = audio[:, :2, :]
-    return audio
-
-
-def _stack_pad_audio_list(audio: list[torch.Tensor], device: torch.device | str) -> torch.Tensor:
-    bs = len(audio)
-    max_len = max(a.shape[-1] for a in audio)
-    padded: list[torch.Tensor] = []
-    for i in range(bs):
-        t = audio[i].to(device)
-        pad_len = max_len - t.shape[-1]
-        if pad_len > 0:
-            t = torch.nn.functional.pad(t, (0, pad_len))
-        padded.append(t)
-    return torch.cat(padded, dim=0)
-
-
 class SA_PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
@@ -418,79 +299,14 @@ class SA_Transformer(nn.Module):
         return self.norm(x)
 
 
-class Conditioner(nn.Module):
-    def __init__(self, dim: int, output_dim: int, project_out: bool = False):
-        super().__init__()
-        self.dim = dim
-        self.output_dim = output_dim
-        self.proj_out = nn.Linear(dim, output_dim) if (dim != output_dim or project_out) else nn.Identity()
+# ---------------------------------------------------------------------------
+# Audio VAE adapter: encodes waveform via AutoencoderOobleck → cond_dim tokens.
+# AudioX bundle ships a dedicated copy of the VAE weights for this conditioner;
+# they are loaded under the legacy ``conditioner.conditioners.audio_prompt.*`` prefix
+# (remapped in ``AudioXPipeline.load_weights``).
+# ---------------------------------------------------------------------------
 
-    def forward(self, x: tp.Any) -> tp.Any:
-        raise NotImplementedError()
-
-
-class AudioVaePromptAdapter(Conditioner):
-    """Encode waveform with the loaded ``AutoencoderOobleck`` and project to ``cond_dim``."""
-
-    def __init__(
-        self,
-        pretransform: tp.Any,
-        output_dim: int,
-        latent_seq_len: int = 237,
-    ):
-        icfg = pretransform.config
-        enc_ch = int(getattr(icfg, "latent_channels", getattr(icfg, "decoder_input_channels", 1)))
-        super().__init__(enc_ch, output_dim)
-        self.pretransform = pretransform
-        self.latent_seq_len = latent_seq_len
-        self.proj_features_128 = nn.Linear(in_features=self.latent_seq_len, out_features=128)
-
-    def forward(
-        self, audio: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor], device: torch.device | str
-    ) -> list[torch.Tensor]:
-        self.to(device)
-
-        if isinstance(audio, (list, tuple)):
-            audio = list(audio)
-            audio_t = _stack_pad_audio_list(audio, device)
-        else:
-            audio_t = audio.to(device)
-
-        audio_t = set_audio_channels(audio_t, int(getattr(self.pretransform.config, "audio_channels", 2)))
-
-        vae = self.pretransform
-        z = vae.encode(audio_t, return_dict=True).latent_dist.sample()
-        latents = z / float(vae.audiox_scaling_factor)
-        latents = self.proj_features_128(latents)
-        latents = latents.permute(0, 2, 1)
-        latents = self.proj_out(latents)
-        return [latents, torch.ones(latents.shape[0], latents.shape[2]).to(latents.device)]
-
-
-class MultiConditioner(nn.Module):
-    def __init__(self, conditioners: dict[str, Conditioner]):
-        super().__init__()
-        self.conditioners = nn.ModuleDict(conditioners)
-
-    def forward(
-        self,
-        batch_metadata: list[dict[str, tp.Any]],
-        device: torch.device | str,
-        *,
-        require_single_item_sequence: bool = False,
-    ) -> dict[str, tp.Any]:
-        output = {}
-        for key, conditioner in self.conditioners.items():
-            conditioner_inputs = _gather_conditioner_inputs(
-                batch_metadata=batch_metadata,
-                key=key,
-                require_single_item_sequence=require_single_item_sequence,
-            )
-            output[key] = conditioner(conditioner_inputs, device)
-        return output
-
-
-_AUDIOX_VAE_CONFIG = {
+_AUDIOX_OOBLECK_CONFIG = {
     "audio_channels": 2,
     "channel_multiples": [1, 2, 4, 8, 16],
     "decoder_channels": 128,
@@ -501,103 +317,29 @@ _AUDIOX_VAE_CONFIG = {
 }
 
 
-def create_pretransform_from_config(
-    pretransform_config: dict[str, tp.Any],
-) -> AutoencoderOobleck:
-    """Create ``AutoencoderOobleck`` from config only — weights are loaded later
-    through the unified ``load_weights`` path.
-
-    Sets ``audiox_scaling_factor`` on the module; callers scale latents when encoding/decoding.
-    """
-    pretransform_type = pretransform_config.get("type", "autoencoder")
-
-    if pretransform_type != "autoencoder":
-        raise NotImplementedError(
-            f"AudioX HKUST weights only use pretransform type 'autoencoder'; got {pretransform_type!r}"
-        )
-
-    vae = AutoencoderOobleck(**_AUDIOX_VAE_CONFIG)
-
-    icfg = vae.config
-    scaling_factor = float(pretransform_config.get("scale", getattr(icfg, "scaling_factor", 1.0)))
-    vae.audiox_scaling_factor = scaling_factor  # type: ignore[attr-defined]
-
-    vae.eval().requires_grad_(False)
-    return vae
+def _build_audiox_oobleck(scaling_factor: float = 1.0) -> AutoencoderOobleck:
+    vae = AutoencoderOobleck(**_AUDIOX_OOBLECK_CONFIG)
+    vae.audiox_scaling_factor = float(scaling_factor)  # type: ignore[attr-defined]
+    return vae.eval().requires_grad_(False)
 
 
-def _build_pretransform(conditioner_config: dict[str, tp.Any]) -> tp.Any:
-    conditioner_config.pop("sample_rate", None)
-    pretransform = create_pretransform_from_config(
-        conditioner_config.pop("pretransform_config"),
-    )
-    return pretransform
+class AudioVaePromptAdapter(nn.Module):
+    """Encode the (zero-tensor) audio prompt via Oobleck VAE, project to ``cond_dim`` tokens."""
 
+    def __init__(self, *, cond_dim: int, latent_seq_len: int = 215):
+        super().__init__()
+        self.pretransform = _build_audiox_oobleck()
+        in_ch = int(self.pretransform.config.decoder_input_channels)
+        self.proj_features_128 = nn.Linear(latent_seq_len, 128)
+        self.proj_out = nn.Linear(in_ch, cond_dim) if in_ch != cond_dim else nn.Identity()
 
-def _assert_conditioner_key_in_item(item: dict[str, tp.Any], key: str) -> None:
-    if key not in item:
-        raise ValueError(f"Conditioner key {key} not found in batch metadata")
-
-
-def _normalize_condition_value(value: tp.Any, *, source_key: str, require_single_item_sequence: bool) -> tp.Any:
-    if isinstance(value, (list, tuple)):
-        if require_single_item_sequence:
-            if len(value) != 1:
-                raise ValueError(f"Conditioner input for key {source_key!r} must be scalar or single-item list/tuple.")
-            return value[0]
-        if len(value) == 1:
-            return value[0]
-    return value
-
-
-def _gather_conditioner_inputs(
-    *,
-    batch_metadata: list[dict[str, tp.Any]],
-    key: str,
-    require_single_item_sequence: bool,
-) -> list[tp.Any]:
-    inputs: list[tp.Any] = []
-    for item in batch_metadata:
-        _assert_conditioner_key_in_item(item, key)
-        value = _normalize_condition_value(
-            item[key],
-            source_key=key,
-            require_single_item_sequence=require_single_item_sequence,
-        )
-        inputs.append(value)
-    return inputs
-
-
-def _with_output_dim(cond_dim: int, cfg: dict[str, tp.Any]) -> dict[str, tp.Any]:
-    out = {"output_dim": cond_dim}
-    out.update(cfg)
-    return out
-
-
-def create_audiox_fixed_conditioner_from_conditioning_config(
-    config: dict[str, tp.Any],
-) -> MultiConditioner:
-    """Create audio conditioner.  T5 text and CLIP video encoding are handled directly by the pipeline."""
-    cond_dim = config["cond_dim"]
-
-    by_id: dict[str, dict[str, tp.Any]] = {}
-    for item in config["configs"]:
-        if not isinstance(item, dict):
-            raise ValueError("Each conditioning config entry must be a dict.")
-        cid = item.get("id")
-        cconf = item.get("config")
-        if not isinstance(cid, str) or not isinstance(cconf, dict):
-            raise ValueError("Each conditioning config must include string 'id' and dict 'config'.")
-        by_id[cid] = dict(cconf)
-
-    audio_cfg = _with_output_dim(cond_dim, by_id["audio_prompt"])
-    pretransform = _build_pretransform(audio_cfg)
-    audio_cfg = _kwargs_for(AudioVaePromptAdapter, audio_cfg)
-
-    conditioners: dict[str, Conditioner] = {
-        "audio_prompt": AudioVaePromptAdapter(pretransform, **audio_cfg),
-    }
-    return MultiConditioner(conditioners)
+    def forward(self, audio: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        z = self.pretransform.encode(audio, return_dict=True).latent_dist.sample()
+        latents = z / float(self.pretransform.audiox_scaling_factor)
+        latents = self.proj_features_128(latents).permute(0, 2, 1)
+        latents = self.proj_out(latents)
+        ones = torch.ones(latents.shape[0], latents.shape[2], device=latents.device)
+        return latents, ones
 
 
 # ---------------------------------------------------------------------------
@@ -762,148 +504,6 @@ class MAF_Block(nn.Module):
         }
 
 
-# ---------------------------------------------------------------------------
-# Diffusion sampling runtime: polyexponential sigma schedule + EDM-DPM++ scheduler
-# ---------------------------------------------------------------------------
-
-
-def _append_zero(sigmas: torch.Tensor) -> torch.Tensor:
-    return torch.cat([sigmas, sigmas.new_zeros(1)])
-
-
-def _sigmas_polyexponential(
-    n: int, sigma_min: float, sigma_max: float, rho: float, device: torch.device
-) -> torch.Tensor:
-    """Polynomial-in-log-sigma noise schedule (upstream AudioX / ``get_sigmas_polyexponential``)."""
-    ramp = torch.linspace(1, 0, n, device=device) ** rho
-    sigmas = torch.exp(ramp * (math.log(sigma_max) - math.log(sigma_min)) + math.log(sigma_min))
-    return _append_zero(sigmas)
-
-
-def _sigma_to_t_vdiffusion(sigma: torch.Tensor) -> torch.Tensor:
-    """Timestep embedding input ``atan(sigma) * 2 / pi`` (AudioX DiT conditioning)."""
-    return sigma.atan() / math.pi * 2
-
-
-def sample_k(
-    model_fn,
-    noise,
-    steps: int = 100,
-    sigma_min: float = 0.3,
-    sigma_max: float = 500.0,
-    rho: float = 1.0,
-    device: str | torch.device = "cuda",
-    callback=None,
-    generator: torch.Generator | None = None,
-    **extra_args,
-):
-    """Sample with :class:`~diffusers.schedulers.EDMDPMSolverMultistepScheduler`.
-
-    Uses ``sde-dpmsolver++`` algorithm with ``sigma_data=1`` (AudioX upstream defaults).
-    """
-    dev = device if isinstance(device, torch.device) else torch.device(device)
-    sigmas_full = _sigmas_polyexponential(steps, sigma_min, sigma_max, rho, dev)
-
-    scheduler = EDMDPMSolverMultistepScheduler(
-        sigma_min=sigma_min,
-        sigma_max=sigma_max,
-        sigma_data=1.0,
-        sigma_schedule="exponential",
-        prediction_type="v_prediction",
-        algorithm_type="sde-dpmsolver++",
-        solver_order=2,
-        solver_type="midpoint",
-        final_sigmas_type="zero",
-    )
-    scheduler.set_timesteps(steps, device=device)
-    scheduler.sigmas = sigmas_full.detach().cpu().to(torch.float32)
-    scheduler.timesteps = scheduler.precondition_noise(sigmas_full[:-1]).detach().cpu().to(torch.float32)
-    scheduler.num_inference_steps = steps
-
-    latents = noise * sigmas_full[0].to(device=noise.device, dtype=noise.dtype)
-
-    for t in scheduler.timesteps:
-        latent_in = scheduler.scale_model_input(latents, t)
-        sigma = scheduler.sigmas[scheduler.step_index].to(device=latent_in.device, dtype=latent_in.dtype)
-        s_in = latent_in.new_ones([latent_in.shape[0]])
-        t_cond = _sigma_to_t_vdiffusion(sigma * s_in)
-        model_output = model_fn(latent_in, t_cond, **extra_args)
-        if callback is not None:
-            callback(
-                {
-                    "x": latents,
-                    "i": int(scheduler.step_index),
-                    "sigma": sigma,
-                    "sigma_hat": sigma,
-                    "denoised": None,
-                }
-            )
-        latents = scheduler.step(model_output, t, latents, generator=generator).prev_sample
-
-    return latents
-
-
-def generate_diffusion_cond(
-    pipeline,
-    steps: int = 250,
-    cfg_scale=6,
-    conditioning_tensors: dict | None = None,
-    negative_conditioning_tensors: dict | None = None,
-    batch_size: int = 1,
-    sample_size: int = 2097152,
-    device: str | torch.device = "cuda",
-    generator: torch.Generator | None = None,
-    **sample_kwargs,
-) -> torch.Tensor:
-    """Run diffusion sampling using the AudioXPipeline.
-
-    ``pipeline`` must expose ``.pretransform``, ``.io_channels``, ``.model``,
-    ``.diffusion_objective``, and ``.get_conditioning_inputs()``.
-    """
-    pt = pipeline.pretransform
-    if pt is None:
-        raise RuntimeError("AudioX inference-only path requires a pretransform.")
-    if not isinstance(pt, AutoencoderOobleck):
-        raise RuntimeError(f"Expected AutoencoderOobleck pretransform, got {type(pt)!r}.")
-
-    sample_size = sample_size // int(pt.hop_length)
-
-    if generator is None:
-        raise ValueError("AudioX generation requires a torch.Generator.")
-    noise = torch.randn([batch_size, pipeline.io_channels, sample_size], device=device, generator=generator)
-
-    conditioning_inputs = pipeline.get_conditioning_inputs(conditioning_tensors)
-
-    if negative_conditioning_tensors is not None:
-        negative_conditioning_tensors = pipeline.get_conditioning_inputs(negative_conditioning_tensors, negative=True)
-    else:
-        negative_conditioning_tensors = {}
-
-    model_dtype = next(pipeline.model.parameters()).dtype
-    noise = noise.type(model_dtype)
-    conditioning_inputs = {k: v.type(model_dtype) if v is not None else v for k, v in conditioning_inputs.items()}
-
-    sampled = sample_k(
-        pipeline.model,
-        noise,
-        steps,
-        **sample_kwargs,
-        **conditioning_inputs,
-        **negative_conditioning_tensors,
-        cfg_scale=cfg_scale,
-        device=device,
-        generator=generator,
-    )
-
-    dev = sampled.device
-    vae = pt.to(device=dev, dtype=torch.float32).eval()
-    pipeline.pretransform = vae
-    z = sampled.to(dtype=torch.float32)
-    sampled = vae.decode(z * float(vae.audiox_scaling_factor), return_dict=True).sample
-
-    return sampled
-
-
 class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMixin):
     support_audio_output: ClassVar[bool] = True
     _PROFILER_TARGETS: ClassVar[list[str]] = ["diffuse"]
@@ -933,12 +533,15 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         diffusion_config = model_config["diffusion"]
 
         self.model = MMDiffusionTransformer(**dict(diffusion_config["config"]))
-        self.conditioner = create_audiox_fixed_conditioner_from_conditioning_config(
-            model_config["conditioning"],
+
+        # Audio conditioner: VAE-encode the audio prompt (zeros for the 6 t2*/v2*/tv2* tasks).
+        cond_configs = {c["id"]: c.get("config", {}) for c in model_config["conditioning"]["configs"]}
+        self.audio_vae_adapter = AudioVaePromptAdapter(
+            cond_dim=int(model_config["conditioning"]["cond_dim"]),
+            latent_seq_len=int(cond_configs["audio_prompt"]["latent_seq_len"]),
         )
 
         # T5 text encoder — used directly, no adapter wrapper.
-        cond_configs = {c["id"]: c.get("config", {}) for c in model_config["conditioning"]["configs"]}
         t5_name = cond_configs.get("text_prompt", {}).get("t5_model_name", "t5-base")
         self._t5_max_length = int(cond_configs.get("text_prompt", {}).get("max_length", 128))
         self.tokenizer = T5TokenizerFast.from_pretrained(t5_name)
@@ -964,8 +567,11 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
         self._clip_normalize = transforms.Compose([transforms.Normalize(mean=list(_CLIP_MEAN), std=list(_CLIP_STD))])
 
-        pretransform_cfg = model_config["pretransform"]
-        self.pretransform = create_pretransform_from_config(pretransform_cfg)
+        # Final-decode VAE: separate Oobleck instance from the conditioner-side one;
+        # bundle ships its own weights under the ``pretransform.*`` prefix.
+        self.pretransform = _build_audiox_oobleck(
+            scaling_factor=float(model_config["pretransform"].get("scale", 1.0)),
+        )
 
         self.io_channels = model_config["io_channels"]
         self.diffusion_objective = "v"
@@ -993,13 +599,10 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             ),
         ]
         sample_rate = int(self._model_config.get("sample_rate", 48000))
-        sample_size = int(self._model_config.get("sample_size", sample_rate * 10))
-        ac_samples = _audio_conditioning_input_samples(self._model_config)
-        audio_conditioning_samples = ac_samples if ac_samples is not None else sample_size
         self._sample_rate = sample_rate
-        self._sample_size = sample_size
+        self._sample_size = int(self._model_config.get("sample_size", sample_rate * 10))
         self._target_fps = int(self._model_config.get("video_fps", 5))
-        self._audio_conditioning_samples = audio_conditioning_samples
+        self._audio_conditioning_samples = _audio_conditioning_input_samples(self._model_config)
 
         self.setup_diffusion_pipeline_profiler(
             profiler_targets=list(self._PROFILER_TARGETS),
@@ -1007,7 +610,17 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loaded = AutoWeightsLoader(self).load_weights(weights)
+        # Bundle stores the audio conditioner under the legacy MultiConditioner prefix.
+        # Remap to our flat ``audio_vae_adapter.*`` attribute (which holds the same submodules).
+        _legacy_prefix = "conditioner.conditioners.audio_prompt."
+
+        def _remap(items):
+            for name, tensor in items:
+                if name.startswith(_legacy_prefix):
+                    name = "audio_vae_adapter." + name[len(_legacy_prefix) :]
+                yield name, tensor
+
+        loaded = AutoWeightsLoader(self).load_weights(_remap(weights))
 
         # T5EncoderModel ties shared.weight ↔ encoder.embed_tokens.weight.
         # The unified safetensors omits shared.weight; reconstruct the tie.
@@ -1139,20 +752,60 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         generator: torch.Generator,
         cfg_rescale: float,
     ) -> torch.Tensor:
-        return generate_diffusion_cond(
-            self,
-            steps=steps,
-            cfg_scale=guidance_scale,
-            conditioning_tensors=conditioning_tensors,
-            negative_conditioning_tensors=negative_conditioning_tensors,
-            batch_size=batch_size,
-            sample_size=self._sample_size,
-            device=self.device,
-            generator=generator,
+        """End-to-end audio sampling: noise → DPM++ sampler → VAE decode."""
+        device = self.device
+        model_dtype = next(self.model.parameters()).dtype
+
+        # Latent noise.
+        latent_len = self._sample_size // int(self.pretransform.hop_length)
+        noise = torch.randn(
+            [batch_size, self.io_channels, latent_len], device=device, generator=generator, dtype=model_dtype
+        )
+
+        # Conditioning (cast to model dtype).
+        def _cast(d: dict[str, Any]) -> dict[str, Any]:
+            return {k: (v.type(model_dtype) if isinstance(v, torch.Tensor) else v) for k, v in d.items()}
+
+        cond = _cast(self.get_conditioning_inputs(conditioning_tensors))
+        neg = (
+            _cast(self.get_conditioning_inputs(negative_conditioning_tensors, negative=True))
+            if negative_conditioning_tensors is not None
+            else {}
+        )
+
+        # Polyexponential sigma schedule (k-diffusion convention; AudioX upstream).
+        ramp = torch.linspace(1, 0, steps, device=device)
+        sigmas = torch.exp(ramp * (math.log(sigma_max) - math.log(sigma_min)) + math.log(sigma_min))
+        sigmas = torch.cat([sigmas, sigmas.new_zeros(1)])  # trailing 0 (final step targets clean latents)
+
+        # diffusers EDM-DPM++ sampler with our custom sigma schedule.
+        scheduler = EDMDPMSolverMultistepScheduler(
             sigma_min=sigma_min,
             sigma_max=sigma_max,
-            scale_phi=cfg_rescale,
+            sigma_data=1.0,
+            sigma_schedule="exponential",
+            prediction_type="v_prediction",
+            algorithm_type="sde-dpmsolver++",
+            solver_order=2,
+            solver_type="midpoint",
+            final_sigmas_type="zero",
         )
+        scheduler.set_timesteps(steps, device=device)
+        scheduler.sigmas = sigmas.detach().cpu().to(torch.float32)
+        scheduler.timesteps = scheduler.precondition_noise(sigmas[:-1]).detach().cpu().to(torch.float32)
+        scheduler.num_inference_steps = steps
+
+        latents = noise * sigmas[0].to(noise)
+        for t in scheduler.timesteps:
+            latent_in = scheduler.scale_model_input(latents, t)
+            sigma = scheduler.sigmas[scheduler.step_index].to(latent_in)
+            t_cond = (sigma * latent_in.new_ones([latent_in.shape[0]])).atan() * (2 / math.pi)
+            v_pred = self.model(latent_in, t_cond, **cond, **neg, cfg_scale=guidance_scale, scale_phi=cfg_rescale)
+            latents = scheduler.step(v_pred, t, latents, generator=generator).prev_sample
+
+        # VAE decode.
+        vae = self.pretransform.to(device=latents.device, dtype=torch.float32).eval()
+        return vae.decode(latents.to(torch.float32) * float(vae.audiox_scaling_factor), return_dict=True).sample
 
     def _encode_text(self, texts: list[str], device: torch.device) -> list[torch.Tensor]:
         """Tokenize and encode text with T5 directly."""
@@ -1209,15 +862,13 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         return [hidden, torch.ones(batch_size, 1, device=device)]
 
     def _encode_conditioning_tensors(self, batch_metadata: list[dict[str, Any]]) -> dict[str, Any]:
-        # Encode audio through the MultiConditioner.
-        output = self.conditioner(batch_metadata, self.device, require_single_item_sequence=True)
-        # Encode text directly with T5.
-        texts = [item["text_prompt"] for item in batch_metadata]
-        output["text_prompt"] = self._encode_text(texts, self.device)
-        # Encode video directly with CLIP.
-        video_inputs = [item["video_prompt"] for item in batch_metadata]
-        output["video_prompt"] = self._encode_video(video_inputs, self.device)
-        return output
+        device = self.device
+        audio = torch.cat([item["audio_prompt"] for item in batch_metadata], dim=0).to(device)
+        return {
+            "audio_prompt": list(self.audio_vae_adapter(audio)),
+            "text_prompt": self._encode_text([item["text_prompt"] for item in batch_metadata], device),
+            "video_prompt": self._encode_video([item["video_prompt"] for item in batch_metadata], device),
+        }
 
     def _build_conditioning_batch(
         self,
