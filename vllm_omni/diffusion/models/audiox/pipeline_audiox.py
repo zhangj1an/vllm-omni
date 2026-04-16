@@ -8,16 +8,16 @@ import os
 from collections.abc import Iterable
 from typing import Any, ClassVar
 
+import einops
 import numpy as np
 import torch
 from scipy.signal import resample_poly
 from torch import nn
+from torchvision import transforms
+from transformers import AutoConfig, CLIPVisionModelWithProjection, T5EncoderModel, T5TokenizerFast
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
-import einops
-from torchvision import transforms
-from transformers import AutoConfig, CLIPVisionModelWithProjection, T5EncoderModel, T5TokenizerFast
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.audiox.audiox_conditioner import (
@@ -284,7 +284,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         # CLIP video encoder + temporal fusion — used directly, no adapter wrapper.
         clip_name = cond_configs.get("video_prompt", {}).get("clip_model_name", "openai/clip-vit-base-patch32")
         clip_config = AutoConfig.from_pretrained(clip_name)
-        self.clip_encoder = CLIPVisionModelWithProjection(clip_config)
+        vision_config = getattr(clip_config, "vision_config", clip_config)
+        self.clip_encoder = CLIPVisionModelWithProjection(vision_config)
         _CLIP_PATCH_TOKENS, _VIDEO_FPS, _DURATION_SEC, _DIM = 50, 5, 10, 768
         _in_features = _CLIP_PATCH_TOKENS * _VIDEO_FPS * _DURATION_SEC
         self._clip_in_features = _in_features
@@ -348,6 +349,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         # The unified safetensors omits shared.weight; reconstruct the tie.
         if hasattr(self.text_encoder, "shared"):
             self.text_encoder.shared.weight = self.text_encoder.encoder.embed_tokens.weight
+            loaded.add("text_encoder.shared.weight")
 
         self.to(torch.float32)
         self.eval().requires_grad_(False)
