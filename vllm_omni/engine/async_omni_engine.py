@@ -1218,8 +1218,6 @@ class AsyncOmniEngine:
         # Only set dtype if it was already explicitly passed and normalized
         if "dtype" in normalized_kwargs:
             stage_engine_args["dtype"] = normalized_kwargs["dtype"]
-        if p := kwargs.get("audiox_reference_audio_path"):
-            stage_engine_args["audiox_reference_audio_path"] = p
 
         default_stage_cfg = [
             {

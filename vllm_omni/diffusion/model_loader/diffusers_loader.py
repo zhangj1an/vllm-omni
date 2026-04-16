@@ -50,23 +50,6 @@ MODEL_INDEX = "model_index.json"
 DIFFUSION_MODEL_WEIGHTS_INDEX = "diffusion_pytorch_model.safetensors.index.json"
 
 
-def _pytorch_checkpoint_weights_iterator(
-    hf_weights_files: list[str],
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Yield tensors from ``.pt`` / ``.bin`` / ``.ckpt`` shards (plain or nested ``state_dict``)."""
-    for path in hf_weights_files:
-        loaded = torch.load(path, map_location="cpu", weights_only=True)
-        if isinstance(loaded, dict) and "state_dict" in loaded:
-            inner = loaded["state_dict"]
-            if isinstance(inner, dict):
-                loaded = inner
-        if not isinstance(loaded, dict):
-            raise RuntimeError(f"Expected dict checkpoint at {path}, got {type(loaded)}")
-        for name, tensor in loaded.items():
-            if isinstance(tensor, torch.Tensor):
-                yield name, tensor
-
-
 class DiffusersPipelineLoader:
     """Model loader that can load diffusers pipeline components from disk."""
 
@@ -215,15 +198,12 @@ class DiffusersPipelineLoader:
                 self.load_config.use_tqdm_on_load,
                 max_workers=num_threads,
             )
-        elif use_safetensors:
+        else:
             weights_iterator = safetensors_weights_iterator(
                 hf_weights_files,
                 self.load_config.use_tqdm_on_load,
                 self.load_config.safetensors_load_strategy,
             )
-        else:
-            sorted_pt_files = sorted(hf_weights_files, key=_natural_sort_key)
-            weights_iterator = _pytorch_checkpoint_weights_iterator(sorted_pt_files)
 
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()

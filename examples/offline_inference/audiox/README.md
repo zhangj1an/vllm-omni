@@ -5,20 +5,13 @@ This folder runs [AudioX](https://github.com/ZeyueT/AudioX) through the `AudioXP
 ## Prerequisites
 
 1. **vLLM** and **vLLM-Omni** (editable install from this repo) with diffusion enabled.
-2. **AudioX Python extras** (PyPI packages not in the core `requirements/common.txt`):
-
-   ```bash
-   # from repository root
-   pip install -e ".[audiox]"
-   ```
-
-3. **Diffusion attention backend** — `end2end.py` defaults to `DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA` if unset, so a plain `python end2end.py …` works on GPUs where **fa3-fwd** / Flash reports errors such as *“This flash attention build does not support FP16”*. To force Flash when your stack supports it:
+2. **Diffusion attention backend** — `end2end.py` defaults to `DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA` if unset, so a plain `python end2end.py …` works on GPUs where **fa3-fwd** / Flash reports errors such as *“This flash attention build does not support FP16”*. To force Flash when your stack supports it:
 
    ```bash
    export DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN
    ```
 
-4. **`ffmpeg`** on your **PATH** if you use `run` with video tasks (`v2*`, `tv2*`) or Pexels sample download (see `end2end.py`). Text-only `infer --task t2a` does not need ffmpeg.
+3. **`ffmpeg`** on your **PATH** if you use `run` with video tasks (`v2*`, `tv2*`) or Pexels sample download (see `end2end.py`). Text-only `infer --task t2a` does not need ffmpeg.
 
 ## Weight layout
 
@@ -40,12 +33,6 @@ From the vLLM-Omni repo root (or anywhere), with `PYTHONPATH` pointing at the re
 cd examples/offline_inference/audiox
 
 # Populate ./audiox_weights (sharded safetensors), then:
-./run_audiox_sample_task.sh
-```
-
-Equivalent without the shell helper:
-
-```bash
 python end2end.py run
 ```
 
@@ -96,8 +83,6 @@ Use environment variables below to override these defaults without editing code.
 | Variable | Effect |
 |----------|--------|
 | `DIFFUSION_ATTENTION_BACKEND` | `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, etc. Unset in `end2end.py` defaults to `TORCH_SDPA`. |
-| `AUDIOX_CONFIG` | Path to JSON config (shell default: `configs/<AUDIOX_CLIP>.json`). |
-| `AUDIOX_CLIP` | `animal` or `human`; selects default config when `AUDIOX_CONFIG` is unset. |
 | `AUDIOX_MODEL` | Absolute path to weight directory (overrides `local_dir`). |
 | `AUDIOX_VIDEO` | Override video path for `v2*` / `tv2*` tasks. |
 | `AUDIOX_TASKS` | Comma/space-separated subset of `t2a t2m v2a v2m tv2a tv2m`. |
@@ -118,8 +103,6 @@ audiox_task_outputs/<model_slug>/<animal|human>/{t2a,t2m,v2a,v2m,tv2a,tv2m}.wav
 
 ## Troubleshooting
 
-- **Import errors** (`dac`, `einops_exts`, …): install `.[audiox]` as above.
-- **protobuf / vLLM errors** after installing AudioX deps: re-run `pip install -e ".[audiox]"` to enforce the protobuf floor.
 - **Flash attention / FP16 / dummy run failed**: use default `TORCH_SDPA` (already the default in `end2end.py`) or fix your Flash / fa3-fwd build for your GPU.
 - **Missing `transformer/config.json`**: some tooling expects `transformer/config.json` (can be `{}`) under the bundle; add it if something complains.
 - **`tv2a` / `tv2m`**: require a **non-empty** prompt. **`v2*` / `tv2*`**: require **`--video-path`** (or a config that supplies a video file).

@@ -6,42 +6,22 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from einops import rearrange
-from einops.layers.torch import Rearrange
 from torch import Tensor
 from torch.nn import functional as F
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
+from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 
 
-def compute_rope_rotations(
-    length: int,
-    dim: int,
-    theta: int,
-    *,
-    freq_scaling: float = 1.0,
-    device: torch.device | str = "cpu",
+def apply_rope_bhsd(
+    rope: RotaryEmbedding,
+    x: Tensor,
+    cos: Tensor,
+    sin: Tensor,
 ) -> Tensor:
-    assert dim % 2 == 0
-
-    with torch.amp.autocast(device_type="cuda", enabled=False):
-        pos = torch.arange(length, dtype=torch.float32, device=device)
-        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
-        freqs = freqs * freq_scaling
-
-        rot = torch.einsum("..., f -> ... f", pos, freqs)
-        rot = torch.stack([torch.cos(rot), -torch.sin(rot), torch.sin(rot), torch.cos(rot)], dim=-1)
-        rot = rot.unflatten(-1, (2, 2)).unsqueeze(0)
-        return rot
-
-
-def apply_rope(x: Tensor, rot: Tensor) -> Tensor:
-    with torch.amp.autocast(device_type="cuda", enabled=False):
-        _x = x.float()
-        _x = _x.view(*_x.shape[:-1], -1, 1, 2)
-        x_out = rot[..., 0] * _x[..., 0] + rot[..., 1] * _x[..., 1]
-        return x_out.reshape(*x.shape).to(dtype=x.dtype)
+    """Apply shared interleaved RoPE to ``[B, H, S, D]`` tensors (transposes for the kernel)."""
+    return rope(x.transpose(1, 2), cos, sin).transpose(1, 2)
 
 
 class AudioXCrossAttention(nn.Module):
@@ -55,17 +35,13 @@ class AudioXCrossAttention(nn.Module):
         self.q_norm = AudioXRMSNorm(dim // nheads)
         self.k_norm = AudioXRMSNorm(dim // nheads)
 
-        self.split_q_into_heads = Rearrange("b n (h d) -> b h n d", h=nheads, d=dim // nheads)
-        self.split_kv_into_heads = Rearrange("b n (h d j) -> b h n d j", h=nheads, d=dim // nheads, j=2)
-
     def forward(self, x: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
-        q = self.to_q(x)
-        kv = self.to_kv(context)
-        q = self.split_q_into_heads(q)
-        k, v = self.split_kv_into_heads(kv).chunk(2, dim=-1)
-        q = q.squeeze(-1)
-        k = k.squeeze(-1)
-        v = v.squeeze(-1)
+        head_dim = self.dim // self.nheads
+        # [B, N, h*d] -> [B, h, N, d]
+        q = self.to_q(x).unflatten(-1, (self.nheads, head_dim)).transpose(1, 2)
+        # [B, N, h*d*2] -> [B, h, N, d, 2] -> chunk -> two [B, h, N, d, 1] -> squeeze -> [B, h, N, d]
+        kv = self.to_kv(context).unflatten(-1, (self.nheads, head_dim, 2)).permute(0, 2, 1, 3, 4)
+        k, v = (t.squeeze(-1) for t in kv.chunk(2, dim=-1))
         q = self.q_norm(q)
         k = self.k_norm(k)
 
@@ -73,8 +49,8 @@ class AudioXCrossAttention(nn.Module):
         k = k.contiguous()
         v = v.contiguous()
         out = F.scaled_dot_product_attention(q, k, v)
-        out = rearrange(out, "b h n d -> b n (h d)").contiguous()
-        return out
+        # [B, h, N, d] -> [B, N, h*d]
+        return out.transpose(1, 2).flatten(-2).contiguous()
 
 
 logger = logging.getLogger(__name__)
@@ -118,10 +94,6 @@ class AudioXMMConvFeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
-def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):
-    return x * (1 + scale) + shift
-
-
 class AudioXRMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -144,34 +116,35 @@ class AudioXMMDiTSelfAttention(nn.Module):
         self.q_norm = AudioXRMSNorm(head_dim)
         self.k_norm = AudioXRMSNorm(head_dim)
 
-        self.split_into_heads = Rearrange("b n (h d j) -> b h n d j", h=nheads, d=dim // nheads, j=3)
+        self.rope = RotaryEmbedding(is_neox_style=False)
 
     def apply_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         q = q.contiguous()
         k = k.contiguous()
         v = v.contiguous()
         out = F.scaled_dot_product_attention(q, k, v)
-        return rearrange(out, "b h n d -> b n (h d)").contiguous()
+        # [B, h, N, d] -> [B, N, h*d]
+        return out.transpose(1, 2).flatten(-2).contiguous()
 
-    def pre_attention(self, x: torch.Tensor, rot: torch.Tensor | None = None):
-        qkv = self.qkv(x)
-        q, k, v = self.split_into_heads(qkv).chunk(3, dim=-1)
-        q = q.squeeze(-1)
-        k = k.squeeze(-1)
-        v = v.squeeze(-1)
+    def pre_attention(self, x: torch.Tensor, rot: tuple[torch.Tensor, torch.Tensor] | None = None):
+        head_dim = self.dim // self.nheads
+        # [B, N, h*d*3] -> [B, h, N, d, 3] -> chunk -> three [B, h, N, d, 1] -> squeeze -> [B, h, N, d]
+        qkv = self.qkv(x).unflatten(-1, (self.nheads, head_dim, 3)).permute(0, 2, 1, 3, 4)
+        q, k, v = (t.squeeze(-1) for t in qkv.chunk(3, dim=-1))
         q = self.q_norm(q)
         k = self.k_norm(k)
 
         if rot is not None:
-            q = apply_rope(q, rot)
-            k = apply_rope(k, rot)
+            cos, sin = rot
+            q = apply_rope_bhsd(self.rope, q, cos, sin)
+            k = apply_rope_bhsd(self.rope, k, cos, sin)
 
         return q, k, v
 
     def forward(
         self,
         x: torch.Tensor,
-        rot: torch.Tensor | None = None,
+        rot: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         q, k, v = self.pre_attention(x, rot=rot)
         return self.apply_attention(q, k, v)
@@ -193,10 +166,10 @@ class AudioXMMDiTBlock(nn.Module):
         self.ffn = AudioXMMConvFeedForward(dim, int(dim * mlp_ratio), kernel_size=3, padding=1)
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim, bias=True))
 
-    def pre_attention(self, x: torch.Tensor, c: torch.Tensor, rot: torch.Tensor | None):
+    def pre_attention(self, x: torch.Tensor, c: torch.Tensor, rot: tuple[torch.Tensor, torch.Tensor] | None):
         modulation = self.adaLN_modulation(c)
         (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp) = modulation.chunk(6, dim=-1)
-        x = modulate(self.norm1(x), shift_msa, scale_msa)
+        x = self.norm1(x) * (1 + scale_msa) + shift_msa
         q, k, v = self.attn.pre_attention(x, rot)
         return (q, k, v), (gate_msa, shift_mlp, scale_mlp, gate_mlp)
 
@@ -206,7 +179,7 @@ class AudioXMMDiTBlock(nn.Module):
 
         x = x + self.cross_attn(x, context=context)
 
-        r = modulate(self.norm2(x), shift_mlp, scale_mlp)
+        r = self.norm2(x) * (1 + scale_mlp) + shift_mlp
         x = x + self.ffn(r) * gate_mlp
         return x
 
@@ -214,7 +187,7 @@ class AudioXMMDiTBlock(nn.Module):
         self,
         x: torch.Tensor,
         cond: torch.Tensor,
-        rot: torch.Tensor | None,
+        rot: tuple[torch.Tensor, torch.Tensor] | None,
         context: torch.Tensor = None,
     ) -> torch.Tensor:
         x_qkv, x_conditions = self.pre_attention(x, cond, rot)
@@ -372,7 +345,8 @@ class MMDiffusionTransformer(nn.Module):
         x = x.transpose(1, 2)
 
         if self.patch_size > 1:
-            x = rearrange(x, "b (t p) c -> b t (c p)", p=self.patch_size)
+            # [B, T*p, c] -> [B, T, p, c] -> [B, T, c, p] -> [B, T, c*p]
+            x = x.unflatten(1, (-1, self.patch_size)).transpose(2, 3).flatten(2)
         output = self.transformer(
             x,
             prepend_embeds=prepend_inputs,
@@ -381,7 +355,8 @@ class MMDiffusionTransformer(nn.Module):
 
         output = output.transpose(1, 2)[:, :, prepend_length:]
         if self.patch_size > 1:
-            output = rearrange(output, "b (c p) t -> b c (t p)", p=self.patch_size)
+            # [B, c*p, T] -> [B, c, p, T] -> [B, c, T, p] -> [B, c, T*p]
+            output = output.unflatten(1, (-1, self.patch_size)).transpose(2, 3).flatten(2)
         output = self.postprocess_conv(output) + output
 
         return output
@@ -498,15 +473,13 @@ class ContinuousMMDiTTransformer(nn.Module):
         self.proj_mm_tokens = nn.Linear(768, hidden_dim) if dim != 768 else nn.Identity()
         self.proj_mm_seq_len = nn.Linear(384, self._latent_seq_len) if self._latent_seq_len != 384 else nn.Identity()
 
-        base_freq = 1.0
-        latent_rot = compute_rope_rotations(
-            self._latent_seq_len,
-            hidden_dim // num_heads,
-            10000,
-            freq_scaling=base_freq,
-            device=self.device,
-        )
-        self.register_buffer("latent_rot", latent_rot, persistent=False)
+        # AudioX RoPE: interleaved (GPT-J) pair layout, theta=10000.
+        head_dim = hidden_dim // num_heads
+        pos = torch.arange(self._latent_seq_len, dtype=torch.float32, device=self.device)
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=self.device) / head_dim))
+        ang = torch.outer(pos, inv_freq)
+        self.register_buffer("latent_rope_cos", torch.cos(ang), persistent=False)
+        self.register_buffer("latent_rope_sin", torch.sin(ang), persistent=False)
 
     @property
     def device(self):
@@ -534,7 +507,10 @@ class ContinuousMMDiTTransformer(nn.Module):
         mm_tokens = mm_tokens.transpose(1, 2)
 
         time_cond = time_cond.unsqueeze(1)
-        rot = self.latent_rot.to(device=x.device, dtype=self.latent_rot.dtype)
+        rot = (
+            self.latent_rope_cos.to(device=x.device, dtype=x.dtype),
+            self.latent_rope_sin.to(device=x.device, dtype=x.dtype),
+        )
         for block in self.layers:
             x = block(x, mm_tokens, rot, context=time_cond)
 

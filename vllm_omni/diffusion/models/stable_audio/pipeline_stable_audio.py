@@ -36,13 +36,26 @@ from vllm_omni.diffusion.utils.tf_utils import get_transformer_config_kwargs
 logger = init_logger(__name__)
 
 
-def get_stable_audio_post_process_func(od_config: OmniDiffusionConfig):
-    """Post-processing: convert audio tensor to numpy for saving (aligned with OmniVoice)."""
+def get_stable_audio_post_process_func(
+    od_config: OmniDiffusionConfig,
+):
+    """
+    Create post-processing function for Stable Audio output.
 
-    def post_process_func(audio: torch.Tensor, output_type: str = "np"):
+    Converts raw audio tensor to numpy array for saving.
+    """
+
+    def post_process_func(
+        audio: torch.Tensor,
+        output_type: str = "np",
+    ):
+        if output_type == "latent":
+            return audio
         if output_type == "pt":
             return audio
-        return audio.cpu().float().numpy()
+        # Convert to numpy
+        audio_np = audio.cpu().float().numpy()
+        return audio_np
 
     return post_process_func
 

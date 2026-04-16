@@ -447,7 +447,6 @@ class OmniDiffusionConfig:
 
     # Custom pipeline arguments for custom pipelines
     custom_pipeline_args: dict[str, Any] | None = None
-    audiox_reference_audio_path: str | None = None
 
     # Diffusion model loading format
     diffusion_load_format: str = "default"  # "default", "custom_pipeline", "dummy"

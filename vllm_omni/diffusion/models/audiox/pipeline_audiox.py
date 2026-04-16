@@ -11,13 +11,11 @@ import typing as tp
 from collections.abc import Iterable
 from typing import Any, ClassVar
 
-import einops
 import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusers import AutoencoderOobleck
 from diffusers.schedulers import EDMDPMSolverMultistepScheduler
-from einops import rearrange
 from torch import einsum, nn
 from torchvision import transforms
 from transformers import AutoConfig, CLIPVisionModelWithProjection, T5EncoderModel, T5TokenizerFast
@@ -180,9 +178,9 @@ def _normalize_prompts(prompts: list[Any]) -> list[dict[str, Any]]:
 
 # ---------------------------------------------------------------------------
 # Reference media loading: video/image paths or tensors → torch tensors.
-# Video file paths use ``torchcodec.decoders.VideoDecoder``; static images use
-# ``torchvision.io.read_image``. AudioX supports the 6 t2*/v2*/tv2* tasks where
-# audio is the model output, so no audio-input loaders are needed here.
+# Decoding is delegated to torchvision.io (already a dep) — both video and image.
+# AudioX supports the 6 t2*/v2*/tv2* tasks where audio is the model output, so no
+# audio-input loaders are needed here.
 # ---------------------------------------------------------------------------
 
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png"})
@@ -194,35 +192,26 @@ def _load_image_path_torchvision(path: str) -> torch.Tensor:
     return read_image(path).unsqueeze(0)
 
 
-def _load_video_path_torchcodec(
+def _load_video_path_torchvision(
     path: str,
     *,
     target_fps: int,
     duration: float,
     seek_time: float,
 ) -> torch.Tensor:
-    from torchcodec.decoders import VideoDecoder
+    """Decode ``[seek_time, seek_time+duration)`` and uniformly subsample to ``target_fps``."""
+    from torchvision.io import read_video
 
-    decoder = VideoDecoder(
-        path,
-        dimension_order="NCHW",
-        device="cpu",
-        seek_mode="exact",
-    )
-    meta_begin = float(decoder.metadata.begin_stream_seconds or 0.0)
-    meta_end = float(decoder.metadata.end_stream_seconds or 0.0)
-    start_s = max(float(seek_time), meta_begin)
-    if duration > 0:
-        stop_s = min(float(seek_time) + float(duration), meta_end)
-    else:
-        stop_s = meta_end
-    if start_s >= stop_s:
-        raise ValueError(
-            f"No frames in range seek_time={seek_time!r}, duration={duration!r} "
-            f"(stream [{meta_begin}, {meta_end})) for {path!r}"
-        )
-    batch = decoder.get_frames_played_in_range(start_s, stop_s, fps=float(target_fps))
-    return batch.data
+    end_pts = float(seek_time) + float(duration) if duration > 0 else None
+    video, _, info = read_video(path, start_pts=float(seek_time), end_pts=end_pts, pts_unit="sec", output_format="TCHW")
+    if video.shape[0] == 0:
+        raise ValueError(f"No frames in range seek_time={seek_time!r}, duration={duration!r} for {path!r}")
+    src_fps = float(info.get("video_fps") or target_fps)
+    n_target = max(1, int(round(video.shape[0] * float(target_fps) / src_fps)))
+    if n_target >= video.shape[0]:
+        return video
+    indices = torch.linspace(0, video.shape[0] - 1, n_target).round().long()
+    return video[indices]
 
 
 def load_video_source(
@@ -237,7 +226,7 @@ def load_video_source(
         ext = os.path.splitext(source)[1].lower()
         if ext in _IMAGE_EXTS:
             return _load_image_path_torchvision(source)
-        return _load_video_path_torchcodec(
+        return _load_video_path_torchvision(
             source,
             target_fps=target_fps,
             duration=duration,
@@ -393,14 +382,16 @@ class SA_Attention(nn.Module):
     def forward(self, x):
         h = self.heads
         qkv = self.to_qkv(x).chunk(3, dim=-1)
-        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), qkv)
+        # [B, N, h*d] -> [B, h, N, d]
+        q, k, v = (t.unflatten(-1, (h, -1)).transpose(1, 2) for t in qkv)
 
         dots = einsum("b h i d, b h j d -> b h i j", q, k) * self.scale
 
         attn = dots.softmax(dim=-1)
 
         out = einsum("b h i j, b h j d -> b h i d", attn, v)
-        out = rearrange(out, "b h n d -> b n (h d)")
+        # [B, h, N, d] -> [B, N, h*d]
+        out = out.transpose(1, 2).flatten(-2)
         out = self.to_out(out)
         return out
 
@@ -629,14 +620,13 @@ class _MAFCrossAttentionBlock(nn.Module):
             nn.init.zeros_(self.to_out.bias)
 
     def forward(self, experts: torch.Tensor, full_context: torch.Tensor) -> torch.Tensor:
-        nh = self._num_heads
-        q = rearrange(self.to_q(experts), "b e (nh d) -> b nh e d", nh=nh, d=self._head_dim)
-        k, v = self.to_kv(full_context).chunk(2, dim=-1)
-        k = rearrange(k, "b l (nh d) -> b nh l d", nh=nh, d=self._head_dim)
-        v = rearrange(v, "b l (nh d) -> b nh l d", nh=nh, d=self._head_dim)
+        nh, hd = self._num_heads, self._head_dim
+        # [B, *, nh*d] -> [B, nh, *, d]
+        q = self.to_q(experts).unflatten(-1, (nh, hd)).transpose(1, 2)
+        k, v = (t.unflatten(-1, (nh, hd)).transpose(1, 2) for t in self.to_kv(full_context).chunk(2, dim=-1))
         out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False, scale=self._scale)
-        out = rearrange(out, "b nh e d -> b e (nh d)")
-        return self.to_out(out)
+        # [B, nh, e, d] -> [B, e, nh*d]
+        return self.to_out(out.transpose(1, 2).flatten(-2))
 
 
 class _MAFFusionBlock(nn.Module):
@@ -807,7 +797,10 @@ def sample_k(
     generator: torch.Generator | None = None,
     **extra_args,
 ):
-    """Sample with :class:`~diffusers.schedulers.EDMDPMSolverMultistepScheduler` (``sde-dpmsolver++``, ``sigma_data=1``)."""
+    """Sample with :class:`~diffusers.schedulers.EDMDPMSolverMultistepScheduler`.
+
+    Uses ``sde-dpmsolver++`` algorithm with ``sigma_data=1`` (AudioX upstream defaults).
+    """
     dev = device if isinstance(device, torch.device) else torch.device(device)
     sigmas_full = _sigmas_polyexponential(steps, sigma_min, sigma_max, rho, dev)
 
@@ -1198,10 +1191,12 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         with torch.no_grad():
             outputs = self.clip_encoder(pixel_values=pixel_values)
         hidden = outputs.last_hidden_state
-        hidden = einops.rearrange(hidden, "(b t) q h -> (b q) t h", b=batch_size, t=time_length)
+        # [B*T, q, h] -> [B, T, q, h] -> [B, q, T, h] -> [B*q, T, h]
+        hidden = hidden.unflatten(0, (batch_size, time_length)).permute(0, 2, 1, 3).flatten(0, 1)
         hidden = hidden + self.clip_temp_pos_embedding
         hidden = self.clip_temp_transformer(hidden)
-        hidden = einops.rearrange(hidden, "(b q) t h -> b (t q) h", b=batch_size, t=time_length)
+        # [B*q, T, h] -> [B, q, T, h] -> [B, T, q, h] -> [B, T*q, h]
+        hidden = hidden.unflatten(0, (batch_size, -1)).transpose(1, 2).flatten(1, 2)
         hidden = self.clip_proj(hidden.view(-1, self._clip_in_features))
         hidden = hidden.view(batch_size, self._clip_out_features, -1)
 

@@ -7,8 +7,6 @@ Provide a directory with **vLLM-Omni sharded safetensors** (see ``model_index.js
 ``zhangj1an/AudioX`` on Hugging Face. Inference code lives under ``vllm_omni.diffusion.models.audiox``
 (no separate AudioX clone).
 
-Install extra Python deps from the repo root: ``pip install -e ".[audiox]"``
-(see ``README.md``).
 Unless ``DIFFUSION_ATTENTION_BACKEND`` is set, this script defaults it to ``TORCH_SDPA`` so
 ``infer`` / ``run`` work when Flash / fa3-fwd rejects FP16 on the current GPU.
 
@@ -17,8 +15,6 @@ Typical flow::
     cd examples/offline_inference/audiox
     # populate ./audiox_weights (e.g. huggingface-cli download zhangj1an/AudioX …) or set AUDIOX_MODEL
     python end2end.py run
-
-Or use ``./run_audiox_sample_task.sh`` (sets ``PYTHONPATH`` and runs the same command).
 
 Single-task debugging::
 
@@ -167,7 +163,6 @@ def run_single_inference(
     task: str,
     prompt: str,
     video_path: str,
-    reference_audio_path: str,
     output: str,
     sample_rate: int,
     seed: int,
@@ -210,8 +205,6 @@ def run_single_inference(
     if video_path.strip():
         extra["video_path"] = os.path.abspath(os.path.expanduser(video_path))
     extra["audiox_task"] = task
-    if reference_audio_path.strip():
-        extra["audio_path"] = os.path.abspath(os.path.expanduser(reference_audio_path))
     if sigma_min is not None:
         extra["sigma_min"] = float(sigma_min)
     if sigma_max is not None:
@@ -401,7 +394,6 @@ def cmd_run(args: argparse.Namespace) -> None:
             task=task,
             prompt=prompt,
             video_path=vid_arg,
-            reference_audio_path="",
             output=str(final_out / f"{task}.wav"),
             sample_rate=sr,
             seed=seed,
@@ -422,7 +414,6 @@ def cmd_infer(args: argparse.Namespace) -> None:
         task=args.task,
         prompt=args.prompt,
         video_path=args.video_path,
-        reference_audio_path=args.reference_audio_path,
         output=args.output,
         sample_rate=args.sample_rate,
         seed=args.seed,
@@ -450,7 +441,6 @@ def _build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--prompt", type=str, default="")
     pi.add_argument("--negative-prompt", type=str, default="")
     pi.add_argument("--video-path", type=str, default="")
-    pi.add_argument("--reference-audio-path", type=str, default="")
     pi.add_argument("--output", type=str, default="audiox_out.wav")
     pi.add_argument("--sample-rate", type=int, default=48000)
     pi.add_argument("--seed", type=int, default=42)

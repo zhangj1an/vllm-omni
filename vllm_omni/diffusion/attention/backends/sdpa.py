@@ -86,8 +86,6 @@ class SDPAImpl(AttentionImpl):
         prefix: str = "",
         **extra_impl_args,
     ) -> None:
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.causal = causal
         self.softmax_scale = softmax_scale
 
