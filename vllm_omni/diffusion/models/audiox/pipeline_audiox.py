@@ -27,6 +27,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
+from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTransformer
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
@@ -42,13 +43,6 @@ _DEFAULT_UPSTREAM_SIGMA_MIN = 0.3
 _DEFAULT_UPSTREAM_SIGMA_MAX = 500.0
 
 logger = init_logger(__name__)
-
-
-def _default_audiox_device() -> torch.device:
-    """Single-process device; placement for multi-GPU runs is handled outside this module."""
-    if torch.cuda.is_available():
-        return torch.device("cuda", torch.cuda.current_device())
-    return torch.device("cpu")
 
 
 def _load_audiox_bundle_config(model_root: str) -> dict[str, Any]:
@@ -99,16 +93,6 @@ def get_audiox_post_process_func(_od_config: OmniDiffusionConfig):
     return post_process_func
 
 
-def _resolve_audio_source(
-    raw_prompt: Any,
-    extra: dict[str, Any],
-    batch_index: int,
-) -> Any:
-    return _mm_path_lookup(
-        raw_prompt, extra, batch_index, mm_key="audio", paths_key="audio_paths", single_key="audio_path"
-    )
-
-
 def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
     if od_config.model is None:
         raise ValueError("AudioX pre-process requires od_config.model.")
@@ -151,7 +135,7 @@ def get_audiox_pre_process_func(od_config: OmniDiffusionConfig):
                         seek_time=seconds_start,
                     ).to(device=cpu, dtype=torch.float32)
 
-            asrc = _resolve_audio_source(p, extra, i)
+            asrc = _mm_path_lookup(p, extra, i, mm_key="audio", paths_key="audio_paths", single_key="audio_path")
             if asrc is not None:
                 mm["audio"] = prepare_audio_reference(
                     asrc,
@@ -787,15 +771,15 @@ class _MAFFusionBlock(nn.Module):
         h = self.norm1(x)
         q, k, v = self.to_qkv(h).chunk(3, dim=-1)
         nh = self._num_heads
-        q = rearrange(q, "b s (nh d) -> b s nh d", nh=nh)
-        k = rearrange(k, "b s (nh d) -> b s nh d", nh=nh)
-        v = rearrange(v, "b s (nh d) -> b s nh d", nh=nh)
+        q = q.unflatten(-1, (nh, -1))
+        k = k.unflatten(-1, (nh, -1))
+        v = v.unflatten(-1, (nh, -1))
         q_bsn = q.transpose(1, 2).contiguous()
         k_bsn = k.transpose(1, 2).contiguous()
         v_bsn = v.transpose(1, 2).contiguous()
         out = self.self_attn(q_bsn, k_bsn, v_bsn, attn_metadata=None)
         out = out.transpose(1, 2).contiguous()
-        out = rearrange(out, "b s h d -> b s (h d)")
+        out = out.flatten(-2)
         out = self.out_proj(out)
         x = x + out
         x = x + self.ff(self.norm2(x))
@@ -1043,7 +1027,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
     ):
         super().__init__()
         self.od_config = od_config
-        self.device = _default_audiox_device()
+        self.device = get_local_device()
         if od_config.model is None:
             raise ValueError(
                 "AudioXPipeline requires od_config.model (directory with unified safetensors; "
@@ -1187,7 +1171,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         target_len = self._audio_conditioning_samples
         cond_seconds = float(target_len) / float(sample_rate)
         for i, _raw in enumerate(raw_prompts):
-            src = _resolve_audio_source(_raw, extra, i)
+            src = _mm_path_lookup(_raw, extra, i, mm_key="audio", paths_key="audio_paths", single_key="audio_path")
             if src is None:
                 out.append(torch.zeros(2, target_len, device=device, dtype=cond_dtype))
                 continue
@@ -1327,7 +1311,7 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         batch_size, time_length, _, _, _ = original_videos.size()
         is_zero = torch.all(original_videos == 0, dim=(1, 2, 3, 4))
 
-        frames = einops.rearrange(original_videos, "b t c h w -> (b t) c h w")
+        frames = original_videos.flatten(0, 1)
         pixel_values = self._clip_normalize(frames).to(device)
 
         with torch.no_grad():

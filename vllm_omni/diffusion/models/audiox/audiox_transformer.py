@@ -11,6 +11,7 @@ from einops.layers.torch import Rearrange
 from torch import Tensor
 from torch.nn import functional as F
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
 from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
 
 
@@ -31,7 +32,7 @@ def compute_rope_rotations(
 
         rot = torch.einsum("..., f -> ... f", pos, freqs)
         rot = torch.stack([torch.cos(rot), -torch.sin(rot), torch.sin(rot), torch.cos(rot)], dim=-1)
-        rot = rearrange(rot, "n d (i j) -> 1 n d i j", i=2, j=2)
+        rot = rot.unflatten(-1, (2, 2)).unsqueeze(0)
         return rot
 
 
@@ -41,6 +42,7 @@ def apply_rope(x: Tensor, rot: Tensor) -> Tensor:
         _x = _x.view(*_x.shape[:-1], -1, 1, 2)
         x_out = rot[..., 0] * _x[..., 0] + rot[..., 1] * _x[..., 1]
         return x_out.reshape(*x.shape).to(dtype=x.dtype)
+
 
 class AudioXCrossAttention(nn.Module):
     def __init__(self, dim: int, nheads: int):
@@ -73,6 +75,7 @@ class AudioXCrossAttention(nn.Module):
         out = F.scaled_dot_product_attention(q, k, v)
         out = rearrange(out, "b h n d -> b n (h d)").contiguous()
         return out
+
 
 logger = logging.getLogger(__name__)
 
@@ -366,7 +369,7 @@ class MMDiffusionTransformer(nn.Module):
             prepend_length = prepend_inputs.shape[1]
 
         x = self.preprocess_conv(x) + x
-        x = rearrange(x, "b c t -> b t c")
+        x = x.transpose(1, 2)
 
         if self.patch_size > 1:
             x = rearrange(x, "b (t p) c -> b t (c p)", p=self.patch_size)
@@ -376,7 +379,7 @@ class MMDiffusionTransformer(nn.Module):
             context=cross_attn_cond,
         )
 
-        output = rearrange(output, "b t c -> b c t")[:, :, prepend_length:]
+        output = output.transpose(1, 2)[:, :, prepend_length:]
         if self.patch_size > 1:
             output = rearrange(output, "b (c p) t -> b c (t p)", p=self.patch_size)
         output = self.postprocess_conv(output) + output

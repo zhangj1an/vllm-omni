@@ -2172,22 +2172,31 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 gen_params.layers = layers
             if resolution is not None:
                 gen_params.resolution = resolution
-            # Pipeline-specific passthrough fields (e.g. AudioX task controls).
-            for key in (
-                "audiox_task",
-                "seconds_start",
-                "seconds_total",
-                "sigma_min",
-                "sigma_max",
-                "cfg_rescale",
-                "video_path",
-                "video_paths",
-                "audio_path",
-                "audio_paths",
-            ):
-                value = extra_body.get(key)
-                if value is not None:
-                    gen_params.extra_args[key] = value
+            # Pipeline-specific passthrough: any extra_body keys not consumed as first-class
+            # diffusion params flow into ``gen_params.extra_args`` for the receiving pipeline
+            # to pick up (e.g. AudioX task controls). Trade-off: a typo'd first-class param
+            # is silently swallowed instead of raising.
+            _first_class_keys = {
+                "height",
+                "width",
+                "size",
+                "num_inference_steps",
+                "guidance_scale",
+                "true_cfg_scale",
+                "cfg_scale",
+                "seed",
+                "negative_prompt",
+                "num_outputs_per_prompt",
+                "num_frames",
+                "guidance_scale_2",
+                "lora",
+                "layers",
+                "resolution",
+            }
+            for key, value in extra_body.items():
+                if key in _first_class_keys or value is None:
+                    continue
+                gen_params.extra_args[key] = value
 
             # Parse per-request LoRA.
             if lora_body and isinstance(lora_body, dict):
