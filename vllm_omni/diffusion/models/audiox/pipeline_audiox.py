@@ -13,7 +13,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusers import AutoencoderOobleck
-from diffusers.schedulers import EDMDPMSolverMultistepScheduler
 from torch import einsum, nn
 from torchvision import transforms
 from transformers import AutoConfig, CLIPVisionModelWithProjection, T5EncoderModel, T5TokenizerFast
@@ -41,13 +40,11 @@ logger = init_logger(__name__)
 
 
 def _load_audiox_bundle_config(model_root: str) -> dict[str, Any]:
-    """Load the upstream AudioX bundle config from ``<model_root>/config.json``."""
     with open(os.path.join(os.path.abspath(model_root), "config.json"), encoding="utf-8") as f:
         return json.load(f)
 
 
 def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int:
-    """``latent_seq_len × downsampling_ratio`` from the ``audio_prompt`` conditioning config."""
     configs = model_config["model"]["conditioning"]["configs"]
     cfg = next(c["config"] for c in configs if c["id"] == "audio_prompt")
     return int(cfg["latent_seq_len"]) * int(cfg["pretransform_config"]["config"]["downsampling_ratio"])
@@ -93,13 +90,6 @@ def _normalize_prompts(prompts: list[Any]) -> list[dict[str, Any]]:
     return [_normalize_prompt_item(raw, i) for i, raw in enumerate(prompts)]
 
 
-# ---------------------------------------------------------------------------
-# Reference media loading: video/image paths or tensors → torch tensors.
-# Decoding is delegated to torchvision.io (already a dep) — both video and image.
-# AudioX supports the 6 t2*/v2*/tv2* tasks where audio is the model output, so no
-# audio-input loaders are needed here.
-# ---------------------------------------------------------------------------
-
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png"})
 
 
@@ -116,7 +106,6 @@ def _load_video_path_torchvision(
     duration: float,
     seek_time: float,
 ) -> torch.Tensor:
-    """Decode ``[seek_time, seek_time+duration)`` and uniformly subsample to ``target_fps``."""
     from torchvision.io import read_video
 
     end_pts = float(seek_time) + float(duration) if duration > 0 else None
@@ -138,7 +127,6 @@ def load_video_source(
     duration: float,
     seek_time: float = 0.0,
 ) -> torch.Tensor:
-    """Load video/image/tensor/ndarray into a torch tensor [T, C, H, W] when possible."""
     if isinstance(source, str):
         ext = os.path.splitext(source)[1].lower()
         if ext in _IMAGE_EXTS:
@@ -206,11 +194,6 @@ def prepare_video_reference(
 
 
 def _load_audio_source(source: Any, *, target_sample_rate: int | None = None) -> torch.Tensor:
-    """Path / tensor / ndarray → ``[channels, samples]`` float32, optionally resampled.
-
-    Audio paths use ``torchaudio.load`` (ffmpeg-backed via torchcodec); only loaded when
-    a path is actually passed, so tensor / ndarray callers don't need ffmpeg installed.
-    """
     if isinstance(source, str):
         import torchaudio
 
@@ -233,30 +216,19 @@ def prepare_audio_reference(
     seconds_total: float,
     device: torch.device,
 ) -> torch.Tensor:
-    """Load a reference audio clip into ``[2, target_len]`` at ``model_sample_rate``."""
     target_len = int(model_sample_rate * seconds_total)
     start = int(model_sample_rate * seconds_start)
     wav = _load_audio_source(source, target_sample_rate=model_sample_rate)
     if wav.dim() == 1:
         wav = wav.unsqueeze(0)
-    # Force 2 channels: mono → stereo (repeat); >2 → keep first 2.
     if wav.shape[0] == 1:
         wav = wav.repeat(2, 1)
     elif wav.shape[0] > 2:
         wav = wav[:2]
-    # Crop / left-pad to target_len.
     wav = wav[:, start : start + target_len]
     if wav.shape[1] < target_len:
         wav = F.pad(wav, (target_len - wav.shape[1], 0))
     return wav.to(device=device, dtype=torch.float32)
-
-
-# ---------------------------------------------------------------------------
-# Multi-modal conditioning (T5 / CLIP encoders are wired directly in the pipeline;
-# this section provides the audio VAE adapter, the SA_* temporal stack used for
-# CLIP video fusion, and the MultiConditioner batch assembly).
-# Manual ``SA_Attention`` (einsum + softmax) is intentional: SDPA here drifts vs upstream.
-# ---------------------------------------------------------------------------
 
 
 class SA_PreNorm(nn.Module):
@@ -272,7 +244,8 @@ class SA_PreNorm(nn.Module):
 class SA_FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim):
         super().__init__()
-        # Dropout p=0 preserves upstream ``net.{2,4}`` state-dict keys; inference is identical to no dropout.
+        # Dropout p=0 preserves upstream ``net.{2,4}`` state-dict keys so the upstream weights
+        # load into the right slots; inference is identical to no dropout.
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
@@ -309,7 +282,6 @@ class SA_Attention(nn.Module):
     def forward(self, x):
         h = self.heads
         qkv = self.to_qkv(x).chunk(3, dim=-1)
-        # [B, N, h*d] -> [B, h, N, d]
         q, k, v = (t.unflatten(-1, (h, -1)).transpose(1, 2) for t in qkv)
 
         dots = einsum("b h i d, b h j d -> b h i j", q, k) * self.scale
@@ -317,7 +289,6 @@ class SA_Attention(nn.Module):
         attn = dots.softmax(dim=-1)
 
         out = einsum("b h i j, b h j d -> b h i d", attn, v)
-        # [B, h, N, d] -> [B, N, h*d]
         out = out.transpose(1, 2).flatten(-2)
         out = self.to_out(out)
         return out
@@ -345,13 +316,6 @@ class SA_Transformer(nn.Module):
         return self.norm(x)
 
 
-# ---------------------------------------------------------------------------
-# Audio VAE adapter: encodes waveform via AutoencoderOobleck → cond_dim tokens.
-# AudioX bundle ships a dedicated copy of the VAE weights for this conditioner;
-# they are loaded under the legacy ``conditioner.conditioners.audio_prompt.*`` prefix
-# (remapped in ``AudioXPipeline.load_weights``).
-# ---------------------------------------------------------------------------
-
 _AUDIOX_OOBLECK_CONFIG = {
     "audio_channels": 2,
     "channel_multiples": [1, 2, 4, 8, 16],
@@ -370,8 +334,6 @@ def _build_audiox_oobleck(scaling_factor: float = 1.0) -> AutoencoderOobleck:
 
 
 class AudioVaePromptAdapter(nn.Module):
-    """Encode the (zero-tensor) audio prompt via Oobleck VAE, project to ``cond_dim`` tokens."""
-
     def __init__(self, *, cond_dim: int, latent_seq_len: int = 215):
         super().__init__()
         self.pretransform = _build_audiox_oobleck()
@@ -386,11 +348,6 @@ class AudioVaePromptAdapter(nn.Module):
         latents = self.proj_out(latents)
         ones = torch.ones(latents.shape[0], latents.shape[2], device=latents.device)
         return latents, ones
-
-
-# ---------------------------------------------------------------------------
-# MAF (Multimodal Adaptive Fusion) block
-# ---------------------------------------------------------------------------
 
 
 class _MAFCrossAttentionBlock(nn.Module):
@@ -409,11 +366,9 @@ class _MAFCrossAttentionBlock(nn.Module):
 
     def forward(self, experts: torch.Tensor, full_context: torch.Tensor) -> torch.Tensor:
         nh, hd = self._num_heads, self._head_dim
-        # [B, *, nh*d] -> [B, nh, *, d]
         q = self.to_q(experts).unflatten(-1, (nh, hd)).transpose(1, 2)
         k, v = (t.unflatten(-1, (nh, hd)).transpose(1, 2) for t in self.to_kv(full_context).chunk(2, dim=-1))
         out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False, scale=self._scale)
-        # [B, nh, e, d] -> [B, e, nh*d]
         return self.to_out(out.transpose(1, 2).flatten(-2))
 
 
@@ -574,27 +529,23 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         self._model_root = os.path.abspath(od_config.model)
         self._model_config = _load_audiox_bundle_config(self._model_root)
 
-        # --- Build sub-modules directly (no wrapper) ---
         model_config = self._model_config["model"]
         diffusion_config = model_config["diffusion"]
 
         self.model = MMDiffusionTransformer(**dict(diffusion_config["config"]))
 
-        # Audio conditioner: VAE-encode the audio prompt (zeros for the 6 t2*/v2*/tv2* tasks).
         cond_configs = {c["id"]: c.get("config", {}) for c in model_config["conditioning"]["configs"]}
         self.audio_vae_adapter = AudioVaePromptAdapter(
             cond_dim=int(model_config["conditioning"]["cond_dim"]),
             latent_seq_len=int(cond_configs["audio_prompt"]["latent_seq_len"]),
         )
 
-        # T5 text encoder — used directly, no adapter wrapper.
         t5_name = cond_configs.get("text_prompt", {}).get("t5_model_name", "t5-base")
         self._t5_max_length = int(cond_configs.get("text_prompt", {}).get("max_length", 128))
         self.tokenizer = T5TokenizerFast.from_pretrained(t5_name)
         t5_config = AutoConfig.from_pretrained(t5_name)
         self.text_encoder = T5EncoderModel(t5_config).train(False).requires_grad_(False).to(torch.float16)
 
-        # CLIP video encoder + temporal fusion — used directly, no adapter wrapper.
         clip_name = cond_configs.get("video_prompt", {}).get("clip_model_name", "openai/clip-vit-base-patch32")
         clip_config = AutoConfig.from_pretrained(clip_name)
         vision_config = getattr(clip_config, "vision_config", clip_config)
@@ -613,8 +564,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
         self._clip_normalize = transforms.Compose([transforms.Normalize(mean=list(_CLIP_MEAN), std=list(_CLIP_STD))])
 
-        # Final-decode VAE: separate Oobleck instance from the conditioner-side one;
-        # bundle ships its own weights under the ``pretransform.*`` prefix.
         self.pretransform = _build_audiox_oobleck(
             scaling_factor=float(model_config["pretransform"].get("scale", 1.0)),
         )
@@ -656,8 +605,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Bundle stores the audio conditioner under the legacy MultiConditioner prefix.
-        # Remap to our flat ``audio_vae_adapter.*`` attribute (which holds the same submodules).
         _legacy_prefix = "conditioner.conditioners.audio_prompt."
 
         def _remap(items):
@@ -666,7 +613,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
                     name = "audio_vae_adapter." + name[len(_legacy_prefix) :]
                 # T5EncoderModel aliases encoder.embed_tokens.weight ↔ shared.weight (same Parameter).
                 # AutoWeightsLoader's name lookup sees only shared.weight; rename so the bundle
-                # tensor actually lands on the (shared) embedding instead of being silently dropped.
+                # tensor actually lands on the (shared) embedding instead of being silently dropped,
+                # which would leave the T5 token embedding table at its random init and produce noise.
                 if name == "text_encoder.encoder.embed_tokens.weight":
                     name = "text_encoder.shared.weight"
                 yield name, tensor
@@ -714,12 +662,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         device: torch.device,
         cond_dtype: torch.dtype = torch.float32,
     ) -> list[torch.Tensor]:
-        """Per-prompt audio conditioning tensors.
-
-        Looks up an optional reference clip via ``multi_modal_data['audio']`` /
-        ``extra_args['audio_path']`` / ``extra_args['audio_paths'][i]``; falls back to
-        silence (zeros) — the architecture's ``audio_prompt`` slot always needs a tensor.
-        """
         target_len = self._audio_conditioning_samples
         sample_rate = self._sample_rate
         seconds_start = float(extra.get("seconds_start", 0.0))
@@ -774,7 +716,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         return tensors
 
     def get_conditioning_inputs(self, conditioning_tensors: dict[str, Any], negative: bool = False) -> dict[str, Any]:
-        """Extract and fuse cross-attention / global conditioning from encoded tensors."""
         cross_attention_input: list[torch.Tensor] = []
         cross_attention_masks: list[torch.Tensor] = []
 
@@ -819,17 +760,14 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         generator: torch.Generator,
         cfg_rescale: float,
     ) -> torch.Tensor:
-        """End-to-end audio sampling: noise → DPM++ sampler → VAE decode."""
         device = self.device
         model_dtype = next(self.model.parameters()).dtype
 
-        # Latent noise.
         latent_len = self._sample_size // int(self.pretransform.hop_length)
         noise = torch.randn(
             [batch_size, self.io_channels, latent_len], device=device, generator=generator, dtype=model_dtype
         )
 
-        # Conditioning (cast to model dtype).
         def _cast(d: dict[str, Any]) -> dict[str, Any]:
             return {k: (v.type(model_dtype) if isinstance(v, torch.Tensor) else v) for k, v in d.items()}
 
@@ -841,9 +779,9 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         )
 
         # k-diffusion VDenoiser + sample_dpmpp_3m_sde, matching upstream AudioX exactly.
-        # Upstream diffusers' EDMDPMSolverMultistepScheduler doesn't implement the same
-        # v-prediction preconditioning and stochastic update rule, so the old path produced
-        # a fixed ~861 Hz resonance independent of conditioning.
+        # diffusers' EDMDPMSolverMultistepScheduler uses different v-prediction preconditioning
+        # and a different stochastic update rule, which here produces a fixed ~861 Hz resonance
+        # in the decoded audio regardless of conditioning.
         import k_diffusion as K
 
         outer = self
@@ -876,12 +814,10 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
                 denoiser, x, sigmas, disable=True, extra_args={},
             )
 
-        # VAE decode.
         vae = self.pretransform.to(device=sampled.device, dtype=torch.float32).eval()
         return vae.decode(sampled.to(torch.float32) * float(vae.audiox_scaling_factor), return_dict=True).sample
 
     def _encode_text(self, texts: list[str], device: torch.device) -> list[torch.Tensor]:
-        """Tokenize and encode text with T5 directly."""
         self.text_encoder.to(device)
         encoded = self.tokenizer(
             texts,
@@ -901,7 +837,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         return [embeddings, attention_mask]
 
     def _encode_video(self, video_list: list[dict], device: torch.device) -> list[torch.Tensor]:
-        """Encode video with CLIP + temporal transformer + sync fusion."""
         self.clip_encoder.to(device).eval()
 
         video_tensors = [item["video_tensors"] for item in video_list]
@@ -917,11 +852,9 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         with torch.no_grad():
             outputs = self.clip_encoder(pixel_values=pixel_values)
         hidden = outputs.last_hidden_state
-        # [B*T, q, h] -> [B, T, q, h] -> [B, q, T, h] -> [B*q, T, h]
         hidden = hidden.unflatten(0, (batch_size, time_length)).permute(0, 2, 1, 3).flatten(0, 1)
         hidden = hidden + self.clip_temp_pos_embedding
         hidden = self.clip_temp_transformer(hidden)
-        # [B*q, T, h] -> [B, q, T, h] -> [B, T, q, h] -> [B, T*q, h]
         hidden = hidden.unflatten(0, (batch_size, -1)).transpose(1, 2).flatten(1, 2)
         hidden = self.clip_proj(hidden.view(-1, self._clip_in_features))
         hidden = hidden.view(batch_size, self._clip_out_features, -1)
