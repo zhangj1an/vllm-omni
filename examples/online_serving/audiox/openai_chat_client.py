@@ -22,8 +22,8 @@ import sys
 from pathlib import Path
 
 import requests
+import soundfile
 import torch
-import torchaudio
 
 VIDEO_TASKS = frozenset({"v2a", "v2m", "tv2a", "tv2m"})
 TEXT_TASKS = frozenset({"t2a", "t2m", "tv2a", "tv2m"})
@@ -41,7 +41,8 @@ def _save_wav(audio: torch.Tensor, path: Path, sample_rate: int) -> None:
     audio = audio.to(torch.float32)
     audio = audio / audio.abs().max().clamp(min=1e-8)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torchaudio.save(str(path), audio.clamp(-1.0, 1.0).cpu(), sample_rate, encoding="PCM_S", bits_per_sample=16)
+    # soundfile expects channels-last (T, C); project convention is (C, T).
+    soundfile.write(str(path), audio.clamp(-1.0, 1.0).cpu().T.numpy(), sample_rate, subtype="PCM_16")
 
 
 def _decode_audio_from_response(body: dict) -> tuple[torch.Tensor, int]:
@@ -49,8 +50,8 @@ def _decode_audio_from_response(body: dict) -> tuple[torch.Tensor, int]:
         audio_obj = choice.get("message", {}).get("audio")
         if not (isinstance(audio_obj, dict) and audio_obj.get("data")):
             continue
-        wav, sr = torchaudio.load(io.BytesIO(base64.b64decode(audio_obj["data"])))
-        return wav, sr
+        data, sr = soundfile.read(io.BytesIO(base64.b64decode(audio_obj["data"])), dtype="float32", always_2d=True)
+        return torch.from_numpy(data).transpose(0, 1), sr
     brief = {k: v for k, v in body.items() if k != "choices"}
     raise RuntimeError(f"no audio in response message.audio: {brief}")
 

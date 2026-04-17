@@ -14,9 +14,10 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import numpy as np
+import soundfile
 import torch
 import torch.nn.functional as F
-import torchaudio
+import torchaudio.functional as taF
 import torchsde
 from diffusers import AutoencoderOobleck
 from torch import einsum, nn
@@ -229,10 +230,11 @@ def prepare_audio_reference(
     target_len = int(model_sample_rate * seconds_total)
     start = int(model_sample_rate * seconds_start)
     if isinstance(source, str):
-        wav, sr = torchaudio.load(_materialize_media_source(source))
+        data, sr = soundfile.read(_materialize_media_source(source), dtype="float32", always_2d=True)
+        # soundfile returns channels-last (T, C); project convention is (C, T).
+        wav = torch.from_numpy(data).transpose(0, 1).contiguous()
         if sr != model_sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, model_sample_rate)
-        wav = wav.float()
+            wav = taF.resample(wav, sr, model_sample_rate)
     elif isinstance(source, torch.Tensor):
         wav = source.float()
     elif isinstance(source, np.ndarray):

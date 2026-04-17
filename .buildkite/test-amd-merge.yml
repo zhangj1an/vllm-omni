@@ -55,7 +55,6 @@ steps:
 #     - export VLLM_LOGGING_LEVEL=DEBUG
 #     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
 #     - timeout 20m pytest -s -v tests/e2e/offline_inference/test_stable_audio_expansion.py -m "advanced_model and diffusion and L4" --run-level advanced_model
-#     - timeout 20m pytest -s -v tests/e2e/offline_inference/test_audiox_model.py
 
 - label: "Diffusion Cache Backend Test"
   agent_pool: mi325_1

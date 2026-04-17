@@ -21,8 +21,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import soundfile
 import torch
-import torchaudio
 import torchaudio.functional as TF
 
 from vllm_omni.entrypoints.omni import Omni
@@ -105,7 +105,8 @@ def video_path_for(task: str, video_dir: Path) -> Path:
 def save_wav(audio: torch.Tensor, path: Path, sample_rate: int) -> None:
     """Write 16-bit PCM WAV. ``audio`` is ``[channels, samples]`` float in [-1, 1]."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    torchaudio.save(str(path), audio.clamp(-1.0, 1.0).cpu(), sample_rate, encoding="PCM_S", bits_per_sample=16)
+    # soundfile expects channels-last (T, C) for multichannel, so transpose from our (C, T).
+    soundfile.write(str(path), audio.clamp(-1.0, 1.0).cpu().T.numpy(), sample_rate, subtype="PCM_16")
 
 
 def generate_audio(omni: Omni, task: str, video_dir: Path, args: argparse.Namespace) -> torch.Tensor:

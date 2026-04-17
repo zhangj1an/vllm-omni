@@ -40,6 +40,7 @@ def _audiox_server_cases(model: str):
     ]
 
 
+@pytest.mark.core_model
 @pytest.mark.diffusion
 @pytest.mark.parametrize("omni_server", _audiox_server_cases(AUDIOX_TEST_MODEL), indirect=True)
 def test_audiox_t2a_online(omni_server: OmniServer, openai_client: OpenAIClientHandler) -> None:
