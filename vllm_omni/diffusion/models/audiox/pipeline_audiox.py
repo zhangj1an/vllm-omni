@@ -635,10 +635,39 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         _legacy_prefix = "conditioner.conditioners.audio_prompt."
 
+        # DiT self-attn QKV: bundle stores weights with last dim (h, d, qkv) interleaved
+        # (i.e. Q/K/V rows for the same head sit next to each other), whereas
+        # QKVParallelLinear expects stacked [Q|K|V] blocks along the output axis.
+        # Reshape once at load time so the parallel loader can consume them.
+        nheads = int(self._model_config["model"]["diffusion"]["config"]["num_heads"])
+        embed_dim = int(self._model_config["model"]["diffusion"]["config"]["embed_dim"])
+        # Bundle's `num_heads` == the SelfAttention `nheads` arg. In the DiT that's
+        # `dim_heads = embed_dim / config.num_heads = 64`, giving head_dim=24.
+        total_heads = embed_dim // nheads
+        head_dim = embed_dim // total_heads
+        qkv_mid = ".attn.qkv."
+        to_kv_mid = ".cross_attn.to_kv."
+
+        def _restack_interleaved(tensor: torch.Tensor, n_slots: int) -> torch.Tensor:
+            """Turn bundle's (h, d, slot) interleaved-last-dim layout into stacked [slot|slot|...]."""
+            if tensor.dim() == 2:  # weight: (out, in)
+                out, inp = tensor.shape
+                assert out == n_slots * total_heads * head_dim, (out, n_slots, total_heads, head_dim)
+                return (
+                    tensor.view(total_heads, head_dim, n_slots, inp).permute(2, 0, 1, 3).reshape(out, inp).contiguous()
+                )
+            out = tensor.shape[0]
+            assert out == n_slots * total_heads * head_dim
+            return tensor.view(total_heads, head_dim, n_slots).permute(2, 0, 1).reshape(out).contiguous()
+
         def _remap(items):
             for name, tensor in items:
                 if name.startswith(_legacy_prefix):
                     name = "audio_vae_adapter." + name[len(_legacy_prefix) :]
+                if qkv_mid in name and (name.endswith(".weight") or name.endswith(".bias")):
+                    tensor = _restack_interleaved(tensor, 3)
+                elif to_kv_mid in name and (name.endswith(".weight") or name.endswith(".bias")):
+                    tensor = _restack_interleaved(tensor, 2)
                 yield name, tensor
 
         loaded = AutoWeightsLoader(self).load_weights(_remap(weights))
