@@ -1858,6 +1858,7 @@ class OmniResponse:
     e2e_latency: float | None = None
     success: bool = False
     error_message: str | None = None
+    cached_tokens: int | None = None
 
 
 @dataclass
@@ -2352,6 +2353,11 @@ class OpenAIClientHandler:
                 # Process text content
                 if hasattr(choice.message, "content") and choice.message.content is not None:
                     text_content = choice.message.content
+
+            # Extract cached_tokens for prefix caching tests
+            usage = getattr(chat_completion, "usage", None)
+            if usage and (details := getattr(usage, "prompt_tokens_details", None)):
+                result.cached_tokens = details.cached_tokens
 
             # Calculate end-to-end latency
             result.e2e_latency = time.perf_counter() - start_time
@@ -3042,6 +3048,10 @@ class OmniRunner:
             video_padding_token = "<|video_pad|>"
             image_padding_token = "<|image_pad|>"
             audio_padding_token = "<|audio_pad|>"
+        elif "Ming-flash-omni" in self.model_name:
+            video_padding_token = "<VIDEO>"
+            image_padding_token = "<IMAGE>"
+            audio_padding_token = "<AUDIO>"
 
         if isinstance(prompts, str):
             prompts = [prompts]
