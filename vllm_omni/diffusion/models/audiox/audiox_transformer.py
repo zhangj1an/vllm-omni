@@ -21,6 +21,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 
@@ -41,6 +42,13 @@ class AudioXCrossAttention(nn.Module):
         )
         self.q_norm = AudioXRMSNorm(head_dim)
         self.k_norm = AudioXRMSNorm(head_dim)
+        local_nheads = nheads // get_tensor_model_parallel_world_size()
+        self.attn = Attention(
+            num_heads=local_nheads,
+            head_size=head_dim,
+            softmax_scale=head_dim**-0.5,
+            causal=False,
+        )
 
     def forward(self, x: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
         tp = get_tensor_model_parallel_world_size()
@@ -48,22 +56,19 @@ class AudioXCrossAttention(nn.Module):
         d = self.head_dim
 
         q_flat, _ = self.to_q(x)
-        q = q_flat.unflatten(-1, (local_h, d)).transpose(1, 2)
+        q = q_flat.unflatten(-1, (local_h, d))
         kv_flat, _ = self.to_kv(context)
         v_flat, k_flat = kv_flat.chunk(2, dim=-1)
         # Upstream `CrossAttention.forward` unpacks `pre_attention()` as `q, v, k = ...` (K/V
         # swapped), AND only normalizes the first chunk of to_kv via k_norm. Trained weights
         # depend on this quirk: first chunk normalized -> V; second chunk unnormalized -> K.
-        v = v_flat.unflatten(-1, (local_h, d)).transpose(1, 2)
-        k = k_flat.unflatten(-1, (local_h, d)).transpose(1, 2)
+        v = v_flat.unflatten(-1, (local_h, d))
+        k = k_flat.unflatten(-1, (local_h, d))
         q = self.q_norm(q)
         v = self.k_norm(v)
 
-        q = q.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
-        out = F.scaled_dot_product_attention(q, k, v)
-        out = out.transpose(1, 2).flatten(-2).contiguous()
+        out = self.attn(q.contiguous(), k.contiguous(), v.contiguous(), attn_metadata=None)
+        out = out.flatten(-2).contiguous()
         if tp > 1:
             out = tensor_model_parallel_all_gather(out, dim=-1)
         return out
@@ -187,13 +192,16 @@ class AudioXMMDiTSelfAttention(nn.Module):
         self.k_norm = AudioXRMSNorm(head_dim)
 
         self.rope = RotaryEmbedding(is_neox_style=False)
+        self.attn = Attention(
+            num_heads=self.qkv.num_heads,
+            head_size=head_dim,
+            softmax_scale=head_dim**-0.5,
+            causal=False,
+        )
 
     def apply_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        q = q.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
-        out = F.scaled_dot_product_attention(q, k, v)
-        out = out.transpose(1, 2).flatten(-2).contiguous()
+        out = self.attn(q.contiguous(), k.contiguous(), v.contiguous(), attn_metadata=None)
+        out = out.flatten(-2).contiguous()
         # Downstream linear1/ffn are replicated and expect full hidden dim.
         if get_tensor_model_parallel_world_size() > 1:
             out = tensor_model_parallel_all_gather(out, dim=-1)
@@ -205,16 +213,16 @@ class AudioXMMDiTSelfAttention(nn.Module):
         d = self.head_dim
         q_size = local_h * d
         q, k, v = qkv.split([q_size, q_size, q_size], dim=-1)
-        q = q.unflatten(-1, (local_h, d)).transpose(1, 2)
-        k = k.unflatten(-1, (local_h, d)).transpose(1, 2)
-        v = v.unflatten(-1, (local_h, d)).transpose(1, 2)
+        q = q.unflatten(-1, (local_h, d))
+        k = k.unflatten(-1, (local_h, d))
+        v = v.unflatten(-1, (local_h, d))
         q = self.q_norm(q)
         k = self.k_norm(k)
 
         if rot is not None:
             cos, sin = rot
-            q = self.rope(q.transpose(1, 2), cos, sin).transpose(1, 2)
-            k = self.rope(k.transpose(1, 2), cos, sin).transpose(1, 2)
+            q = self.rope(q, cos, sin)
+            k = self.rope(k, cos, sin)
 
         return q, k, v
 
