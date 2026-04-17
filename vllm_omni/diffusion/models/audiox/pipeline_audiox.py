@@ -664,15 +664,14 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             for name, tensor in items:
                 if name.startswith(_legacy_prefix):
                     name = "audio_vae_adapter." + name[len(_legacy_prefix) :]
+                # T5EncoderModel aliases encoder.embed_tokens.weight ↔ shared.weight (same Parameter).
+                # AutoWeightsLoader's name lookup sees only shared.weight; rename so the bundle
+                # tensor actually lands on the (shared) embedding instead of being silently dropped.
+                if name == "text_encoder.encoder.embed_tokens.weight":
+                    name = "text_encoder.shared.weight"
                 yield name, tensor
 
         loaded = AutoWeightsLoader(self).load_weights(_remap(weights))
-
-        # T5EncoderModel ties shared.weight ↔ encoder.embed_tokens.weight.
-        # The unified safetensors omits shared.weight; reconstruct the tie.
-        if hasattr(self.text_encoder, "shared"):
-            self.text_encoder.shared.weight = self.text_encoder.encoder.embed_tokens.weight
-            loaded.add("text_encoder.shared.weight")
 
         self.to(torch.float32)
         self.eval().requires_grad_(False)
@@ -841,39 +840,45 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             else {}
         )
 
-        # Polyexponential sigma schedule (k-diffusion convention; AudioX upstream).
-        ramp = torch.linspace(1, 0, steps, device=device)
-        sigmas = torch.exp(ramp * (math.log(sigma_max) - math.log(sigma_min)) + math.log(sigma_min))
-        sigmas = torch.cat([sigmas, sigmas.new_zeros(1)])  # trailing 0 (final step targets clean latents)
+        # k-diffusion VDenoiser + sample_dpmpp_3m_sde, matching upstream AudioX exactly.
+        # Upstream diffusers' EDMDPMSolverMultistepScheduler doesn't implement the same
+        # v-prediction preconditioning and stochastic update rule, so the old path produced
+        # a fixed ~861 Hz resonance independent of conditioning.
+        import k_diffusion as K
 
-        # diffusers EDM-DPM++ sampler with our custom sigma schedule.
-        scheduler = EDMDPMSolverMultistepScheduler(
-            sigma_min=sigma_min,
-            sigma_max=sigma_max,
-            sigma_data=1.0,
-            sigma_schedule="exponential",
-            prediction_type="v_prediction",
-            algorithm_type="sde-dpmsolver++",
-            solver_order=2,
-            solver_type="midpoint",
-            final_sigmas_type="zero",
-        )
-        scheduler.set_timesteps(steps, device=device)
-        scheduler.sigmas = sigmas.detach().cpu().to(torch.float32)
-        scheduler.timesteps = scheduler.precondition_noise(sigmas[:-1]).detach().cpu().to(torch.float32)
-        scheduler.num_inference_steps = steps
+        outer = self
 
-        latents = noise * sigmas[0].to(noise)
-        for t in scheduler.timesteps:
-            latent_in = scheduler.scale_model_input(latents, t)
-            sigma = scheduler.sigmas[scheduler.step_index].to(latent_in)
-            t_cond = (sigma * latent_in.new_ones([latent_in.shape[0]])).atan() * (2 / math.pi)
-            v_pred = self.model(latent_in, t_cond, **cond, **neg, cfg_scale=guidance_scale, scale_phi=cfg_rescale)
-            latents = scheduler.step(v_pred, t, latents, generator=generator).prev_sample
+        class _ModelFn(nn.Module):
+            def forward(self, x: torch.Tensor, t_cond: torch.Tensor, **_: Any) -> torch.Tensor:
+                return outer.model(
+                    x, t_cond,
+                    cross_attn_cond=cond["cross_attn_cond"],
+                    cross_attn_cond_mask=cond["cross_attn_cond_mask"],
+                    global_embed=None,
+                    negative_cross_attn_cond=neg.get("negative_cross_attn_cond"),
+                    negative_cross_attn_mask=neg.get("negative_cross_attn_mask"),
+                    negative_global_embed=None,
+                    cfg_scale=guidance_scale,
+                    scale_phi=cfg_rescale,
+                )
+
+        denoiser = K.external.VDenoiser(_ModelFn())
+
+        sigmas = K.sampling.get_sigmas_polyexponential(steps, sigma_min, sigma_max, 1.0, device=device)
+        x = noise * sigmas[0]
+        if steps <= 1:
+            # k-diffusion's sample_dpmpp_3m_sde has an UnboundLocalError at steps=1
+            # (the `h` update is inside an `else` branch). Single-step just returns the denoised.
+            s_in = x.new_ones([x.shape[0]])
+            sampled = denoiser(x, sigmas[0] * s_in)
+        else:
+            sampled = K.sampling.sample_dpmpp_3m_sde(
+                denoiser, x, sigmas, disable=True, extra_args={},
+            )
 
         # VAE decode.
-        vae = self.pretransform.to(device=latents.device, dtype=torch.float32).eval()
-        return vae.decode(latents.to(torch.float32) * float(vae.audiox_scaling_factor), return_dict=True).sample
+        vae = self.pretransform.to(device=sampled.device, dtype=torch.float32).eval()
+        return vae.decode(sampled.to(torch.float32) * float(vae.audiox_scaling_factor), return_dict=True).sample
 
     def _encode_text(self, texts: list[str], device: torch.device) -> list[torch.Tensor]:
         """Tokenize and encode text with T5 directly."""

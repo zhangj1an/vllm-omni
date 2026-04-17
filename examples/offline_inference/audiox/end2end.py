@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import time
+import urllib.request
 import wave
 from pathlib import Path
 
@@ -31,21 +31,23 @@ from vllm_omni.platforms import current_omni_platform
 
 ROOT = Path(__file__).resolve().parent
 
-# Pexels sample clip (CC0). See https://www.pexels.com/license/.
-_PEXELS_SAMPLE_URL = "https://www.pexels.com/download/video/5871756/"
-_PEXELS_HEADERS = (
-    "Referrer: https://www.pexels.com/\r\n"
-    "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36\r\n"
-)
-
 SAMPLE_PROMPTS: dict[str, str] = {
-    "t2a": "Soft indoor room tone, faint fabric rustle, and gentle cat breathing or purr in a quiet home",
-    "t2m": "Playful light acoustic or piano motif for an intimate close-up of a curious tabby cat indoors",
+    "t2a": "Fireworks burst twice, followed by a period of silence before a clock begins ticking.",
+    "t2m": "Uplifting ukulele tune for a travel vlog",
     "v2a": "",
     "v2m": "",
-    "tv2a": "Quiet domestic ambience—upholstery, subtle shifts, and close-up foley matching a tabby cat on soft grey fabric",
-    "tv2m": "Warm whimsical instrumental for a cute tabby cat close-up with playful upside-down framing",
+    "tv2a": "drum beating sound and human talking",
+    "tv2m": "uplifting music matching the scene",
+}
+
+# AudioX project-page sample clips. v2a/tv2a share one video; v2m/tv2m share another.
+_V2A_URL = "https://zeyuet.github.io/AudioX/static/samples/samples-v2/V2A/JIemsK_0lXc_000364_compressed.mp4"
+_V2M_URL = "https://zeyuet.github.io/AudioX/static/samples/V2M/1XeBotOFqHA.mp4"
+SAMPLE_VIDEO_URLS: dict[str, str] = {
+    "v2a": _V2A_URL,
+    "tv2a": _V2A_URL,
+    "v2m": _V2M_URL,
+    "tv2m": _V2M_URL,
 }
 ALL_TASKS = ("t2a", "t2m", "v2a", "v2m", "tv2a", "tv2m")
 VIDEO_TASKS = frozenset({"v2a", "v2m", "tv2a", "tv2m"})
@@ -58,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="AudioX offline end-to-end (6 t2*/v2*/tv2* tasks).")
     p.add_argument("--model", type=str, default=str(ROOT / "audiox_weights"), help="Path to AudioX weight bundle.")
     p.add_argument("--tasks", nargs="+", default=list(ALL_TASKS), choices=ALL_TASKS, help="Subset of tasks to run.")
-    p.add_argument("--video", type=str, default=str(ROOT / "assets" / "sample_animal.mp4"), help="Video for v2*/tv2*.")
+    p.add_argument("--video-dir", type=str, default=str(ROOT / "assets"), help="Where to cache downloaded sample videos for v2*/tv2*.")
     p.add_argument(
         "--reference-audio", type=str, default="", help="Optional audio clip for audio-conditioned generation."
     )
@@ -82,28 +84,17 @@ def require_bundle(weights_dir: Path) -> None:
         )
 
 
-def download_sample_video(dest: Path, trim_seconds: int = 5) -> None:
-    """Stream a Pexels clip via ffmpeg and trim. No-op if ``dest`` exists."""
+def download_sample_video(url: str, dest: Path) -> None:
+    """Fetch a sample mp4 to ``dest``. No-op if ``dest`` exists."""
     if dest.is_file():
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading sample video → {dest}")
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-headers",
-            _PEXELS_HEADERS,
-            "-i",
-            _PEXELS_SAMPLE_URL,
-            "-t",
-            str(trim_seconds),
-            "-c",
-            "copy",
-            str(dest),
-        ],
-        check=True,
-    )
+    print(f"Downloading sample video {url} → {dest}")
+    urllib.request.urlretrieve(url, dest)
+
+
+def video_path_for(task: str, video_dir: Path) -> Path:
+    return video_dir / Path(SAMPLE_VIDEO_URLS[task]).name
 
 
 def save_wav(audio: torch.Tensor, path: Path, sample_rate: int) -> None:
@@ -117,10 +108,10 @@ def save_wav(audio: torch.Tensor, path: Path, sample_rate: int) -> None:
         wf.writeframes(pcm.tobytes())
 
 
-def generate_audio(omni: Omni, task: str, video: str, args: argparse.Namespace) -> torch.Tensor:
+def generate_audio(omni: Omni, task: str, video_dir: Path, args: argparse.Namespace) -> torch.Tensor:
     extra: dict = {"audiox_task": task, "seconds_start": 0.0, "seconds_total": float(args.seconds_total)}
     if task in VIDEO_TASKS:
-        extra["video_path"] = video
+        extra["video_path"] = str(video_path_for(task, video_dir))
     if args.reference_audio:
         extra["audio_path"] = args.reference_audio
     prompt = SAMPLE_PROMPTS[task] if task in TEXT_TASKS else ""
@@ -150,10 +141,12 @@ def main() -> None:
     args = parse_args()
     weights_dir = Path(args.model).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
+    video_dir = Path(args.video_dir).expanduser().resolve()
     require_bundle(weights_dir)
 
-    if any(t in VIDEO_TASKS for t in args.tasks):
-        download_sample_video(Path(args.video))
+    for task in args.tasks:
+        if task in VIDEO_TASKS:
+            download_sample_video(SAMPLE_VIDEO_URLS[task], video_path_for(task, video_dir))
 
     model_sr = int(json.loads((weights_dir / "config.json").read_text()).get("sample_rate", 48000))
 
@@ -167,7 +160,7 @@ def main() -> None:
     for task in args.tasks:
         print(f"=== {task} ===", flush=True)
         t0 = time.perf_counter()
-        audio = generate_audio(omni, task, args.video, args)
+        audio = generate_audio(omni, task, video_dir, args)
         if model_sr != args.sample_rate:
             audio = TF.resample(audio, model_sr, args.sample_rate)
         out_path = output_dir / f"{task}.wav"

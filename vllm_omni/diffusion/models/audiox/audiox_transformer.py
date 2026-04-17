@@ -40,10 +40,15 @@ class AudioXCrossAttention(nn.Module):
         # [B, N, h*d] -> [B, h, N, d]
         q = self.to_q(x).unflatten(-1, (self.nheads, head_dim)).transpose(1, 2)
         # [B, N, h*d*2] -> [B, h, N, d, 2] -> chunk -> two [B, h, N, d, 1] -> squeeze -> [B, h, N, d]
+        # Upstream `CrossAttention.forward` unpacks `pre_attention()` as `q, v, k = ...` (K and V
+        # swapped), AND `pre_attention` only normalizes the FIRST chunk of `to_kv` via `k_norm`.
+        # Net effect: the first chunk is normalized and used as V in attention; the second chunk is
+        # used as K unnormalized. Trained weights depend on this quirk, so reproduce it here.
         kv = self.to_kv(context).unflatten(-1, (self.nheads, head_dim, 2)).permute(0, 2, 1, 3, 4)
-        k, v = (t.squeeze(-1) for t in kv.chunk(2, dim=-1))
+        first, second = (t.squeeze(-1) for t in kv.chunk(2, dim=-1))
         q = self.q_norm(q)
-        k = self.k_norm(k)
+        v = self.k_norm(first)  # normalized first chunk is used as V
+        k = second  # unnormalized second chunk is used as K
 
         q = q.contiguous()
         k = k.contiguous()
