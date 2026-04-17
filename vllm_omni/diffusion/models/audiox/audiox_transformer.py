@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 import typing as tp
 from collections.abc import Iterable
+from typing import Any
 
 import torch
 import torch.nn as nn
-from torch import Tensor
 from torch.nn import functional as F
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -25,16 +25,6 @@ from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 
 
-def apply_rope_bhsd(
-    rope: RotaryEmbedding,
-    x: Tensor,
-    cos: Tensor,
-    sin: Tensor,
-) -> Tensor:
-    """Apply shared interleaved RoPE to ``[B, H, S, D]`` tensors (transposes for the kernel)."""
-    return rope(x.transpose(1, 2), cos, sin).transpose(1, 2)
-
-
 class AudioXCrossAttention(nn.Module):
     def __init__(self, dim: int, nheads: int, prefix: str = ""):
         super().__init__()
@@ -43,9 +33,8 @@ class AudioXCrossAttention(nn.Module):
         head_dim = dim // nheads
         self.head_dim = head_dim
 
-        # Shards heads across TP ranks. Bundle weights for to_q are already in (head, dim)-stacked
-        # order; to_kv has (head, dim, VK-index) interleaved and is restacked to [V|K] in the
-        # pipeline's load_weights before reaching MergedColumnParallelLinear.
+        # to_kv bundle weights arrive in (head, dim, VK-index) interleaved order; pipeline's
+        # load_weights restacks them to [V|K] before MergedColumnParallelLinear consumes them.
         self.to_q = ColumnParallelLinear(dim, dim, bias=False, gather_output=False, prefix=f"{prefix}.to_q")
         self.to_kv = MergedColumnParallelLinear(
             input_size=dim, output_sizes=[dim, dim], bias=False, gather_output=False, prefix=f"{prefix}.to_kv"
@@ -58,16 +47,13 @@ class AudioXCrossAttention(nn.Module):
         local_h = self.nheads // tp
         d = self.head_dim
 
-        # [B, N, local_h*d] -> [B, local_h, N, d]
         q_flat, _ = self.to_q(x)
         q = q_flat.unflatten(-1, (local_h, d)).transpose(1, 2)
-        # to_kv outputs [V_local | K_local] concatenated along last dim, each of size local_h*d
         kv_flat, _ = self.to_kv(context)
         v_flat, k_flat = kv_flat.chunk(2, dim=-1)
-        # Upstream `CrossAttention.forward` unpacks `pre_attention()` as `q, v, k = ...` (K and V
-        # swapped), AND `pre_attention` only normalizes the FIRST chunk of to_kv via `k_norm`.
-        # Trained weights depend on this quirk: first chunk is normalized and used as V; second
-        # chunk is used as K unnormalized.
+        # Upstream `CrossAttention.forward` unpacks `pre_attention()` as `q, v, k = ...` (K/V
+        # swapped), AND only normalizes the first chunk of to_kv via k_norm. Trained weights
+        # depend on this quirk: first chunk normalized -> V; second chunk unnormalized -> K.
         v = v_flat.unflatten(-1, (local_h, d)).transpose(1, 2)
         k = k_flat.unflatten(-1, (local_h, d)).transpose(1, 2)
         q = self.q_norm(q)
@@ -77,7 +63,6 @@ class AudioXCrossAttention(nn.Module):
         k = k.contiguous()
         v = v.contiguous()
         out = F.scaled_dot_product_attention(q, k, v)
-        # [B, local_h, N, d] -> [B, N, local_h*d]
         out = out.transpose(1, 2).flatten(-2).contiguous()
         if tp > 1:
             out = tensor_model_parallel_all_gather(out, dim=-1)
@@ -105,7 +90,6 @@ class AudioXMMChannelLastConv1d(nn.Conv1d):
 
 
 def _slice_weight_loader_out(param: nn.Parameter, loaded: torch.Tensor) -> None:
-    """Output-channel shard (column-parallel). loaded: (out_total, in, k); param: (out_local, in, k)."""
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
     out_total = loaded.shape[0]
@@ -115,7 +99,6 @@ def _slice_weight_loader_out(param: nn.Parameter, loaded: torch.Tensor) -> None:
 
 
 def _slice_weight_loader_in(param: nn.Parameter, loaded: torch.Tensor) -> None:
-    """Input-channel shard (row-parallel). loaded: (out, in_total, k); param: (out, in_local, k)."""
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
     in_total = loaded.shape[1]
@@ -125,8 +108,6 @@ def _slice_weight_loader_in(param: nn.Parameter, loaded: torch.Tensor) -> None:
 
 
 class _ColumnParallelChannelLastConv1d(AudioXMMChannelLastConv1d):
-    """Shards output channels across TP ranks. Input is full; output is the local shard."""
-
     def __init__(self, in_channels: int, out_channels_total: int, **kwargs: Any):
         tp_size = get_tensor_model_parallel_world_size()
         assert out_channels_total % tp_size == 0, (out_channels_total, tp_size)
@@ -135,8 +116,6 @@ class _ColumnParallelChannelLastConv1d(AudioXMMChannelLastConv1d):
 
 
 class _RowParallelChannelLastConv1d(AudioXMMChannelLastConv1d):
-    """Shards input channels across TP ranks. Output is local; forward all-reduces."""
-
     def __init__(self, in_channels_total: int, out_channels: int, **kwargs: Any):
         tp_size = get_tensor_model_parallel_world_size()
         assert in_channels_total % tp_size == 0, (in_channels_total, tp_size)
@@ -164,7 +143,6 @@ class AudioXMMConvFeedForward(nn.Module):
         hidden_dim = int(2 * hidden_dim / 3)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        # SwiGLU TP: w1 + w3 column-parallel (output hidden sharded), w2 row-parallel (input hidden sharded).
         self.w1 = _ColumnParallelChannelLastConv1d(
             dim, hidden_dim, bias=False, kernel_size=kernel_size, padding=padding
         )
@@ -196,9 +174,8 @@ class AudioXMMDiTSelfAttention(nn.Module):
 
         head_dim = dim // nheads
         self.head_dim = head_dim
-        # Sharded along head dim. Bundle weights arrive in interleaved (h, d, qkv) layout;
-        # they're pre-transformed to stacked [Q|K|V] by the pipeline's `load_weights` before
-        # being dispatched here, so QKVParallelLinear's weight_loader can consume them.
+        # Bundle weights arrive in interleaved (h, d, qkv) layout; pipeline's load_weights
+        # restacks to [Q|K|V] before QKVParallelLinear's weight_loader consumes them.
         self.qkv = QKVParallelLinear(
             hidden_size=dim,
             head_size=head_dim,
@@ -216,7 +193,6 @@ class AudioXMMDiTSelfAttention(nn.Module):
         k = k.contiguous()
         v = v.contiguous()
         out = F.scaled_dot_product_attention(q, k, v)
-        # [B, local_h, N, d] -> [B, N, local_h*d]
         out = out.transpose(1, 2).flatten(-2).contiguous()
         # Downstream linear1/ffn are replicated and expect full hidden dim.
         if get_tensor_model_parallel_world_size() > 1:
@@ -229,7 +205,6 @@ class AudioXMMDiTSelfAttention(nn.Module):
         d = self.head_dim
         q_size = local_h * d
         q, k, v = qkv.split([q_size, q_size, q_size], dim=-1)
-        # [B, N, local_h*d] -> [B, local_h, N, d]
         q = q.unflatten(-1, (local_h, d)).transpose(1, 2)
         k = k.unflatten(-1, (local_h, d)).transpose(1, 2)
         v = v.unflatten(-1, (local_h, d)).transpose(1, 2)
@@ -238,8 +213,8 @@ class AudioXMMDiTSelfAttention(nn.Module):
 
         if rot is not None:
             cos, sin = rot
-            q = apply_rope_bhsd(self.rope, q, cos, sin)
-            k = apply_rope_bhsd(self.rope, k, cos, sin)
+            q = self.rope(q.transpose(1, 2), cos, sin).transpose(1, 2)
+            k = self.rope(k.transpose(1, 2), cos, sin).transpose(1, 2)
 
         return q, k, v
 
@@ -392,11 +367,6 @@ class MMDiffusionTransformer(nn.Module):
         nn.init.zeros_(self.postprocess_conv.weight)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights from a pretrained model.
-
-        Returns:
-            Set of parameter names that were successfully loaded.
-        """
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
@@ -448,7 +418,6 @@ class MMDiffusionTransformer(nn.Module):
         x = x.transpose(1, 2)
 
         if self.patch_size > 1:
-            # [B, T*p, c] -> [B, T, p, c] -> [B, T, c, p] -> [B, T, c*p]
             x = x.unflatten(1, (-1, self.patch_size)).transpose(2, 3).flatten(2)
         output = self.transformer(
             x,
@@ -458,7 +427,6 @@ class MMDiffusionTransformer(nn.Module):
 
         output = output.transpose(1, 2)[:, :, prepend_length:]
         if self.patch_size > 1:
-            # [B, c*p, T] -> [B, c, p, T] -> [B, c, T, p] -> [B, c, T*p]
             output = output.unflatten(1, (-1, self.patch_size)).transpose(2, 3).flatten(2)
         output = self.postprocess_conv(output) + output
 
@@ -479,7 +447,6 @@ class MMDiffusionTransformer(nn.Module):
         scale_phi=0.0,
         **kwargs,
     ):
-        """Inference-only forward; unknown keyword arguments are ignored."""
         assert not causal, "Causal mode is not supported for DiffusionTransformer"
 
         if cfg_scale != 1.0 and (cross_attn_cond is not None or prepend_cond is not None):

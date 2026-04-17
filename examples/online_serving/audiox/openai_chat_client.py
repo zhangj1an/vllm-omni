@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import mimetypes
 import sys
-import wave
 from pathlib import Path
 
-import numpy as np
 import requests
 import torch
+import torchaudio
 
 VIDEO_TASKS = frozenset({"v2a", "v2m", "tv2a", "tv2m"})
 TEXT_TASKS = frozenset({"t2a", "t2m", "tv2a", "tv2m"})
@@ -39,31 +39,18 @@ def _to_data_url(path: str) -> str:
 
 def _save_wav(audio: torch.Tensor, path: Path, sample_rate: int) -> None:
     audio = audio.to(torch.float32)
-    peak = audio.abs().max().clamp(min=1e-8)
-    audio = audio / peak
-    pcm = (audio.clamp(-1.0, 1.0) * 32767).to(torch.int16).T.contiguous().cpu().numpy()
+    audio = audio / audio.abs().max().clamp(min=1e-8)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(pcm.shape[1])
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm.tobytes())
+    torchaudio.save(str(path), audio.clamp(-1.0, 1.0).cpu(), sample_rate, encoding="PCM_S", bits_per_sample=16)
 
 
 def _decode_audio_from_response(body: dict) -> tuple[torch.Tensor, int]:
-    import io
-
     for choice in body.get("choices", []):
         audio_obj = choice.get("message", {}).get("audio")
         if not (isinstance(audio_obj, dict) and audio_obj.get("data")):
             continue
-        raw = base64.b64decode(audio_obj["data"])
-        with wave.open(io.BytesIO(raw), "rb") as wf:
-            sr = wf.getframerate()
-            nch = wf.getnchannels()
-            frames = wf.readframes(wf.getnframes())
-        arr = np.frombuffer(frames, dtype=np.int16).reshape(-1, nch).astype(np.float32) / 32768.0
-        return torch.from_numpy(arr).transpose(0, 1), sr
+        wav, sr = torchaudio.load(io.BytesIO(base64.b64decode(audio_obj["data"])))
+        return wav, sr
     brief = {k: v for k, v in body.items() if k != "choices"}
     raise RuntimeError(f"no audio in response message.audio: {brief}")
 

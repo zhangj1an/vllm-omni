@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import tempfile
 from collections.abc import Iterable
@@ -12,11 +13,11 @@ from typing import Any, ClassVar
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-import k_diffusion as K
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torchaudio
+import torchsde
 from diffusers import AutoencoderOobleck
 from torch import einsum, nn
 from torchvision import transforms
@@ -124,10 +125,6 @@ def _materialize_media_source(source: str) -> str:
     return source
 
 
-def _load_image_path_torchvision(path: str) -> torch.Tensor:
-    return read_image(_materialize_media_source(path)).unsqueeze(0)
-
-
 def _load_video_path_torchvision(
     path: str,
     *,
@@ -158,7 +155,7 @@ def load_video_source(
     if isinstance(source, str):
         ext = os.path.splitext(source)[1].lower()
         if ext in _IMAGE_EXTS:
-            return _load_image_path_torchvision(source)
+            return read_image(_materialize_media_source(source)).unsqueeze(0)
         return _load_video_path_torchvision(
             source,
             target_fps=target_fps,
@@ -221,19 +218,6 @@ def prepare_video_reference(
     return frames
 
 
-def _load_audio_source(source: Any, *, target_sample_rate: int | None = None) -> torch.Tensor:
-    if isinstance(source, str):
-        wav, sr = torchaudio.load(_materialize_media_source(source))
-        if target_sample_rate is not None and sr != target_sample_rate:
-            wav = torchaudio.functional.resample(wav, sr, target_sample_rate)
-        return wav.float()
-    if isinstance(source, torch.Tensor):
-        return source.float()
-    if isinstance(source, np.ndarray):
-        return torch.from_numpy(source).float()
-    raise TypeError(f"Unsupported audio source type: {type(source)!r}")
-
-
 def prepare_audio_reference(
     source: Any,
     *,
@@ -244,7 +228,17 @@ def prepare_audio_reference(
 ) -> torch.Tensor:
     target_len = int(model_sample_rate * seconds_total)
     start = int(model_sample_rate * seconds_start)
-    wav = _load_audio_source(source, target_sample_rate=model_sample_rate)
+    if isinstance(source, str):
+        wav, sr = torchaudio.load(_materialize_media_source(source))
+        if sr != model_sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, model_sample_rate)
+        wav = wav.float()
+    elif isinstance(source, torch.Tensor):
+        wav = source.float()
+    elif isinstance(source, np.ndarray):
+        wav = torch.from_numpy(source).float()
+    else:
+        raise TypeError(f"Unsupported audio source type: {type(source)!r}")
     if wav.dim() == 1:
         wav = wav.unsqueeze(0)
     if wav.shape[0] == 1:
@@ -529,6 +523,29 @@ class MAF_Block(nn.Module):
             "text": final_t,
             "audio": final_a,
         }
+
+
+class _BrownianTreeNoiseSampler:
+    """Brownian-tree noise sampler for DPM-Solver++ SDE, ported from k-diffusion.
+
+    Returns a scaled Brownian increment between two sigma levels; the tree is indexed by
+    transformed ``sigma`` (here linear, same as k-diffusion's default), so re-querying
+    identical (sigma, sigma_next) pairs returns the same noise.
+    """
+
+    def __init__(self, x: torch.Tensor, sigma_min: torch.Tensor, sigma_max: torch.Tensor):
+        t0, t1 = torch.as_tensor(sigma_min), torch.as_tensor(sigma_max)
+        if t0 > t1:
+            t0, t1 = t1, t0
+        seed = int(torch.randint(0, 2**63 - 1, (1,), device="cpu").item())
+        self._tree = torchsde.BrownianTree(t0, torch.zeros_like(x), t1, entropy=seed)
+
+    def __call__(self, sigma: torch.Tensor, sigma_next: torch.Tensor) -> torch.Tensor:
+        t0, t1 = torch.as_tensor(sigma), torch.as_tensor(sigma_next)
+        sign = 1.0 if t0 < t1 else -1.0
+        if sign == -1.0:
+            t0, t1 = t1, t0
+        return self._tree(t0, t1) * sign / (t1 - t0).abs().sqrt()
 
 
 class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMixin):
@@ -829,44 +846,83 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             else {}
         )
 
-        # k-diffusion VDenoiser + sample_dpmpp_3m_sde, matching upstream AudioX exactly.
+        # Inlined k-diffusion VDenoiser + sample_dpmpp_3m_sde, matching upstream AudioX exactly.
         # diffusers' EDMDPMSolverMultistepScheduler uses different v-prediction preconditioning
         # and a different stochastic update rule, which here produces a fixed ~861 Hz resonance
         # in the decoded audio regardless of conditioning.
-        outer = self
-
-        class _ModelFn(nn.Module):
-            def forward(self, x: torch.Tensor, t_cond: torch.Tensor, **_: Any) -> torch.Tensor:
-                return outer.model(
-                    x,
-                    t_cond,
-                    cross_attn_cond=cond["cross_attn_cond"],
-                    cross_attn_cond_mask=cond["cross_attn_cond_mask"],
-                    global_embed=None,
-                    negative_cross_attn_cond=neg.get("negative_cross_attn_cond"),
-                    negative_cross_attn_mask=neg.get("negative_cross_attn_mask"),
-                    negative_global_embed=None,
-                    cfg_scale=guidance_scale,
-                    scale_phi=cfg_rescale,
-                )
-
-        denoiser = K.external.VDenoiser(_ModelFn())
-
-        sigmas = K.sampling.get_sigmas_polyexponential(steps, sigma_min, sigma_max, 1.0, device=device)
-        x = noise * sigmas[0]
-        if steps <= 1:
-            # k-diffusion's sample_dpmpp_3m_sde has an UnboundLocalError at steps=1
-            # (the `h` update is inside an `else` branch). Single-step just returns the denoised.
-            s_in = x.new_ones([x.shape[0]])
-            sampled = denoiser(x, sigmas[0] * s_in)
-        else:
-            sampled = K.sampling.sample_dpmpp_3m_sde(
-                denoiser,
-                x,
-                sigmas,
-                disable=True,
-                extra_args={},
+        def denoise(x_in: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+            # VDenoiser preconditioning with sigma_data = 1.0.
+            s2 = sigma * sigma
+            c_skip = 1.0 / (s2 + 1.0)
+            c_out = -sigma / (s2 + 1.0).sqrt()
+            c_in = 1.0 / (s2 + 1.0).sqrt()
+            t_cond = sigma.atan() * (2.0 / math.pi)
+            v = self.model(
+                x_in * c_in,
+                t_cond,
+                cross_attn_cond=cond["cross_attn_cond"],
+                cross_attn_cond_mask=cond["cross_attn_cond_mask"],
+                global_embed=None,
+                negative_cross_attn_cond=neg.get("negative_cross_attn_cond"),
+                negative_cross_attn_mask=neg.get("negative_cross_attn_mask"),
+                negative_global_embed=None,
+                cfg_scale=guidance_scale,
+                scale_phi=cfg_rescale,
             )
+            return v * c_out + x_in * c_skip
+
+        # Polyexponential sigma schedule with rho=1, trailing zero (k-diffusion convention).
+        ramp = torch.linspace(1.0, 0.0, steps, device=device)
+        sigmas = torch.cat(
+            [
+                torch.exp(ramp * (math.log(sigma_max) - math.log(sigma_min)) + math.log(sigma_min)),
+                torch.zeros(1, device=device),
+            ]
+        )
+        x = noise * sigmas[0]
+
+        # Single-step path: no DPM++ history to accumulate; just emit the denoised estimate.
+        if steps <= 1:
+            s_in = x.new_ones([x.shape[0]])
+            sampled = denoise(x, sigmas[0] * s_in)
+        else:
+            # DPM-Solver++(3M) SDE loop (k-diffusion sample_dpmpp_3m_sde), eta=1.0, s_noise=1.0.
+            noise_sampler = _BrownianTreeNoiseSampler(x, sigmas[sigmas > 0].min(), sigmas.max())
+            s_in = x.new_ones([x.shape[0]])
+            denoised_1 = denoised_2 = None
+            h_1 = h_2 = None
+            eta = 1.0
+            for i in range(len(sigmas) - 1):
+                denoised = denoise(x, sigmas[i] * s_in)
+                if sigmas[i + 1] == 0:
+                    x = denoised
+                else:
+                    t_, s_ = -sigmas[i].log(), -sigmas[i + 1].log()
+                    h = s_ - t_
+                    h_eta = h * (eta + 1)
+                    x = torch.exp(-h_eta) * x + (-h_eta).expm1().neg() * denoised
+                    if h_2 is not None:
+                        r0 = h_1 / h
+                        r1 = h_2 / h
+                        d1_0 = (denoised - denoised_1) / r0
+                        d1_1 = (denoised_1 - denoised_2) / r1
+                        d1 = d1_0 + (d1_0 - d1_1) * r0 / (r0 + r1)
+                        d2 = (d1_0 - d1_1) / (r0 + r1)
+                        phi_2 = h_eta.neg().expm1() / h_eta + 1
+                        phi_3 = phi_2 / h_eta - 0.5
+                        x = x + phi_2 * d1 - phi_3 * d2
+                    elif h_1 is not None:
+                        r = h_1 / h
+                        d = (denoised - denoised_1) / r
+                        phi_2 = h_eta.neg().expm1() / h_eta + 1
+                        x = x + phi_2 * d
+                    x = (
+                        x
+                        + noise_sampler(sigmas[i], sigmas[i + 1]) * sigmas[i + 1] * (-2 * h * eta).expm1().neg().sqrt()
+                    )
+                denoised_1, denoised_2 = denoised, denoised_1
+                h_1, h_2 = h, h_1
+            sampled = x
 
         vae = self.pretransform.to(device=sampled.device, dtype=torch.float32).eval()
         return vae.decode(sampled.to(torch.float32) * float(vae.audiox_scaling_factor), return_dict=True).sample

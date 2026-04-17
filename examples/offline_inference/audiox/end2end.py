@@ -19,10 +19,10 @@ import argparse
 import json
 import time
 import urllib.request
-import wave
 from pathlib import Path
 
 import torch
+import torchaudio
 import torchaudio.functional as TF
 
 from vllm_omni.entrypoints.omni import Omni
@@ -60,7 +60,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="AudioX offline end-to-end (6 t2*/v2*/tv2* tasks).")
     p.add_argument("--model", type=str, default=str(ROOT / "audiox_weights"), help="Path to AudioX weight bundle.")
     p.add_argument("--tasks", nargs="+", default=list(ALL_TASKS), choices=ALL_TASKS, help="Subset of tasks to run.")
-    p.add_argument("--video-dir", type=str, default=str(ROOT / "assets"), help="Where to cache downloaded sample videos for v2*/tv2*.")
+    p.add_argument(
+        "--video-dir",
+        type=str,
+        default=str(ROOT / "assets"),
+        help="Where to cache downloaded sample videos for v2*/tv2*.",
+    )
     p.add_argument(
         "--reference-audio", type=str, default="", help="Optional audio clip for audio-conditioned generation."
     )
@@ -99,13 +104,8 @@ def video_path_for(task: str, video_dir: Path) -> Path:
 
 def save_wav(audio: torch.Tensor, path: Path, sample_rate: int) -> None:
     """Write 16-bit PCM WAV. ``audio`` is ``[channels, samples]`` float in [-1, 1]."""
-    pcm = (audio.clamp(-1.0, 1.0) * 32767).to(torch.int16).T.contiguous().cpu().numpy()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(pcm.shape[1])
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm.tobytes())
+    torchaudio.save(str(path), audio.clamp(-1.0, 1.0).cpu(), sample_rate, encoding="PCM_S", bits_per_sample=16)
 
 
 def generate_audio(omni: Omni, task: str, video_dir: Path, args: argparse.Namespace) -> torch.Tensor:
