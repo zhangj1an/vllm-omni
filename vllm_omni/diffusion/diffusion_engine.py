@@ -206,6 +206,12 @@ class DiffusionEngine:
 
             if supports_audio_output(self.od_config.model_class_name):
                 request_audio_payload = outputs[0] if len(outputs) == 1 else outputs
+                audio_mm: dict[str, Any] = {"audio": request_audio_payload}
+                if model_audio_sample_rate is None:
+                    model_cls = DiffusionModelRegistry._try_load_model_cls(self.od_config.model_class_name)
+                    model_audio_sample_rate = getattr(model_cls, "audio_sample_rate", None)
+                if model_audio_sample_rate is not None:
+                    audio_mm["audio_sample_rate"] = model_audio_sample_rate
                 return [
                     OmniRequestOutput.from_diffusion(
                         request_id=request_id,
@@ -217,7 +223,7 @@ class DiffusionEngine:
                         trajectory_timesteps=output.trajectory_timesteps,
                         trajectory_log_probs=output.trajectory_log_probs,
                         trajectory_decoded=output.trajectory_decoded,
-                        multimodal_output={"audio": request_audio_payload},
+                        multimodal_output=audio_mm,
                         final_output_type="audio",
                         stage_durations=output.stage_durations,
                         peak_memory_mb=output.peak_memory_mb,

@@ -3,18 +3,24 @@
 
 from __future__ import annotations
 
+import base64
 import json
-import math
 import os
+import tempfile
 from collections.abc import Iterable
 from typing import Any, ClassVar
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
+import k_diffusion as K
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchaudio
 from diffusers import AutoencoderOobleck
 from torch import einsum, nn
 from torchvision import transforms
+from torchvision.io import read_image, read_video
 from transformers import AutoConfig, CLIPVisionModelWithProjection, T5EncoderModel, T5TokenizerFast
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import AutoWeightsLoader
@@ -93,10 +99,33 @@ def _normalize_prompts(prompts: list[Any]) -> list[dict[str, Any]]:
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png"})
 
 
-def _load_image_path_torchvision(path: str) -> torch.Tensor:
-    from torchvision.io import read_image
+def _materialize_media_source(source: str) -> str:
+    """Return a local filesystem path for ``source``.
 
-    return read_image(path).unsqueeze(0)
+    Accepts: a local path, a ``data:<mime>;base64,...`` URI (inline payload), or an
+    ``http(s)://`` URL. Anything non-local is fetched into a NamedTemporaryFile and that
+    path is returned; callers don't need to clean the tempfile up (the OS does on exit).
+    """
+    if source.startswith("data:"):
+        _, _, payload = source.partition(",")
+        raw = base64.b64decode(payload)
+        f = tempfile.NamedTemporaryFile(prefix="audiox_media_", suffix=".bin", delete=False)
+        f.write(raw)
+        f.close()
+        return f.name
+    parsed = urlparse(source)
+    if parsed.scheme in ("http", "https"):
+        with urlopen(source) as resp:
+            data = resp.read()
+        f = tempfile.NamedTemporaryFile(prefix="audiox_media_", suffix=".bin", delete=False)
+        f.write(data)
+        f.close()
+        return f.name
+    return source
+
+
+def _load_image_path_torchvision(path: str) -> torch.Tensor:
+    return read_image(_materialize_media_source(path)).unsqueeze(0)
 
 
 def _load_video_path_torchvision(
@@ -106,8 +135,7 @@ def _load_video_path_torchvision(
     duration: float,
     seek_time: float,
 ) -> torch.Tensor:
-    from torchvision.io import read_video
-
+    path = _materialize_media_source(path)
     end_pts = float(seek_time) + float(duration) if duration > 0 else None
     video, _, info = read_video(path, start_pts=float(seek_time), end_pts=end_pts, pts_unit="sec", output_format="TCHW")
     if video.shape[0] == 0:
@@ -195,9 +223,7 @@ def prepare_video_reference(
 
 def _load_audio_source(source: Any, *, target_sample_rate: int | None = None) -> torch.Tensor:
     if isinstance(source, str):
-        import torchaudio
-
-        wav, sr = torchaudio.load(source)
+        wav, sr = torchaudio.load(_materialize_media_source(source))
         if target_sample_rate is not None and sr != target_sample_rate:
             wav = torchaudio.functional.resample(wav, sr, target_sample_rate)
         return wav.float()
@@ -507,6 +533,8 @@ class MAF_Block(nn.Module):
 
 class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMixin):
     support_audio_output: ClassVar[bool] = True
+    audio_sample_rate: ClassVar[int] = 44100
+    audio_channels: ClassVar[int] = 2
     _PROFILER_TARGETS: ClassVar[list[str]] = ["diffuse"]
     _CLIP_SYNC_DURATION_SEC: ClassVar[float] = 10.0
     _VIDEO_SYNC_FRAME_COUNT: ClassVar[int] = 240
@@ -611,12 +639,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             for name, tensor in items:
                 if name.startswith(_legacy_prefix):
                     name = "audio_vae_adapter." + name[len(_legacy_prefix) :]
-                # T5EncoderModel aliases encoder.embed_tokens.weight ↔ shared.weight (same Parameter).
-                # AutoWeightsLoader's name lookup sees only shared.weight; rename so the bundle
-                # tensor actually lands on the (shared) embedding instead of being silently dropped,
-                # which would leave the T5 token embedding table at its random init and produce noise.
-                if name == "text_encoder.encoder.embed_tokens.weight":
-                    name = "text_encoder.shared.weight"
                 yield name, tensor
 
         loaded = AutoWeightsLoader(self).load_weights(_remap(weights))
@@ -782,14 +804,13 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         # diffusers' EDMDPMSolverMultistepScheduler uses different v-prediction preconditioning
         # and a different stochastic update rule, which here produces a fixed ~861 Hz resonance
         # in the decoded audio regardless of conditioning.
-        import k_diffusion as K
-
         outer = self
 
         class _ModelFn(nn.Module):
             def forward(self, x: torch.Tensor, t_cond: torch.Tensor, **_: Any) -> torch.Tensor:
                 return outer.model(
-                    x, t_cond,
+                    x,
+                    t_cond,
                     cross_attn_cond=cond["cross_attn_cond"],
                     cross_attn_cond_mask=cond["cross_attn_cond_mask"],
                     global_embed=None,
@@ -811,7 +832,11 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             sampled = denoiser(x, sigmas[0] * s_in)
         else:
             sampled = K.sampling.sample_dpmpp_3m_sde(
-                denoiser, x, sigmas, disable=True, extra_args={},
+                denoiser,
+                x,
+                sigmas,
+                disable=True,
+                extra_args={},
             )
 
         vae = self.pretransform.to(device=sampled.device, dtype=torch.float32).eval()
@@ -939,7 +964,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         if generator is None:
             raise ValueError("AudioXPipeline requires sampling_params.generator.")
         target_fps = self._target_fps
-        sample_rate = self._sample_rate
         cond_dtype = self._conditioning_dtype()
 
         sync_features = torch.zeros(1, self._VIDEO_SYNC_FRAME_COUNT, 768, device=device, dtype=cond_dtype)

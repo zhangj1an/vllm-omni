@@ -2172,31 +2172,14 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 gen_params.layers = layers
             if resolution is not None:
                 gen_params.resolution = resolution
-            # Pipeline-specific passthrough: any extra_body keys not consumed as first-class
-            # diffusion params flow into ``gen_params.extra_args`` for the receiving pipeline
-            # to pick up (e.g. AudioX task controls). Trade-off: a typo'd first-class param
-            # is silently swallowed instead of raising.
-            _first_class_keys = {
-                "height",
-                "width",
-                "size",
-                "num_inference_steps",
-                "guidance_scale",
-                "true_cfg_scale",
-                "cfg_scale",
-                "seed",
-                "negative_prompt",
-                "num_outputs_per_prompt",
-                "num_frames",
-                "guidance_scale_2",
-                "lora",
-                "layers",
-                "resolution",
-            }
-            for key, value in extra_body.items():
-                if key in _first_class_keys or value is None:
-                    continue
-                gen_params.extra_args[key] = value
+
+            # Pipeline-agnostic escape hatch (mirrors ``extra_params`` on the /v1/videos
+            # endpoint in ``serving_video.py``): a single reserved ``extra_args`` dict in
+            # ``extra_body`` flows straight into ``gen_params.extra_args``, with no keys
+            # hardcoded here.
+            extra_args_body = extra_body.get("extra_args")
+            if isinstance(extra_args_body, dict):
+                gen_params.extra_args.update(extra_args_body)
 
             # Parse per-request LoRA.
             if lora_body and isinstance(lora_body, dict):
@@ -2280,8 +2263,15 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                     audio_tensor = audio_payload.detach().cpu().float()
                 else:
                     audio_tensor = torch.as_tensor(audio_payload).detach().cpu().float()
-                if audio_tensor.ndim > 1:
-                    audio_tensor = audio_tensor.flatten()
+                # Pipelines deliver audio as (C, T), (T,), or (B, C, T) in channels-first
+                # convention (torch default). Drop a leading batch dim, then transpose to
+                # (T, C) for soundfile / CreateAudio. Flattening here would corrupt stereo.
+                if audio_tensor.ndim == 3:
+                    audio_tensor = audio_tensor[0]
+                if audio_tensor.ndim == 2:
+                    audio_tensor = audio_tensor.transpose(0, 1).contiguous()
+                elif audio_tensor.ndim > 3:
+                    raise ValueError(f"Unexpected audio tensor rank {audio_tensor.ndim}; expected 1-3 dims.")
                 audio_array = audio_tensor.numpy()
 
                 audio_obj = CreateAudio(
