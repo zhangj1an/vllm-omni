@@ -174,6 +174,27 @@ _OMNI_MODELS = {
         "dynin_omni",
         "DyninOmniForConditionalGeneration",
     ),
+    ## Kimi-Audio-7B
+    # Dispatcher: routes to thinker or code2wav based on model_stage YAML field.
+    # Overrides the upstream vLLM KimiAudioForConditionalGeneration (ASR-only)
+    # with the vllm-omni version that adds MIMO audio-out support (Slice 2+).
+    "KimiAudioForConditionalGeneration": (
+        "kimi_audio",
+        "kimi_audio",
+        "KimiAudioForConditionalGeneration",
+    ),
+    # Fused thinker: Whisper encoder + VQ-Adaptor + Qwen2 LLM (+ audio heads in Slice 2)
+    "KimiAudioThinkerForConditionalGeneration": (
+        "kimi_audio",
+        "kimi_audio_thinker",
+        "KimiAudioFusedThinker",
+    ),
+    # Stage-1 code2wav: flow-matching detokenizer + BigVGAN (Slice 2)
+    "KimiAudioCode2Wav": (
+        "kimi_audio",
+        "kimi_audio_code2wav",
+        "KimiAudioCode2Wav",
+    ),
     ## Ming-flash-omni-2.0
     "MingFlashOmniForConditionalGeneration": (
         "ming_flash_omni",
