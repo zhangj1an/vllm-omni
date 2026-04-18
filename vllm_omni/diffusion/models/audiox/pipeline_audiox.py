@@ -20,6 +20,7 @@ import torch.nn.functional as F
 import torchaudio.functional as taF
 import torchsde
 from diffusers import AutoencoderOobleck
+from einops import rearrange
 from torch import einsum, nn
 from torchvision import transforms
 from torchvision.io import read_image, read_video
@@ -211,7 +212,7 @@ def prepare_video_reference(
     )
 
     if frames.dim() == 4 and frames.shape[-1] == 3:
-        frames = frames.permute(0, 3, 1, 2)
+        frames = rearrange(frames, "t h w c -> t c h w")
 
     frames = normalize_video_tensor(frames, size=224)
     if duration > 0:
@@ -304,14 +305,14 @@ class SA_Attention(nn.Module):
     def forward(self, x):
         h = self.heads
         qkv = self.to_qkv(x).chunk(3, dim=-1)
-        q, k, v = (t.unflatten(-1, (h, -1)).transpose(1, 2) for t in qkv)
+        q, k, v = (rearrange(t, "b n (h d) -> b h n d", h=h) for t in qkv)
 
         dots = einsum("b h i d, b h j d -> b h i j", q, k) * self.scale
 
         attn = dots.softmax(dim=-1)
 
         out = einsum("b h i j, b h j d -> b h i d", attn, v)
-        out = out.transpose(1, 2).flatten(-2)
+        out = rearrange(out, "b h n d -> b n (h d)")
         out = self.to_out(out)
         return out
 
@@ -366,7 +367,7 @@ class AudioVaePromptAdapter(nn.Module):
     def forward(self, audio: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         z = self.pretransform.encode(audio, return_dict=True).latent_dist.sample()
         latents = z / float(self.pretransform.audiox_scaling_factor)
-        latents = self.proj_features_128(latents).permute(0, 2, 1)
+        latents = rearrange(self.proj_features_128(latents), "b c s -> b s c")
         latents = self.proj_out(latents)
         ones = torch.ones(latents.shape[0], latents.shape[2], device=latents.device)
         return latents, ones
@@ -388,10 +389,10 @@ class _MAFCrossAttentionBlock(nn.Module):
 
     def forward(self, experts: torch.Tensor, full_context: torch.Tensor) -> torch.Tensor:
         nh, hd = self._num_heads, self._head_dim
-        q = self.to_q(experts).unflatten(-1, (nh, hd)).transpose(1, 2)
-        k, v = (t.unflatten(-1, (nh, hd)).transpose(1, 2) for t in self.to_kv(full_context).chunk(2, dim=-1))
+        q = rearrange(self.to_q(experts), "b n (h d) -> b h n d", h=nh, d=hd)
+        k, v = (rearrange(t, "b n (h d) -> b h n d", h=nh, d=hd) for t in self.to_kv(full_context).chunk(2, dim=-1))
         out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False, scale=self._scale)
-        return self.to_out(out.transpose(1, 2).flatten(-2))
+        return self.to_out(rearrange(out, "b h n d -> b n (h d)"))
 
 
 class _MAFFusionBlock(nn.Module):
@@ -424,15 +425,11 @@ class _MAFFusionBlock(nn.Module):
         h = self.norm1(x)
         q, k, v = self.to_qkv(h).chunk(3, dim=-1)
         nh = self._num_heads
-        q = q.unflatten(-1, (nh, -1))
-        k = k.unflatten(-1, (nh, -1))
-        v = v.unflatten(-1, (nh, -1))
-        q_bsn = q.transpose(1, 2).contiguous()
-        k_bsn = k.transpose(1, 2).contiguous()
-        v_bsn = v.transpose(1, 2).contiguous()
+        q_bsn = rearrange(q, "b n (h d) -> b n h d", h=nh).contiguous()
+        k_bsn = rearrange(k, "b n (h d) -> b n h d", h=nh).contiguous()
+        v_bsn = rearrange(v, "b n (h d) -> b n h d", h=nh).contiguous()
         out = self.self_attn(q_bsn, k_bsn, v_bsn, attn_metadata=None)
-        out = out.transpose(1, 2).contiguous()
-        out = out.flatten(-2)
+        out = rearrange(out, "b n h d -> b n (h d)")
         out = self.out_proj(out)
         x = x + out
         x = x + self.ff(self.norm2(x))
@@ -535,12 +532,21 @@ class _BrownianTreeNoiseSampler:
     identical (sigma, sigma_next) pairs returns the same noise.
     """
 
-    def __init__(self, x: torch.Tensor, sigma_min: torch.Tensor, sigma_max: torch.Tensor):
+    def __init__(
+        self,
+        x: torch.Tensor,
+        sigma_min: torch.Tensor,
+        sigma_max: torch.Tensor,
+        entropy: int | None = None,
+    ):
         t0, t1 = torch.as_tensor(sigma_min), torch.as_tensor(sigma_max)
         if t0 > t1:
             t0, t1 = t1, t0
-        seed = int(torch.randint(0, 2**63 - 1, (1,), device="cpu").item())
-        self._tree = torchsde.BrownianTree(t0, torch.zeros_like(x), t1, entropy=seed)
+        # ``entropy`` must be derived from the user's seed for deterministic sampling; without it
+        # ``torch.randint`` consumes the (unseeded) global RNG and the Brownian tree varies run-to-run.
+        if entropy is None:
+            entropy = int(torch.randint(0, 2**63 - 1, (1,), device="cpu").item())
+        self._tree = torchsde.BrownianTree(t0, torch.zeros_like(x), t1, entropy=entropy)
 
     def __call__(self, sigma: torch.Tensor, sigma_next: torch.Tensor) -> torch.Tensor:
         t0, t1 = torch.as_tensor(sigma), torch.as_tensor(sigma_next)
@@ -660,8 +666,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         # Reshape once at load time so the parallel loader can consume them.
         nheads = int(self._model_config["model"]["diffusion"]["config"]["num_heads"])
         embed_dim = int(self._model_config["model"]["diffusion"]["config"]["embed_dim"])
-        # Bundle's `num_heads` == the SelfAttention `nheads` arg. In the DiT that's
-        # `dim_heads = embed_dim / config.num_heads = 64`, giving head_dim=24.
         total_heads = embed_dim // nheads
         head_dim = embed_dim // total_heads
         qkv_mid = ".attn.qkv."
@@ -833,6 +837,13 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         device = self.device
         model_dtype = next(self.model.parameters()).dtype
 
+        # Match upstream AudioX: disable TF32 matmul + fp16 reduced precision + cudnn benchmark
+        # for numerical parity with audiox/inference/generation.py:152-156.
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+        torch.backends.cudnn.benchmark = False
+
         latent_len = self._sample_size // int(self.pretransform.hop_length)
         noise = torch.randn(
             [batch_size, self.io_channels, latent_len], device=device, generator=generator, dtype=model_dtype
@@ -853,7 +864,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         # and a different stochastic update rule, which here produces a fixed ~861 Hz resonance
         # in the decoded audio regardless of conditioning.
         def denoise(x_in: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-            # VDenoiser preconditioning with sigma_data = 1.0.
             s2 = sigma * sigma
             c_skip = 1.0 / (s2 + 1.0)
             c_out = -sigma / (s2 + 1.0).sqrt()
@@ -873,7 +883,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             )
             return v * c_out + x_in * c_skip
 
-        # Polyexponential sigma schedule with rho=1, trailing zero (k-diffusion convention).
         ramp = torch.linspace(1.0, 0.0, steps, device=device)
         sigmas = torch.cat(
             [
@@ -883,48 +892,56 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         )
         x = noise * sigmas[0]
 
-        # Single-step path: no DPM++ history to accumulate; just emit the denoised estimate.
-        if steps <= 1:
-            s_in = x.new_ones([x.shape[0]])
-            sampled = denoise(x, sigmas[0] * s_in)
-        else:
-            # DPM-Solver++(3M) SDE loop (k-diffusion sample_dpmpp_3m_sde), eta=1.0, s_noise=1.0.
-            noise_sampler = _BrownianTreeNoiseSampler(x, sigmas[sigmas > 0].min(), sigmas.max())
-            s_in = x.new_ones([x.shape[0]])
-            denoised_1 = denoised_2 = None
-            h_1 = h_2 = None
-            eta = 1.0
-            for i in range(len(sigmas) - 1):
-                denoised = denoise(x, sigmas[i] * s_in)
-                if sigmas[i + 1] == 0:
-                    x = denoised
-                else:
-                    t_, s_ = -sigmas[i].log(), -sigmas[i + 1].log()
-                    h = s_ - t_
-                    h_eta = h * (eta + 1)
-                    x = torch.exp(-h_eta) * x + (-h_eta).expm1().neg() * denoised
-                    if h_2 is not None:
-                        r0 = h_1 / h
-                        r1 = h_2 / h
-                        d1_0 = (denoised - denoised_1) / r0
-                        d1_1 = (denoised_1 - denoised_2) / r1
-                        d1 = d1_0 + (d1_0 - d1_1) * r0 / (r0 + r1)
-                        d2 = (d1_0 - d1_1) / (r0 + r1)
-                        phi_2 = h_eta.neg().expm1() / h_eta + 1
-                        phi_3 = phi_2 / h_eta - 0.5
-                        x = x + phi_2 * d1 - phi_3 * d2
-                    elif h_1 is not None:
-                        r = h_1 / h
-                        d = (denoised - denoised_1) / r
-                        phi_2 = h_eta.neg().expm1() / h_eta + 1
-                        x = x + phi_2 * d
-                    x = (
-                        x
-                        + noise_sampler(sigmas[i], sigmas[i + 1]) * sigmas[i + 1] * (-2 * h * eta).expm1().neg().sqrt()
-                    )
-                denoised_1, denoised_2 = denoised, denoised_1
-                h_1, h_2 = h, h_1
-            sampled = x
+        # Match upstream AudioX: sampler runs under fp16 autocast (see audiox/inference/sampling.py:184).
+        with torch.cuda.amp.autocast():
+            if steps <= 1:
+                s_in = x.new_ones([x.shape[0]])
+                sampled = denoise(x, sigmas[0] * s_in)
+            else:
+                # DPM-Solver++(3M) SDE loop (k-diffusion sample_dpmpp_3m_sde), eta=1.0, s_noise=1.0.
+                noise_sampler = _BrownianTreeNoiseSampler(
+                    x,
+                    sigmas[sigmas > 0].min(),
+                    sigmas.max(),
+                    entropy=generator.initial_seed(),
+                )
+                s_in = x.new_ones([x.shape[0]])
+                denoised_1 = denoised_2 = None
+                h_1 = h_2 = None
+                eta = 1.0
+                for i in range(len(sigmas) - 1):
+                    denoised = denoise(x, sigmas[i] * s_in)
+                    if sigmas[i + 1] == 0:
+                        x = denoised
+                    else:
+                        t_, s_ = -sigmas[i].log(), -sigmas[i + 1].log()
+                        h = s_ - t_
+                        h_eta = h * (eta + 1)
+                        x = torch.exp(-h_eta) * x + (-h_eta).expm1().neg() * denoised
+                        if h_2 is not None:
+                            r0 = h_1 / h
+                            r1 = h_2 / h
+                            d1_0 = (denoised - denoised_1) / r0
+                            d1_1 = (denoised_1 - denoised_2) / r1
+                            d1 = d1_0 + (d1_0 - d1_1) * r0 / (r0 + r1)
+                            d2 = (d1_0 - d1_1) / (r0 + r1)
+                            phi_2 = h_eta.neg().expm1() / h_eta + 1
+                            phi_3 = phi_2 / h_eta - 0.5
+                            x = x + phi_2 * d1 - phi_3 * d2
+                        elif h_1 is not None:
+                            r = h_1 / h
+                            d = (denoised - denoised_1) / r
+                            phi_2 = h_eta.neg().expm1() / h_eta + 1
+                            x = x + phi_2 * d
+                        x = (
+                            x
+                            + noise_sampler(sigmas[i], sigmas[i + 1])
+                            * sigmas[i + 1]
+                            * (-2 * h * eta).expm1().neg().sqrt()
+                        )
+                    denoised_1, denoised_2 = denoised, denoised_1
+                    h_1, h_2 = h, h_1
+                sampled = x
 
         vae = self.pretransform.to(device=sampled.device, dtype=torch.float32).eval()
         return vae.decode(sampled.to(torch.float32) * float(vae.audiox_scaling_factor), return_dict=True).sample
@@ -964,10 +981,10 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         with torch.no_grad():
             outputs = self.clip_encoder(pixel_values=pixel_values)
         hidden = outputs.last_hidden_state
-        hidden = hidden.unflatten(0, (batch_size, time_length)).permute(0, 2, 1, 3).flatten(0, 1)
+        hidden = rearrange(hidden, "(b t) p d -> (b p) t d", b=batch_size, t=time_length)
         hidden = hidden + self.clip_temp_pos_embedding
         hidden = self.clip_temp_transformer(hidden)
-        hidden = hidden.unflatten(0, (batch_size, -1)).transpose(1, 2).flatten(1, 2)
+        hidden = rearrange(hidden, "(b p) t d -> b (t p) d", b=batch_size)
         hidden = self.clip_proj(hidden.view(-1, self._clip_in_features))
         hidden = hidden.view(batch_size, self._clip_out_features, -1)
 

@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from einops import rearrange
 from torch.nn import functional as F
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -56,19 +57,19 @@ class AudioXCrossAttention(nn.Module):
         d = self.head_dim
 
         q_flat, _ = self.to_q(x)
-        q = q_flat.unflatten(-1, (local_h, d))
+        q = rearrange(q_flat, "b n (h d) -> b n h d", h=local_h, d=d)
         kv_flat, _ = self.to_kv(context)
         v_flat, k_flat = kv_flat.chunk(2, dim=-1)
         # Upstream `CrossAttention.forward` unpacks `pre_attention()` as `q, v, k = ...` (K/V
         # swapped), AND only normalizes the first chunk of to_kv via k_norm. Trained weights
         # depend on this quirk: first chunk normalized -> V; second chunk unnormalized -> K.
-        v = v_flat.unflatten(-1, (local_h, d))
-        k = k_flat.unflatten(-1, (local_h, d))
+        v = rearrange(v_flat, "b n (h d) -> b n h d", h=local_h, d=d)
+        k = rearrange(k_flat, "b n (h d) -> b n h d", h=local_h, d=d)
         q = self.q_norm(q)
         v = self.k_norm(v)
 
         out = self.attn(q.contiguous(), k.contiguous(), v.contiguous(), attn_metadata=None)
-        out = out.flatten(-2).contiguous()
+        out = rearrange(out, "b n h d -> b n (h d)").contiguous()
         if tp > 1:
             out = tensor_model_parallel_all_gather(out, dim=-1)
         return out
@@ -88,9 +89,9 @@ __all__ = [
 
 class AudioXMMChannelLastConv1d(nn.Conv1d):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.permute(0, 2, 1)
+        x = rearrange(x, "b n c -> b c n")
         x = super().forward(x)
-        x = x.permute(0, 2, 1)
+        x = rearrange(x, "b c n -> b n c")
         return x
 
 
@@ -201,7 +202,7 @@ class AudioXMMDiTSelfAttention(nn.Module):
 
     def apply_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         out = self.attn(q.contiguous(), k.contiguous(), v.contiguous(), attn_metadata=None)
-        out = out.flatten(-2).contiguous()
+        out = rearrange(out, "b n h d -> b n (h d)").contiguous()
         # Downstream linear1/ffn are replicated and expect full hidden dim.
         if get_tensor_model_parallel_world_size() > 1:
             out = tensor_model_parallel_all_gather(out, dim=-1)
@@ -213,14 +214,16 @@ class AudioXMMDiTSelfAttention(nn.Module):
         d = self.head_dim
         q_size = local_h * d
         q, k, v = qkv.split([q_size, q_size, q_size], dim=-1)
-        q = q.unflatten(-1, (local_h, d))
-        k = k.unflatten(-1, (local_h, d))
-        v = v.unflatten(-1, (local_h, d))
+        q = rearrange(q, "b n (h d) -> b n h d", h=local_h, d=d)
+        k = rearrange(k, "b n (h d) -> b n h d", h=local_h, d=d)
+        v = rearrange(v, "b n (h d) -> b n h d", h=local_h, d=d)
         q = self.q_norm(q)
         k = self.k_norm(k)
 
         if rot is not None:
             cos, sin = rot
+            cos = cos.to(dtype=q.dtype)
+            sin = sin.to(dtype=q.dtype)
             q = self.rope(q, cos, sin)
             k = self.rope(k, cos, sin)
 
@@ -423,19 +426,19 @@ class MMDiffusionTransformer(nn.Module):
             prepend_length = prepend_inputs.shape[1]
 
         x = self.preprocess_conv(x) + x
-        x = x.transpose(1, 2)
+        x = rearrange(x, "b c n -> b n c")
 
         if self.patch_size > 1:
-            x = x.unflatten(1, (-1, self.patch_size)).transpose(2, 3).flatten(2)
+            x = rearrange(x, "b (t p) c -> b t (c p)", p=self.patch_size)
         output = self.transformer(
             x,
             prepend_embeds=prepend_inputs,
             context=cross_attn_cond,
         )
 
-        output = output.transpose(1, 2)[:, :, prepend_length:]
+        output = rearrange(output, "b n c -> b c n")[:, :, prepend_length:]
         if self.patch_size > 1:
-            output = output.unflatten(1, (-1, self.patch_size)).transpose(2, 3).flatten(2)
+            output = rearrange(output, "b (t p) c -> b t (c p)", p=self.patch_size)
         output = self.postprocess_conv(output) + output
 
         return output
@@ -581,9 +584,9 @@ class ContinuousMMDiTTransformer(nn.Module):
         mm_tokens = context
 
         mm_tokens = self.proj_mm_tokens(mm_tokens)
-        mm_tokens = mm_tokens.transpose(1, 2)
+        mm_tokens = rearrange(mm_tokens, "b s d -> b d s")
         mm_tokens = self.proj_mm_seq_len(mm_tokens)
-        mm_tokens = mm_tokens.transpose(1, 2)
+        mm_tokens = rearrange(mm_tokens, "b d s -> b s d")
 
         time_cond = time_cond.unsqueeze(1)
         rot = (
