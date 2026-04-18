@@ -10,7 +10,6 @@ import torch.nn as nn
 from einops import rearrange
 from torch.nn import functional as F
 from vllm.distributed import (
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -20,7 +19,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader, sharded_weight_loader
 
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.layers.fourier import GaussianFourierProjection
@@ -95,30 +94,12 @@ class AudioXMMChannelLastConv1d(nn.Conv1d):
         return x
 
 
-def _slice_weight_loader_out(param: nn.Parameter, loaded: torch.Tensor) -> None:
-    tp_size = get_tensor_model_parallel_world_size()
-    tp_rank = get_tensor_model_parallel_rank()
-    out_total = loaded.shape[0]
-    out_local = out_total // tp_size
-    start = tp_rank * out_local
-    param.data.copy_(loaded[start : start + out_local])
-
-
-def _slice_weight_loader_in(param: nn.Parameter, loaded: torch.Tensor) -> None:
-    tp_size = get_tensor_model_parallel_world_size()
-    tp_rank = get_tensor_model_parallel_rank()
-    in_total = loaded.shape[1]
-    in_local = in_total // tp_size
-    start = tp_rank * in_local
-    param.data.copy_(loaded[:, start : start + in_local])
-
-
 class _ColumnParallelChannelLastConv1d(AudioXMMChannelLastConv1d):
     def __init__(self, in_channels: int, out_channels_total: int, **kwargs: Any):
         tp_size = get_tensor_model_parallel_world_size()
         assert out_channels_total % tp_size == 0, (out_channels_total, tp_size)
         super().__init__(in_channels, out_channels_total // tp_size, **kwargs)
-        self.weight.weight_loader = _slice_weight_loader_out
+        self.weight.weight_loader = sharded_weight_loader(0)
 
 
 class _RowParallelChannelLastConv1d(AudioXMMChannelLastConv1d):
@@ -127,7 +108,7 @@ class _RowParallelChannelLastConv1d(AudioXMMChannelLastConv1d):
         assert in_channels_total % tp_size == 0, (in_channels_total, tp_size)
         super().__init__(in_channels_total // tp_size, out_channels, **kwargs)
         self._tp_size = tp_size
-        self.weight.weight_loader = _slice_weight_loader_in
+        self.weight.weight_loader = sharded_weight_loader(1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = super().forward(x)

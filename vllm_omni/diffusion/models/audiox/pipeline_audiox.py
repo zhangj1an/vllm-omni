@@ -59,39 +59,14 @@ def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int:
     return int(cfg["latent_seq_len"]) * int(cfg["pretransform_config"]["config"]["downsampling_ratio"])
 
 
-def _mm_path_lookup(
-    raw_prompt: Any,
-    extra: dict[str, Any],
-    batch_index: int,
-    *,
-    mm_key: str,
-    paths_key: str,
-    single_key: str,
-) -> Any:
-    if isinstance(raw_prompt, dict):
-        mm = raw_prompt.get("multi_modal_data") or {}
-        v = mm.get(mm_key)
-        if v is not None:
-            return v
-    paths = extra.get(paths_key)
-    if isinstance(paths, (list, tuple)) and batch_index < len(paths):
-        return paths[batch_index]
-    return extra.get(single_key)
-
-
 def _normalize_prompt_item(raw: Any, index: int) -> dict[str, Any]:
     if isinstance(raw, str):
-        p: dict[str, Any] = {"prompt": raw.strip(), "multi_modal_data": {}}
+        p: dict[str, Any] = {"prompt": raw.strip()}
     elif isinstance(raw, dict):
         p = dict(raw)
         p["prompt"] = str(p.get("prompt") or "").strip()
-        mm0 = p.get("multi_modal_data")
-        p["multi_modal_data"] = {} if mm0 is None else dict(mm0)
     else:
         raise TypeError(f"AudioX prompt {index} must be str or dict, got {type(raw)!r}")
-
-    ai = p.get("additional_information")
-    p["additional_information"] = ai if isinstance(ai, dict) else {}
     return p
 
 
@@ -741,8 +716,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         seconds_start = float(extra.get("seconds_start", 0.0))
         seconds_total = float(target_len) / float(sample_rate)
         out: list[torch.Tensor] = []
-        for i, raw in enumerate(raw_prompts):
-            src = _mm_path_lookup(raw, extra, i, mm_key="audio", paths_key="audio_paths", single_key="audio_path")
+        for raw in raw_prompts:
+            src = extra.get("audio_path")
             if src is None:
                 out.append(torch.zeros(2, target_len, device=device, dtype=cond_dtype))
                 continue
@@ -773,13 +748,10 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             return [empty for _ in raw_prompts]
 
         tensors: list[torch.Tensor] = []
-        for i, _raw in enumerate(raw_prompts):
-            src = _mm_path_lookup(_raw, extra, i, mm_key="video", paths_key="video_paths", single_key="video_path")
+        for _ in raw_prompts:
+            src = extra.get("video_path")
             if src is None:
-                raise ValueError(
-                    f"audiox_task={task_norm!r} requires video input: set extra_args['video_path'], "
-                    "extra_args['video_paths'], or multi_modal_data['video'] on the prompt dict."
-                )
+                raise ValueError(f"audiox_task={task_norm!r} requires video input: set extra_args['video_path'].")
             vt = prepare_video_reference(
                 src,
                 duration=float(self._CLIP_SYNC_DURATION_SEC),

@@ -2485,11 +2485,9 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                         )
 
             if reference_videos:
-                mm = gen_prompt.setdefault("multi_modal_data", {})
-                mm["video"] = reference_videos[0] if len(reference_videos) == 1 else reference_videos
+                gen_params.extra_args["video_path"] = reference_videos[0]
             if reference_audios:
-                mm = gen_prompt.setdefault("multi_modal_data", {})
-                mm["audio"] = reference_audios[0] if len(reference_audios) == 1 else reference_audios
+                gen_params.extra_args["audio_path"] = reference_audios[0]
 
             # Generate image or audio (e.g. AudioX) via AsyncOmni
             diffusion_engine = cast(AsyncOmni, self._diffusion_engine)
