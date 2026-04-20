@@ -1,0 +1,212 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Inference-only Kimi-Audio-7B unified model (fused thinker + code2wav).
+
+Stage routing dispatcher. Selects KimiAudioFusedThinker (Whisper encoder +
+VQ-Adaptor + Qwen2 LLM, with audio heads added in Slice 2) or
+KimiAudioCode2Wav (flow-matching detokenizer + BigVGAN, Slice 2) based on
+``vllm_config.model_config.model_stage``.
+
+Slice 1 scope: only ``fused_thinker`` stage is wired up; the text-out path
+matches upstream vLLM PR 36127 (ASR / audio-QA). The ``code2wav`` stage and
+the audio-out branch arrive in Slice 2.
+"""
+
+from collections.abc import Iterable
+from functools import cached_property
+from typing import Any
+
+import torch
+import torch.nn as nn
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import SupportsMultiModal, SupportsPP
+from vllm.model_executor.models.kimi_audio import (
+    KimiAudioDummyInputsBuilder,
+    KimiAudioMultiModalProcessor,
+    KimiAudioProcessingInfo,
+)
+from vllm.model_executor.models.utils import init_vllm_registered_model, maybe_prefix
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sequence import IntermediateTensors
+from vllm.v1.outputs import SamplerOutput
+from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.sampler import Sampler
+
+from vllm_omni.model_executor.models.output_templates import OmniOutput
+from vllm_omni.model_executor.models.utils import add_prefix_to_loaded_weights
+
+logger = init_logger(__name__)
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    KimiAudioMultiModalProcessor,
+    info=KimiAudioProcessingInfo,
+    dummy_inputs=KimiAudioDummyInputsBuilder,
+)
+class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    """Unified Kimi-Audio model dispatcher.
+
+    Architecture:
+    - fused_thinker: Whisper encoder + VQ-Adaptor + Qwen2 LLM -> text logits
+      (Slice 2 will add parallel audio-token heads alongside the text head.)
+    - code2wav: flow-matching detokenizer + BigVGAN -> 24kHz waveform
+      (Slice 2.)
+
+    Usage: set ``model_stage`` in the stage config to ``fused_thinker`` or
+    ``code2wav``.
+    """
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("audio"):
+            # Mirrors upstream vllm.model_executor.models.kimi_audio.AUDIO_PLACEHOLDER.
+            return "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>"
+        return None
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        self.have_multimodal_outputs = True
+        self.has_preprocess = False
+        self.has_postprocess = False
+
+        self.vllm_config = vllm_config
+        self.config = vllm_config.model_config.hf_config
+        self.multimodal_config = vllm_config.model_config.multimodal_config
+        self.model_stage = vllm_config.model_config.model_stage
+
+        if self.model_stage == "fused_thinker":
+            self.fused_thinker = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "fused_thinker"),
+                architectures=["KimiAudioThinkerForConditionalGeneration"],
+            )
+            self.code2wav = None
+            self.model = self.fused_thinker
+        elif self.model_stage == "code2wav":
+            self.fused_thinker = None
+            self.code2wav = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "code2wav"),
+                architectures=["KimiAudioCode2Wav"],
+            )
+            self.model = self.code2wav
+            self.requires_raw_input_tokens = True
+        else:
+            raise ValueError(
+                f"Invalid model_stage: {self.model_stage}. "
+                "Must be one of: 'fused_thinker', 'code2wav'."
+            )
+
+        self.make_empty_intermediate_tensors = (
+            self.fused_thinker.make_empty_intermediate_tensors
+            if self.model_stage == "fused_thinker"
+            else lambda: None
+        )
+
+    @staticmethod
+    def _module_device(module: nn.Module) -> torch.device:
+        try:
+            return next(module.parameters()).device
+        except StopIteration:
+            for _, buf in module.named_buffers(recurse=True):
+                return buf.device
+            return torch.device("cpu")
+
+    @cached_property
+    def sampler(self):
+        if hasattr(self.model, "sampler"):
+            return self.model.sampler
+        return Sampler()
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings=None,
+        is_multimodal=None,
+    ) -> torch.Tensor:
+        return self.model.embed_input_ids(
+            input_ids=input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+    def embed_multimodal(self, **kwargs):
+        return self.model.embed_multimodal(**kwargs)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors | OmniOutput:
+        dev = self._module_device(self.model)
+        if input_ids is not None and input_ids.device != dev:
+            input_ids = input_ids.to(dev)
+        if positions is not None and positions.device != dev:
+            positions = positions.to(dev)
+        if inputs_embeds is not None and inputs_embeds.device != dev:
+            inputs_embeds = inputs_embeds.to(dev)
+        return self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
+
+    def make_omni_output(
+        self,
+        model_outputs: torch.Tensor | OmniOutput,
+        **kwargs: Any,
+    ) -> OmniOutput:
+        """Wrap raw forward outputs into an OmniOutput.
+
+        Slice 1 always returns the text hidden states; the multimodal_outputs
+        slot is reserved for Slice 2's parallel audio-token codes.
+        """
+        if isinstance(model_outputs, OmniOutput):
+            return model_outputs
+        text_hidden_states = model_outputs
+        if isinstance(text_hidden_states, torch.Tensor):
+            text_hidden_states = text_hidden_states.reshape(-1, text_hidden_states.shape[-1])
+        return OmniOutput(text_hidden_states=text_hidden_states, multimodal_outputs=None)
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor | OmniOutput,
+        sampling_metadata: SamplingMetadata | None = None,
+    ) -> torch.Tensor | None:
+        if isinstance(hidden_states, OmniOutput):
+            hidden_states = hidden_states.text_hidden_states
+        return self.model.compute_logits(hidden_states)
+
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> SamplerOutput | None:
+        return self.model.sample(logits, sampling_metadata)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Forward checkpoint weights to the active stage.
+
+        Kimi-Audio's HF checkpoint is flat: the fused_thinker owns the
+        upstream weight mapper plus the Slice-2 audio-out keys
+        (mimo_layers / mimo_norm / mimo_output). The code2wav stage loads
+        its own checkpoints (vocoder + flow-matching) directly from the
+        ``<model_path>/{vocoder,audio_detokenizer}/`` subfolders, so it
+        consumes — and ignores — anything routed through here.
+        """
+        loaded: set[str] = set()
+        sub_loaded = self.model.load_weights(weights)
+        prefix = self.model_stage
+        loaded.update(add_prefix_to_loaded_weights(sub_loaded, prefix))
+        logger.info(
+            "Loaded %d weights for KimiAudio (stage=%s)",
+            len(loaded),
+            self.model_stage,
+        )
+        return loaded

@@ -1,0 +1,45 @@
+# Stage config for Kimi-Audio-7B-Instruct, Slice 1 (single-stage, text-out only).
+#
+# Slice 1 covers ASR / audio-QA parity with upstream vLLM PR 36127:
+#   audio-in -> Whisper-large-v3 encoder -> VQ-Adaptor (4x downsample) ->
+#   Qwen2-7B LLM -> text LM head -> text response.
+#
+# Slice 2 will add a stage-1 ``code2wav`` (flow-matching detokenizer +
+# BigVGAN, 24 kHz waveform output) and a corresponding two-stage YAML at
+# ``stage_configs/kimi_audio_code2wav.yaml``.
+#
+# Verified on 1x H100-80G (target).
+
+async_chunk: false
+stage_args:
+  - stage_id: 0
+    stage_type: llm
+    runtime:
+      process: true
+      devices: "0"
+    engine_args:
+      dtype: bfloat16
+      max_num_seqs: 8
+      model_stage: fused_thinker
+      model_arch: KimiAudioForConditionalGeneration
+      worker_type: ar
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.85
+      enforce_eager: true
+      trust_remote_code: true
+      enable_prefix_caching: false
+      engine_output_type: latent
+      max_model_len: 8192
+      max_num_batched_tokens: 8192
+    is_comprehension: true
+    final_output: true
+    final_output_type: text
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 1024
+      seed: 42
+      detokenize: true
+      repetition_penalty: 1.0
