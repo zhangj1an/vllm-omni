@@ -93,15 +93,10 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             self.model = self.code2wav
             self.requires_raw_input_tokens = True
         else:
-            raise ValueError(
-                f"Invalid model_stage: {self.model_stage}. "
-                "Must be one of: 'fused_thinker', 'code2wav'."
-            )
+            raise ValueError(f"Invalid model_stage: {self.model_stage}. Must be one of: 'fused_thinker', 'code2wav'.")
 
         self.make_empty_intermediate_tensors = (
-            self.fused_thinker.make_empty_intermediate_tensors
-            if self.model_stage == "fused_thinker"
-            else lambda: None
+            self.fused_thinker.make_empty_intermediate_tensors if self.model_stage == "fused_thinker" else lambda: None
         )
 
     @staticmethod

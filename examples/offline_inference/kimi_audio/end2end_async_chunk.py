@@ -30,12 +30,7 @@ class QueryResult(NamedTuple):
 
 
 def _build_prompt(question: str) -> str:
-    return (
-        "<|im_kimia_user_msg_start|>"
-        f"{AUDIO_PLACEHOLDER}{question}"
-        "<|im_msg_end|>"
-        "<|im_kimia_assistant_msg_start|>"
-    )
+    return f"<|im_kimia_user_msg_start|>{AUDIO_PLACEHOLDER}{question}<|im_msg_end|><|im_kimia_assistant_msg_start|>"
 
 
 def get_audio_query(question: str, audio_path: str | None, sr: int) -> QueryResult:
@@ -66,7 +61,9 @@ def main(args):
         shm_threshold_bytes=args.shm_threshold_bytes,
     )
     thinker_sp = SamplingParams(temperature=0.6, top_p=0.95, top_k=50, max_tokens=args.max_tokens, seed=SEED)
-    code2wav_sp = SamplingParams(temperature=0.0, top_p=1.0, top_k=-1, max_tokens=args.max_tokens * 8, seed=SEED, detokenize=False)
+    code2wav_sp = SamplingParams(
+        temperature=0.0, top_p=1.0, top_k=-1, max_tokens=args.max_tokens * 8, seed=SEED, detokenize=False
+    )
     query = get_audio_query(args.question or "Answer in audio. Briefly summarize.", args.audio_path, args.sampling_rate)
     omni_outputs = omni.generate([query.inputs] * args.num_prompts, [thinker_sp, code2wav_sp])
 
@@ -82,6 +79,7 @@ def main(args):
             # of per-chunk tensors; concatenate before writing.
             if isinstance(audio_data, list):
                 import torch
+
                 audio_tensor = torch.cat(audio_data, dim=-1)
             else:
                 audio_tensor = audio_data

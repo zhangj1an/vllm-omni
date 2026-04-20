@@ -34,6 +34,10 @@ stage_args:
       engine_output_type: latent
       max_model_len: 8192
       max_num_batched_tokens: 8192
+      # Build and run the MIMO audio-out branch. Text-only yamls omit
+      # this flag so they skip the branch (saves ~600M params + compute).
+      hf_overrides:
+        kimia_generate_audio: true
     is_comprehension: true
     final_output: true
     final_output_type: text

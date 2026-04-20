@@ -34,12 +34,7 @@ class QueryResult(NamedTuple):
 def _build_prompt(question: str) -> str:
     """Wrap a single audio + text turn in the Kimi-Audio chat template,
     asking the assistant to respond in audio."""
-    return (
-        "<|im_kimia_user_msg_start|>"
-        f"{AUDIO_PLACEHOLDER}{question}"
-        "<|im_msg_end|>"
-        "<|im_kimia_assistant_msg_start|>"
-    )
+    return f"<|im_kimia_user_msg_start|>{AUDIO_PLACEHOLDER}{question}<|im_msg_end|><|im_kimia_assistant_msg_start|>"
 
 
 def get_audio_query(
@@ -132,9 +127,7 @@ def main(args):
 
 
 def parse_args():
-    parser = FlexibleArgumentParser(
-        description="Offline inference for Kimi-Audio-7B-Instruct (audio out)."
-    )
+    parser = FlexibleArgumentParser(description="Offline inference for Kimi-Audio-7B-Instruct (audio out).")
     parser.add_argument("--model-name", "-m", default="moonshotai/Kimi-Audio-7B-Instruct")
     parser.add_argument("--question", "-q", default=None)
     parser.add_argument("--audio-path", "-a", default=None)

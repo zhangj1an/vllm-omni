@@ -24,9 +24,7 @@ import requests
 import soundfile as sf
 
 OUTPUT_SAMPLE_RATE = 24000
-MARY_HAD_LAMB = (
-    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/mary_had_lamb.ogg"
-)
+MARY_HAD_LAMB = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/mary_had_lamb.ogg"
 
 
 def build_request(model: str, audio_source: dict, question: str) -> dict:

@@ -45,6 +45,18 @@ Requires the `kimia_infer` package (from
 <https://github.com/MoonshotAI/Kimi-Audio>) for the flow-matching detokenizer
 and BigVGAN vocoder. The two-stage config lives at
 `vllm_omni/model_executor/stage_configs/kimi_audio_audio_out.yaml` and
-expects 2 GPUs by default.
+expects 2 GPUs by default. It sets `hf_overrides.kimia_generate_audio: true`
+on stage 0 so the MIMO audio-out branch is built and runs; text-only YAMLs
+omit that flag and skip the branch.
+
+### Audio sampling caveat
+
+The MIMO audio head samples via greedy argmax inside the model and does
+not go through vLLM's sampler (vLLM expects one distribution per step, and
+text+audio heads run in parallel). So the `default_sampling_params` in the
+stage YAML — `temperature`, `top_p`, `top_k` — only affect the text path.
+Audio tokens are deterministic for a given text prefix. Changing
+generation quality of the audio requires editing `_run_mimo_branch` in
+`kimi_audio_thinker.py`.
 
 Slice 3 will add `end2end_async_chunk.py` (streaming, low TTFB).

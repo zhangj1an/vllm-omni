@@ -34,6 +34,8 @@ stage_args:
       max_model_len: 8192
       max_num_batched_tokens: 8192
       custom_process_next_stage_input_func: vllm_omni.model_executor.stage_input_processors.kimi_audio.kimi2code2wav_async_chunk
+      hf_overrides:
+        kimia_generate_audio: true
     is_comprehension: true
     final_output: true
     final_output_type: text

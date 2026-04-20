@@ -23,6 +23,11 @@ enough that the only thing it actively breaks for us is its
 with the text+whisper √2 fusion, the Whisper sub-bundle loader, the
 ``compute_logits`` text path) is inherited unchanged.
 
+Whether the MIMO branch is built and run is gated by
+``config.kimia_generate_audio`` (set via ``hf_overrides`` in the stage
+YAML). Text-out YAMLs omit the flag → the branch is never built,
+saving ~600M params + its forward cost. Audio-out YAMLs set it to True.
+
 Slice 4 will move the MIMO sub-stack onto vLLM's paged KV cache for
 performance; for Slice 2 we keep it in eager mode (HF-style attention) so
 that correctness is independent of vLLM's compile pipeline.
@@ -34,10 +39,9 @@ What's NOT yet wired up in this file (deliberate; flagged inline as
     contexts; revisit when we measure decode latency.
   - The audio token sampling is greedy argmax inside ``_run_mimo_branch``
     rather than going through vLLM's sampler (which only handles one
-    distribution per step). The text path keeps using vLLM's sampler.
-  - ``generate_audio`` defaults to True when the request includes the
-    audio-output sentinel in its prompt; for Slice 2 we expose it as an
-    explicit keyword argument and let the dispatcher pass it through.
+    distribution per step). The text path keeps using vLLM's sampler,
+    so ``default_sampling_params`` in the stage YAML only affect the text
+    head. Audio tokens are deterministic for a given text prefix.
 """
 
 from __future__ import annotations
@@ -89,9 +93,7 @@ def _build_mimo_layers(config) -> nn.ModuleList:
         hidden_act=config.hidden_act,
         attention_dropout=0.0,
     )
-    return nn.ModuleList(
-        [Qwen2DecoderLayer(qwen2_cfg, layer_idx=i) for i in range(config.kimia_mimo_layers)]
-    )
+    return nn.ModuleList([Qwen2DecoderLayer(qwen2_cfg, layer_idx=i) for i in range(config.kimia_mimo_layers)])
 
 
 def _build_mimo_norm(config) -> nn.Module:
@@ -101,7 +103,9 @@ def _build_mimo_norm(config) -> nn.Module:
 
 
 # Extended weight mapper: keep upstream's keys AND add the audio-out keys
-# that upstream's load_weights deliberately filters out.
+# that upstream's load_weights deliberately filters out. The mimo_* entries
+# are harmless when the MIMO branch isn't built because load_weights
+# filters those names out before handing them to AutoWeightsLoader.
 _HF_TO_VLLM_MAPPER = WeightsMapper(
     orig_to_new_prefix={
         # From upstream PR 36127:
@@ -135,29 +139,46 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
 
-        self.mimo_layers = _build_mimo_layers(config)
-        self.mimo_norm = _build_mimo_norm(config)
-        # Output head shares the global vocab (text + audio tokens). Audio
-        # token IDs occupy [KIMIA_TOKEN_OFFSET, vocab_size); when sampling
-        # we slice to that range.
-        self.mimo_output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        # Needed by ``_load_whisper_subbundle`` to locate
+        # ``<model_path>/whisper-large-v3/model.safetensors``.
+        self.model_path = vllm_config.model_config.model
 
-        self._mimo_branch_layer_idx = int(config.kimia_mimo_transformer_from_layer_index)
-        self._mimo_capture: torch.Tensor | None = None
+        # Opt in to the MIMO audio-out branch via hf_overrides in the
+        # stage YAML (see kimi_audio_audio_out.yaml). Text-only YAMLs omit
+        # the flag so we skip allocating and running the branch entirely.
+        self._generate_audio = bool(getattr(config, "kimia_generate_audio", False))
 
-        target_layer = self.language_model.model.layers[self._mimo_branch_layer_idx]
-        target_layer.register_forward_hook(self._capture_layer21_output)
-        logger.info(
-            "KimiAudioFusedThinker: MIMO branch hooked at language_model.model.layers[%d] "
-            "(mimo_layers=%d, mimo_output vocab=%d)",
-            self._mimo_branch_layer_idx,
-            len(self.mimo_layers),
-            self.mimo_output.out_features,
-        )
+        if self._generate_audio:
+            self.mimo_layers = _build_mimo_layers(config)
+            self.mimo_norm = _build_mimo_norm(config)
+            # Output head shares the global vocab (text + audio tokens). Audio
+            # token IDs occupy [KIMIA_TOKEN_OFFSET, vocab_size); when sampling
+            # we slice to that range.
+            self.mimo_output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+            self._mimo_branch_layer_idx = int(config.kimia_mimo_transformer_from_layer_index)
+            # Single-slot list so the layer-21 forward hook and the MIMO
+            # branch don't fight over an instance attribute. vLLM serializes
+            # forwards per model instance, so a single slot is safe.
+            self._mimo_capture_slot: list[torch.Tensor | None] = [None]
+
+            target_layer = self.language_model.model.layers[self._mimo_branch_layer_idx]
+            target_layer.register_forward_hook(self._capture_layer21_output)
+            logger.info(
+                "KimiAudioFusedThinker: MIMO branch hooked at language_model.model.layers[%d] "
+                "(mimo_layers=%d, mimo_output vocab=%d)",
+                self._mimo_branch_layer_idx,
+                len(self.mimo_layers),
+                self.mimo_output.out_features,
+            )
+        else:
+            logger.info(
+                "KimiAudioFusedThinker: kimia_generate_audio=False; MIMO audio-out branch not built. Text-out only."
+            )
 
     def _capture_layer21_output(self, module, args, output) -> None:
         # Qwen2DecoderLayer returns a tuple; first element is the hidden state.
-        self._mimo_capture = output[0] if isinstance(output, tuple) else output
+        self._mimo_capture_slot[0] = output[0] if isinstance(output, tuple) else output
 
     def forward(
         self,
@@ -165,16 +186,21 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        generate_audio: bool = False,
         **kwargs: Any,
     ) -> torch.Tensor | IntermediateTensors | OmniOutput:
         """Forward pass.
 
-        Always runs the upstream text path (which populates
-        ``_mimo_capture`` via the layer-21 hook). If ``generate_audio`` is
-        true, runs the MIMO branch on the captured hidden state and packs
-        the audio token IDs into the OmniOutput sidecar.
+        Runs the upstream text path unconditionally. When the MIMO branch
+        is enabled (``kimia_generate_audio=True`` in the stage YAML's
+        hf_overrides), also runs the 6-layer MIMO branch on the hidden
+        state captured at layer ``kimia_mimo_transformer_from_layer_index``
+        and packs audio token IDs into the OmniOutput sidecar.
         """
+        if self._generate_audio:
+            # Clear any stale capture from a previous forward before the
+            # layer-21 hook fires again inside super().forward.
+            self._mimo_capture_slot[0] = None
+
         text_hidden = super().forward(
             input_ids=input_ids,
             positions=positions,
@@ -183,25 +209,31 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
             **kwargs,
         )
 
-        if not generate_audio:
+        if not self._generate_audio:
             return text_hidden
-        if self._mimo_capture is None:
+
+        capture = self._mimo_capture_slot[0]
+        if capture is None:
             logger.warning(
-                "generate_audio=True but MIMO capture buffer is empty. "
+                "MIMO branch enabled but capture buffer is empty. "
                 "Layer-21 hook did not fire (CUDA Graph capture? Compiled "
                 "forward path?). Falling back to text-only output."
             )
             return text_hidden
+        # Consume and release the slot for the next step.
+        self._mimo_capture_slot[0] = None
 
-        audio_token_ids = self._run_mimo_branch(positions=positions)
-        # Reset capture so the next step doesn't re-use stale state.
-        self._mimo_capture = None
+        audio_token_ids = self._run_mimo_branch(capture=capture, positions=positions)
         return OmniOutput(
             text_hidden_states=text_hidden,
             multimodal_outputs={"audio_tokens": audio_token_ids},
         )
 
-    def _run_mimo_branch(self, positions: torch.Tensor | None) -> torch.Tensor:
+    def _run_mimo_branch(
+        self,
+        capture: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> torch.Tensor:
         """Run the 6-layer MIMO branch on the captured layer-21 hidden state.
 
         Returns a 1-D LongTensor of audio token IDs (already offset into the
@@ -213,7 +245,7 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         prefix. For long audio contexts (>2k tokens of audio output) this
         will be slow; Slice 4's CUDA-graph wrapper will fold the cache in.
         """
-        hidden = self._mimo_capture
+        hidden = capture
         # vLLM flattens batch+sequence into a 2-D [N, hidden] tensor. HF's
         # Qwen2DecoderLayer expects [B, T, hidden]. Treat the flattened
         # tensor as a single batch.
@@ -232,9 +264,7 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
 
         # Causal attention mask for HF Qwen2DecoderLayer (additive form).
         attn_mask = torch.zeros((1, 1, seq_len, seq_len), device=hidden.device, dtype=hidden.dtype)
-        causal_block = torch.full(
-            (seq_len, seq_len), float("-inf"), device=hidden.device, dtype=hidden.dtype
-        ).triu(1)
+        causal_block = torch.full((seq_len, seq_len), float("-inf"), device=hidden.device, dtype=hidden.dtype).triu(1)
         attn_mask = attn_mask + causal_block
 
         h = hidden_3d
@@ -261,44 +291,49 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         return audio_codes.reshape(-1)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights including the MIMO branch.
+        """Load weights, optionally including the MIMO branch.
 
         Upstream's ``load_weights`` filters out everything matching
         ``mimo_layers.``, ``mimo_output.``, ``mimo_norm.``, ``audio_decoder.``
-        because PR 36127 only does ASR. We need ``mimo_*`` for audio out;
-        ``audio_decoder.*`` still gets dropped (it's the flow-matching
-        detokenizer that lives in our code2wav stage).
+        because PR 36127 only does ASR. When ``kimia_generate_audio=True``
+        we keep the ``mimo_*`` keys (the modules exist); when it's False
+        we filter them out again so AutoWeightsLoader doesn't try to find
+        a destination for them.
+
+        ``audio_decoder.*`` always gets dropped — it's the flow-matching
+        detokenizer that lives in our code2wav stage.
         """
         from vllm.model_executor.models.utils import AutoWeightsLoader
 
-        # Re-implement upstream's load_weights but keep mimo_*.
         skipped_patterns = ["audio_decoder."]
+        if not self._generate_audio:
+            # MIMO branch wasn't built; drop its weights so the loader
+            # doesn't raise "no destination" for mimo_layers/mimo_norm/
+            # mimo_output.
+            skipped_patterns.extend(["mimo_layers.", "mimo_norm.", "mimo_output."])
+
         weights_list = [
-            (name, param)
-            for name, param in weights
-            if not any(pattern in name for pattern in skipped_patterns)
+            (name, param) for name, param in weights if not any(pattern in name for pattern in skipped_patterns)
         ]
-        main_weights = [
-            (name, param) for name, param in weights_list
-            if not name.startswith("audio_tower.")
-        ]
+        main_weights = [(name, param) for name, param in weights_list if not name.startswith("audio_tower.")]
 
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(main_weights, mapper=self.hf_to_vllm_mapper)
 
-        # Whisper sub-bundle (delegated to the parent's helper).
         whisper_loaded = self._load_whisper_subbundle()
         loaded.update(whisper_loaded)
         return loaded
 
     def _load_whisper_subbundle(self) -> set[str]:
-        """Defer to upstream's whisper-bundle loader if it's exposed; else
-        log and skip (the parent's ``load_weights`` would normally do this
-        but we've overridden it).
+        """Load the Whisper encoder sub-bundle via upstream's helper.
+
+        Kimi-Audio ships the Whisper-large-v3 encoder as a separate
+        safetensors file under ``<model_path>/whisper-large-v3/`` (not in
+        the main checkpoint). Upstream's helper handles the QKV fusion
+        and ``fc1/fc2`` → ``mlp.*`` rename that our main AutoWeightsLoader
+        doesn't know about, so we defer to it entirely.
         """
         import os
-
-        from safetensors import safe_open
 
         try:
             from vllm.model_executor.models.kimi_audio import (
@@ -309,25 +344,18 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
 
         whisper_path = os.path.join(self.model_path, KIMIA_WHISPER_SUBFOLDER, "model.safetensors")
         if not os.path.exists(whisper_path):
-            logger.warning(
-                "Whisper sub-bundle not found at %s — audio-tower will run "
-                "with random weights. Audio understanding will not work.",
-                whisper_path,
+            raise FileNotFoundError(
+                f"Whisper sub-bundle not found at {whisper_path}. Expected it inside "
+                f"the Kimi-Audio checkpoint — audio understanding cannot initialize "
+                f"without these weights."
             )
-            return set()
 
-        # Prefer the parent's helper if it exists; otherwise inline the read.
         helper = getattr(super(), "_load_whisper_weights_from_file", None)
-        if callable(helper):
-            return helper(whisper_path)
-
-        loaded: set[str] = set()
-        with safe_open(whisper_path, framework="pt") as f:
-            for key in f.keys():
-                if not key.startswith("model.encoder.") or "embed_positions" in key:
-                    continue
-                # MIMO-TODO: replicate upstream's FC->MLP rename and QKV
-                # fusion here when calling outside the parent helper.
-                # For Slice 2 we lean on the helper being present.
-                loaded.add(key)
-        return loaded
+        if not callable(helper):
+            raise RuntimeError(
+                "Upstream vllm.model_executor.models.kimi_audio lacks "
+                "`_load_whisper_weights_from_file`. Your vLLM build is too old — "
+                "rebase onto a version that includes PR 36127's whisper loader, "
+                "or vendor the QKV-fusion and fc1/fc2→mlp rename logic here."
+            )
+        return helper(whisper_path)
