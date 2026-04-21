@@ -7,7 +7,13 @@ import torch
 
 from .flow_matching.ode_wrapper import StreamingODEWrapperForPrefix
 from .flow_matching.model import DiTPrefix
-from .flow_matching.scheduler import StreamingFlowMatchingScheduler
+
+try:
+    from torchdyn.core import NeuralODE
+
+    NEURALODE_INSTALLED = True
+except ImportError:
+    NEURALODE_INSTALLED = False
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +58,14 @@ class StreamingSemanticFMWrapper:
             f">>> SemanticFMWrapper initialized with use_cfg={use_cfg}, use_cfg_rescale={use_cfg_rescale}, cfg_init={cfg_init}, cfg_scale={cfg_scale}, cfg_schedule={cfg_schedule}"
         )
 
-        self.scheduler = StreamingFlowMatchingScheduler()
+        # Flow-matching solver state (previously lived on a separate
+        # StreamingFlowMatchingScheduler; inlined here to match the
+        # CosyVoice3/Voxtral style where one class owns the ODE loop).
+        self.sigma_min = 1e-4
+        self.t_min = 0.0
+        self.t_max = 1.0 - self.sigma_min
+        self._neural_ode = None  # Lazily built on first _solve_neural_ode call
+
         self.ode_wrapper = StreamingODEWrapperForPrefix(
             net=self.speech_model,
             x_mask=None,
@@ -90,12 +103,10 @@ class StreamingSemanticFMWrapper:
         """
         bs = 1
 
-        self.scheduler.set_timesteps(ode_steps)
-
         semantic_tokens_chunk = semantic_tokens_chunk.unsqueeze(0).to(self.device)
         xt_chunk = xt_chunk.unsqueeze(0).to(self.device).to(self.dtype)
 
-        t_span = torch.linspace(0, 1, self.scheduler.timesteps)
+        t_span = torch.linspace(0, 1, ode_steps)
 
         x_mask = torch.zeros(bs, xt_chunk.shape[1], device=self.device).bool()
 
@@ -109,16 +120,9 @@ class StreamingSemanticFMWrapper:
         if verbose:
             t_start = time.time()
         if ode_solver == "neural_ode_euler":
-            x_t = self.scheduler.sample_by_neuralode(
-                self.ode_wrapper, time_steps=t_span, xt=xt_chunk, verbose=False
-            )
+            x_t = self._solve_neural_ode(self.ode_wrapper, t_span, xt_chunk)
         elif ode_solver == "naive_euler":
-            x_t = self.scheduler.sample(
-                ode_wrapper=self.ode_wrapper,
-                time_steps=t_span,
-                xt=xt_chunk,
-                verbose=False,
-            )
+            x_t = self._solve_euler(self.ode_wrapper, t_span, xt_chunk)
         else:
             raise NotImplementedError(
                 "ode_solver should be in ('neural_ode_euler', 'naive_euler')"
@@ -236,6 +240,42 @@ class StreamingSemanticFMWrapper:
             max_kv_cache_tokens=self.max_kv_cache_tokens,
             condition_cache=self.condition_cache,
         )
+
+    def _solve_euler(self, ode_wrapper, time_steps, xt):
+        """Fixed-step Euler integration over ``time_steps`` — matches Kimi's
+        original ``StreamingFlowMatchingScheduler.sample``.
+
+        Uses a fixed step size ``h = (t_max - t_min) / len(time_steps)`` (same
+        value across all iterations), not the variable ``dt`` derived from
+        ``time_steps`` spacing — preserves upstream Kimi-Audio numerics
+        exactly.
+        """
+        h = (self.t_max - self.t_min) / len(time_steps)
+        h = h * torch.ones(xt.shape[0], dtype=xt.dtype, device=xt.device)
+        for t in time_steps:
+            predicted_v = ode_wrapper(t, xt)
+            xt = xt + h * predicted_v
+        return xt
+
+    def _solve_neural_ode(self, ode_wrapper, time_steps, xt):
+        """Torchdyn ``NeuralODE`` integration — optional path.
+
+        ``sensitivity='adjoint'`` is inherited from upstream; it only matters
+        for backprop-through-ODE, so at inference time this is effectively an
+        Euler step with an extra abstraction. Cached on first call.
+        """
+        if not NEURALODE_INSTALLED:
+            raise ImportError("NeuralODE is not installed, please install it first.")
+        if self._neural_ode is None:
+            self._neural_ode = NeuralODE(
+                ode_wrapper,
+                solver="euler",
+                sensitivity="adjoint",
+                atol=self.sigma_min,
+                rtol=self.sigma_min,
+            )
+        _, traj = self._neural_ode(xt, time_steps)
+        return traj[-1]
 
     @torch.inference_mode()
     def prefill(self, mel, semantic_token, chunk_size=150, verbose=False):
