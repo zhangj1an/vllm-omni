@@ -102,25 +102,35 @@ def _build_mimo_norm(config) -> nn.Module:
     return Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
 
-# Extended weight mapper: keep upstream's keys AND add the audio-out keys
-# that upstream's load_weights deliberately filters out. The mimo_* entries
-# are harmless when the MIMO branch isn't built because load_weights
-# filters those names out before handing them to AutoWeightsLoader.
+# Extended weight mapper: matches upstream PR 36127 (audio tower prefix +
+# fc1/fc2 -> mlp substr rename so whisper-large-v3 safetensors keys land
+# on vLLM's Whisper modules) plus the Slice-2 audio-out keys that
+# upstream's load_weights deliberately filters out.
 _HF_TO_VLLM_MAPPER = WeightsMapper(
     orig_to_new_prefix={
-        # From upstream PR 36127:
+        # Audio tower (Whisper encoder loaded from the whisper-large-v3
+        # secondary bundle).
+        "model.encoder.": "audio_tower.",
+        # VQ-Adaptor projector:
         "model.vq_adaptor.layers.0.": "multi_modal_projector.vq_adaptor_layers_0.",
         "model.vq_adaptor.layers.3.": "multi_modal_projector.vq_adaptor_layers_3.",
         "model.vq_adaptor.layers.4.": "multi_modal_projector.vq_adaptor_layers_4.",
+        # Language model (Qwen2-7B):
         "model.layers.": "language_model.model.layers.",
         "model.embed_tokens.": "language_model.model.embed_tokens.",
         "model.norm.": "language_model.model.norm.",
         "lm_head.": "language_model.lm_head.",
-        # Slice-2 audio-out additions:
+        # Slice-2 audio-out (MIMO branch):
         "model.mimo_layers.": "mimo_layers.",
         "model.mimo_norm.": "mimo_norm.",
         "mimo_output.": "mimo_output.",
-    }
+    },
+    orig_to_new_substr={
+        # Whisper HF layout uses ``.fc1.``/``.fc2.`` for MLP; vLLM's
+        # WhisperEncoder expects them under ``.mlp.fc1.``/``.mlp.fc2.``.
+        ".fc1.": ".mlp.fc1.",
+        ".fc2.": ".mlp.fc2.",
+    },
 )
 
 
@@ -293,69 +303,30 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights, optionally including the MIMO branch.
 
-        Upstream's ``load_weights`` filters out everything matching
-        ``mimo_layers.``, ``mimo_output.``, ``mimo_norm.``, ``audio_decoder.``
-        because PR 36127 only does ASR. When ``kimia_generate_audio=True``
-        we keep the ``mimo_*`` keys (the modules exist); when it's False
-        we filter them out again so AutoWeightsLoader doesn't try to find
-        a destination for them.
+        The Whisper-large-v3 encoder ships as a secondary safetensors
+        bundle under ``<model_path>/whisper-large-v3/``; upstream's
+        ``__init__`` registers it via ``self.secondary_weights`` so those
+        keys are appended to the ``weights`` iterable we receive here.
+        Our ``hf_to_vllm_mapper`` handles the ``model.encoder.`` ->
+        ``audio_tower.`` rename and the ``.fc1.``/``.fc2.`` -> ``.mlp.*``
+        substring rename so the bundle lands on the right modules.
 
-        ``audio_decoder.*`` always gets dropped — it's the flow-matching
-        detokenizer that lives in our code2wav stage.
+        We skip:
+
+        - ``model.decoder.*`` and any other ``model.*`` keys that the
+          mapper doesn't rename (the whisper decoder isn't used).
+        - ``audio_decoder.*`` (the flow-matching detokenizer lives in
+          the code2wav stage).
+        - ``mimo_layers.*`` / ``mimo_norm.*`` / ``mimo_output.*`` when
+          ``kimia_generate_audio=False`` (the MIMO modules weren't
+          allocated, so AutoWeightsLoader would otherwise raise "no
+          destination").
         """
         from vllm.model_executor.models.utils import AutoWeightsLoader
 
-        skipped_patterns = ["audio_decoder."]
+        skip_prefixes = ["model.", "audio_decoder."]
         if not self._generate_audio:
-            # MIMO branch wasn't built; drop its weights so the loader
-            # doesn't raise "no destination" for mimo_layers/mimo_norm/
-            # mimo_output.
-            skipped_patterns.extend(["mimo_layers.", "mimo_norm.", "mimo_output."])
+            skip_prefixes.extend(["mimo_layers.", "mimo_norm.", "mimo_output."])
 
-        weights_list = [
-            (name, param) for name, param in weights if not any(pattern in name for pattern in skipped_patterns)
-        ]
-        main_weights = [(name, param) for name, param in weights_list if not name.startswith("audio_tower.")]
-
-        loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(main_weights, mapper=self.hf_to_vllm_mapper)
-
-        whisper_loaded = self._load_whisper_subbundle()
-        loaded.update(whisper_loaded)
-        return loaded
-
-    def _load_whisper_subbundle(self) -> set[str]:
-        """Load the Whisper encoder sub-bundle via upstream's helper.
-
-        Kimi-Audio ships the Whisper-large-v3 encoder as a separate
-        safetensors file under ``<model_path>/whisper-large-v3/`` (not in
-        the main checkpoint). Upstream's helper handles the QKV fusion
-        and ``fc1/fc2`` → ``mlp.*`` rename that our main AutoWeightsLoader
-        doesn't know about, so we defer to it entirely.
-        """
-        import os
-
-        try:
-            from vllm.model_executor.models.kimi_audio import (
-                KIMIA_WHISPER_SUBFOLDER,
-            )
-        except ImportError:
-            KIMIA_WHISPER_SUBFOLDER = "whisper-large-v3"
-
-        whisper_path = os.path.join(self.model_path, KIMIA_WHISPER_SUBFOLDER, "model.safetensors")
-        if not os.path.exists(whisper_path):
-            raise FileNotFoundError(
-                f"Whisper sub-bundle not found at {whisper_path}. Expected it inside "
-                f"the Kimi-Audio checkpoint — audio understanding cannot initialize "
-                f"without these weights."
-            )
-
-        helper = getattr(super(), "_load_whisper_weights_from_file", None)
-        if not callable(helper):
-            raise RuntimeError(
-                "Upstream vllm.model_executor.models.kimi_audio lacks "
-                "`_load_whisper_weights_from_file`. Your vLLM build is too old — "
-                "rebase onto a version that includes PR 36127's whisper loader, "
-                "or vendor the QKV-fusion and fc1/fc2→mlp rename logic here."
-            )
-        return helper(whisper_path)
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

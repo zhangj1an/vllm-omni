@@ -36,6 +36,7 @@ stage_args:
       gpu_memory_utilization: 0.85
       enforce_eager: true
       trust_remote_code: true
+      tokenizer_mode: kimi_audio
       enable_prefix_caching: false
       engine_output_type: latent
       max_model_len: 8192
@@ -69,6 +70,7 @@ stage_args:
       gpu_memory_utilization: 0.30
       enforce_eager: true
       trust_remote_code: true
+      tokenizer_mode: kimi_audio
       enable_prefix_caching: false
       engine_output_type: audio
       max_model_len: 18192

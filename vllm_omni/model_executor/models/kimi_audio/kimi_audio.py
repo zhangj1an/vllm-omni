@@ -83,6 +83,13 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             )
             self.code2wav = None
             self.model = self.fused_thinker
+            # DefaultModelLoader reads ``secondary_weights`` off the top-level
+            # module; forward the fused thinker's entry (whisper-large-v3
+            # sub-bundle, registered by upstream's ``__init__``) so the
+            # whisper encoder weights actually get fed into load_weights.
+            inner_secondary = getattr(self.fused_thinker, "secondary_weights", None)
+            if inner_secondary:
+                self.secondary_weights = inner_secondary
         elif self.model_stage == "code2wav":
             self.fused_thinker = None
             self.code2wav = init_vllm_registered_model(
