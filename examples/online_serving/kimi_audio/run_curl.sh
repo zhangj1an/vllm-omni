@@ -7,10 +7,8 @@
 #   TASK=audio2audio bash run_curl.sh           # spoken response
 #   TASK=text2audio  bash run_curl.sh           # TTS-style
 #
-# Server launch:
-#   audio2text  -> kimi_audio.yaml
-#   audio2audio -> kimi_audio_audio_out.yaml (or kimi_audio_async_chunk.yaml)
-#   text2audio  -> kimi_audio_audio_out.yaml (or kimi_audio_async_chunk.yaml)
+# Server launch: kimi_audio.yaml for all three (or kimi_audio_async_chunk.yaml
+# for streaming audio output).
 set -euo pipefail
 
 TASK="${TASK:-audio2text}"

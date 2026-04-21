@@ -1,21 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Offline inference example for Kimi-Audio-7B-Instruct.
-
-Unified entry point covering the three Kimi-Audio task modes:
-
-  - ``audio2text``  audio in, text out (ASR / audio QA). Single-stage
-                    fused-thinker pipeline (``kimi_audio.yaml``).
-  - ``audio2audio`` audio in, audio out (spoken response). Two-stage
-                    pipeline (``kimi_audio_audio_out.yaml``):
-                    fused thinker -> code2wav.
-  - ``text2audio``  text in, audio out (TTS-style). Same two-stage
-                    pipeline as ``audio2audio`` but with no audio
-                    placeholder in the prompt and no multimodal data.
-
-For low-TTFB streaming of the audio-out tasks see
-``end2end_async_chunk.py``.
-"""
+"""Offline inference example for Kimi-Audio-7B-Instruct covering three
+task modes: ``audio2text`` (ASR / audio QA), ``audio2audio``, and
+``text2audio``. All three use ``kimi_audio.yaml`` (two-stage audio-out
+pipeline); ``audio2text`` ignores the stage-1 audio output. For low-TTFB
+streaming see ``end2end_async_chunk.py``."""
 
 import os
 from typing import NamedTuple
@@ -55,13 +44,13 @@ TASK_DEFAULTS = {
         "default_audio_url": AUDIO2TEXT_DEFAULT_URL,
     },
     "audio2audio": {
-        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio_audio_out.yaml",
+        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
         "question": "Answer in audio. Briefly summarize what was said.",
         "output_dir": "./output_audio",
         "default_audio_url": None,
     },
     "text2audio": {
-        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio_audio_out.yaml",
+        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
         "question": "Please say the following in audio: \"Hello, my name is Kimi.\"",
         "output_dir": "./output_tts",
         "default_audio_url": None,

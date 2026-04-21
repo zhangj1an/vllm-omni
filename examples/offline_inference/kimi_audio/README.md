@@ -2,11 +2,11 @@
 
 Unified `end2end.py` supports three task modes via the `--task` flag:
 
-| `--task`       | Input | Output | Stage config                          |
-|----------------|-------|--------|---------------------------------------|
-| `audio2text`   | audio | text   | `kimi_audio.yaml` (single-stage)      |
-| `audio2audio`  | audio | audio  | `kimi_audio_audio_out.yaml` (2 stages)|
-| `text2audio`   | text  | audio  | `kimi_audio_audio_out.yaml` (2 stages)|
+| `--task`       | Input | Output | Stage config                  |
+|----------------|-------|--------|-------------------------------|
+| `audio2text`   | audio | text   | `kimi_audio.yaml`             |
+| `audio2audio`  | audio | audio  | `kimi_audio.yaml`             |
+| `text2audio`   | text  | audio  | `kimi_audio.yaml`             |
 
 The script picks the right stage config and per-stage sampling params
 automatically; `--stage-configs-path` / `--output-dir` / `--question`
@@ -41,16 +41,15 @@ Outputs land under the per-task default directory
 
 ## Stage configs
 
-- `kimi_audio.yaml`: single-stage `fused_thinker` (Whisper-large-v3
-  encoder + VQ-Adaptor + Qwen2-7B LLM + text LM head).
-- `kimi_audio_audio_out.yaml`: two-stage pipeline adding the MIMO
-  audio-out branch on stage 0 and `code2wav`
-  (PrefixStreamingFlowMatchingDetokenizer + BigVGAN) as stage 1.
-  The detokenizer is vendored in-tree under
-  `vllm_omni/model_executor/models/kimi_audio/kimia_detokenizer/`;
-  `flash_attn` is still required at runtime. Expects 2 GPUs by
-  default and sets `hf_overrides.kimia_generate_audio: true` on
-  stage 0 so the MIMO branch is built and runs.
+- `kimi_audio.yaml`: two-stage audio-out pipeline. Stage 0 is the fused
+  thinker (Whisper-large-v3 + VQ-Adaptor + Qwen2-7B + 6-layer MIMO branch)
+  with `hf_overrides.kimia_generate_audio: true`. Stage 1 is `code2wav`
+  (PrefixStreamingFlowMatchingDetokenizer + BigVGAN). The detokenizer is
+  vendored under `vllm_omni/model_executor/models/kimi_audio/kimia_detokenizer/`;
+  `flash_attn` is required at runtime. Expects 2 GPUs by default. For
+  text-out only, drop stage 1 and set `kimia_generate_audio: false`.
+- `kimi_audio_async_chunk.yaml`: same pipeline with async-chunk streaming
+  (sub-second TTFB).
 
 ## Streaming audio output
 

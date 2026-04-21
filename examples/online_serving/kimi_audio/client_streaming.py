@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Online client for Kimi-Audio, covering three task modes.
-
-  - ``audio2text``  audio in, text out. Non-streaming chat response;
-                    prints ``choices[0].message.content``.
-  - ``audio2audio`` audio in, audio out. Streams base64-encoded WAV
-                    chunks over SSE and concatenates to ``--out``.
-  - ``text2audio``  text in, audio out (TTS-style). Same streaming
-                    response format as ``audio2audio`` but no
-                    ``audio_url`` in the user message.
-
-The audio-out tasks require the server to be launched with
-``kimi_audio_async_chunk.yaml`` (streaming) or
-``kimi_audio_audio_out.yaml`` (non-streaming); the text-out task uses
-``kimi_audio.yaml``.
-"""
+"""Online client for Kimi-Audio covering three task modes:
+``audio2text`` (non-streaming chat), ``audio2audio`` and ``text2audio``
+(SSE-streamed base64-WAV chunks concatenated to ``--out``). Launch the
+server with ``kimi_audio.yaml`` (all three tasks) or
+``kimi_audio_async_chunk.yaml`` (sub-second TTFB for audio-out)."""
 
 from __future__ import annotations
 

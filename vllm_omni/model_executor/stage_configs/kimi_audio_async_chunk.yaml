@@ -1,15 +1,9 @@
-# Stage config for Kimi-Audio-7B-Instruct, Slice 3 (async-chunk streaming).
-#
-# Same two-stage pipeline as kimi_audio_audio_out.yaml, but enables
-# async-chunk streaming so the code2wav stage starts emitting audio while
-# the thinker is still decoding. Lower TTFB at the cost of slightly higher
-# total work (chunk-boundary cross-fade, mel hamming overlap).
+# Kimi-Audio-7B audio-out pipeline with async-chunk streaming: stage 1
+# starts emitting audio while stage 0 is still decoding.
 #
 # Chunk math: codec_chunk_frames=25 + codec_left_context_frames=25 mirrors
-# Qwen3-Omni's working values. Kimi's PrefixStreamingFlowMatchingDetokenizer
-# is itself a streaming model with internal cross-fade, so the connector
-# left-context is mainly to give the flow-matching prefix enough lookback.
-# Tune up if you hear seam artefacts; tune down for lower latency.
+# Qwen3-Omni's working values. Tune up if you hear seam artefacts, down
+# for lower latency.
 
 async_chunk: true
 stage_args:
