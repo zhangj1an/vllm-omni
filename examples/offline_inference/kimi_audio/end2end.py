@@ -1,17 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Offline inference example for Kimi-Audio-7B-Instruct, Slice 1 (text out).
+"""Offline inference example for Kimi-Audio-7B-Instruct.
 
-Audio-in, text-out (ASR / audio question-answering). Wraps the user's audio
-in Kimi's chat template and runs a single-stage fused-thinker pipeline.
+Unified entry point covering the three Kimi-Audio task modes:
 
-Slice 2 will add ``end2end_audio_out.py`` (chat with audio response) and
-``end2end_async_chunk.py`` (streaming variant).
+  - ``audio2text``  audio in, text out (ASR / audio QA). Single-stage
+                    fused-thinker pipeline (``kimi_audio.yaml``).
+  - ``audio2audio`` audio in, audio out (spoken response). Two-stage
+                    pipeline (``kimi_audio_audio_out.yaml``):
+                    fused thinker -> code2wav.
+  - ``text2audio``  text in, audio out (TTS-style). Same two-stage
+                    pipeline as ``audio2audio`` but with no audio
+                    placeholder in the prompt and no multimodal data.
+
+For low-TTFB streaming of the audio-out tasks see
+``end2end_async_chunk.py``.
 """
 
 import os
+import tempfile
 from typing import NamedTuple
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
+import soundfile as sf
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.multimodal.media.audio import load_audio
@@ -24,6 +36,40 @@ SEED = 42
 # Kimi-Audio audio placeholder (mirrors upstream vLLM PR 36127's
 # AUDIO_PLACEHOLDER / chat template).
 AUDIO_PLACEHOLDER = "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>"
+OUTPUT_SAMPLE_RATE = 24000
+
+TASK_CHOICES = ("audio2text", "audio2audio", "text2audio")
+
+# Default sample audio for the audio2text task. Originally taken from the
+# MiniMax TTS-Multilingual test set (sample 10), mirrored to Google Drive
+# for a stable link. The original share URL is
+# https://drive.google.com/file/d/1RHz6uUSbAR_N3Li1Bjh8dPknykw4IVio/view?usp=sharing;
+# we rewrite to the direct-download form so urlopen gets bytes instead of
+# the HTML preview page.
+AUDIO2TEXT_DEFAULT_URL = "https://drive.google.com/uc?export=download&id=1RHz6uUSbAR_N3Li1Bjh8dPknykw4IVio"
+
+# Per-task stage config (relative to this script's directory) and the
+# default user instruction used when ``--question`` is not supplied.
+TASK_DEFAULTS = {
+    "audio2text": {
+        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
+        "question": "Please transcribe the audio.",
+        "output_dir": "./output_text",
+        "default_audio_url": AUDIO2TEXT_DEFAULT_URL,
+    },
+    "audio2audio": {
+        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio_audio_out.yaml",
+        "question": "Answer in audio. Briefly summarize what was said.",
+        "output_dir": "./output_audio",
+        "default_audio_url": None,
+    },
+    "text2audio": {
+        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio_audio_out.yaml",
+        "question": "Please say the following in audio: \"Hello, my name is Kimi.\"",
+        "output_dir": "./output_tts",
+        "default_audio_url": None,
+    },
+}
 
 
 class QueryResult(NamedTuple):
@@ -31,39 +77,158 @@ class QueryResult(NamedTuple):
     limit_mm_per_prompt: dict[str, int]
 
 
-def _build_prompt(question: str) -> str:
-    """Wrap a single audio + text turn in the Kimi-Audio chat template."""
-    return f"<|im_kimia_user_msg_start|>{AUDIO_PLACEHOLDER}{question}<|im_msg_end|><|im_kimia_assistant_msg_start|>"
+def _build_prompt(question: str, with_audio: bool) -> str:
+    """Wrap a single user turn in the Kimi-Audio chat template.
+
+    ``with_audio=True`` inserts the audio placeholder before the text
+    instruction (used for tasks that take audio input). ``False`` builds
+    a text-only user turn (used for ``text2audio``).
+    """
+    placeholder = AUDIO_PLACEHOLDER if with_audio else ""
+    return (
+        f"<|im_kimia_user_msg_start|>{placeholder}{question}"
+        f"<|im_msg_end|><|im_kimia_assistant_msg_start|>"
+    )
 
 
-def get_audio_query(
-    question: str | None = None,
-    audio_path: str | None = None,
-    sampling_rate: int = 16000,
+def get_audio_input_query(
+    question: str,
+    audio_path: str | None,
+    sampling_rate: int,
+    default_audio_url: str | None,
 ) -> QueryResult:
-    if question is None:
-        question = "Please transcribe the audio."
-
-    if audio_path:
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        audio_data = load_audio(audio_path, sr=sampling_rate)
-    else:
-        audio_data = AudioAsset("mary_had_lamb").audio_and_sample_rate[0]
-
+    audio_data = _load_audio_or_default(audio_path, sampling_rate, default_audio_url)
     return QueryResult(
         inputs={
-            "prompt": _build_prompt(question),
+            "prompt": _build_prompt(question, with_audio=True),
             "multi_modal_data": {"audio": [audio_data]},
         },
         limit_mm_per_prompt={"audio": 1},
     )
 
 
+def get_text_input_query(
+    question: str,
+    audio_path: str | None,
+    sampling_rate: int,
+    default_audio_url: str | None,
+) -> QueryResult:
+    # No audio input; the placeholder + multi_modal_data are omitted.
+    del audio_path, sampling_rate, default_audio_url
+    return QueryResult(
+        inputs={"prompt": _build_prompt(question, with_audio=False)},
+        limit_mm_per_prompt={},
+    )
+
+
+def _load_audio_or_default(audio_path: str | None, sampling_rate: int, default_audio_url: str | None):
+    if audio_path:
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        return load_audio(audio_path, sr=sampling_rate)
+    if default_audio_url:
+        return _load_audio_from_url(default_audio_url, sampling_rate)
+    return AudioAsset("mary_had_lamb").audio_and_sample_rate[0]
+
+
+def _load_audio_from_url(url: str, sampling_rate: int):
+    """Download a remote audio URL to a temp file and decode via load_audio."""
+    suffix = os.path.splitext(urlparse(url).path)[1] or ".audio"
+    with urlopen(url) as resp:
+        data = resp.read()
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        return load_audio(tmp_path, sr=sampling_rate)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+query_map = {
+    "audio2text": get_audio_input_query,
+    "audio2audio": get_audio_input_query,
+    "text2audio": get_text_input_query,
+}
+
+
+def build_sampling_params(task: str, max_tokens: int) -> list[SamplingParams]:
+    if task == "audio2text":
+        return [
+            SamplingParams(
+                temperature=0.0,
+                top_p=1.0,
+                top_k=-1,
+                max_tokens=max_tokens,
+                seed=SEED,
+                detokenize=True,
+                repetition_penalty=1.0,
+            )
+        ]
+
+    # Two-stage audio-out pipelines (audio2audio, text2audio) need one
+    # SamplingParams per stage.
+    thinker = SamplingParams(
+        temperature=0.6,
+        top_p=0.95,
+        top_k=50,
+        max_tokens=max_tokens,
+        seed=SEED,
+        detokenize=True,
+        repetition_penalty=1.0,
+    )
+    code2wav = SamplingParams(
+        temperature=0.0,
+        top_p=1.0,
+        top_k=-1,
+        max_tokens=max_tokens * 8,
+        seed=SEED,
+        detokenize=False,
+    )
+    return [thinker, code2wav]
+
+
+def write_outputs(omni_outputs, output_dir: str) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    for stage_outputs in omni_outputs:
+        output = stage_outputs.request_output
+        request_id = output.request_id
+
+        if stage_outputs.final_output_type == "text":
+            text = output.outputs[0].text
+            out_txt = os.path.join(output_dir, f"{request_id}.txt")
+            with open(out_txt, "w", encoding="utf-8") as f:
+                f.write("Prompt:\n")
+                f.write(str(output.prompt) + "\n\n")
+                f.write("vllm_text_output:\n")
+                f.write(str(text).strip() + "\n")
+            print(f"Request {request_id}: text -> {out_txt}")
+            print("--- response ---")
+            print(text)
+            print("----------------")
+        elif stage_outputs.final_output_type == "audio":
+            audio_tensor = output.outputs[0].multimodal_output.get("audio")
+            if audio_tensor is None:
+                print(f"Request {request_id}: no audio emitted (text-only response)")
+                continue
+            audio_numpy = audio_tensor.float().detach().cpu().numpy().reshape(-1)
+            out_wav = os.path.join(output_dir, f"{request_id}.wav")
+            sf.write(out_wav, audio_numpy, samplerate=OUTPUT_SAMPLE_RATE, format="WAV")
+            print(f"Request {request_id}: audio -> {out_wav}")
+
+
 def main(args):
+    defaults = TASK_DEFAULTS[args.task]
+    stage_configs_path = args.stage_configs_path or defaults["stage_configs_path"]
+    question = args.question or defaults["question"]
+    output_dir = args.output_dir or defaults["output_dir"]
+
     omni = Omni(
         model=args.model_name,
-        stage_configs_path=args.stage_configs_path,
+        stage_configs_path=stage_configs_path,
         log_stats=args.enable_stats,
         log_file=("omni_pipeline.log" if args.enable_stats else None),
         init_sleep_seconds=args.init_sleep_seconds,
@@ -72,46 +237,30 @@ def main(args):
         shm_threshold_bytes=args.shm_threshold_bytes,
     )
 
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        top_p=1.0,
-        top_k=-1,
-        max_tokens=args.max_tokens,
-        seed=SEED,
-        detokenize=True,
-        repetition_penalty=1.0,
-    )
-
-    query = get_audio_query(
-        question=args.question,
-        audio_path=args.audio_path,
-        sampling_rate=args.sampling_rate,
+    sampling_params = build_sampling_params(args.task, args.max_tokens)
+    query_func = query_map[args.task]
+    query = query_func(
+        question,
+        args.audio_path,
+        args.sampling_rate,
+        defaults["default_audio_url"],
     )
     prompts = [query.inputs for _ in range(args.num_prompts)]
-
-    omni_outputs = omni.generate(prompts, [sampling_params])
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    for stage_outputs in omni_outputs:
-        output = stage_outputs.request_output
-        if stage_outputs.final_output_type != "text":
-            continue
-        request_id = output.request_id
-        text = output.outputs[0].text
-        out_txt = os.path.join(args.output_dir, f"{request_id}.txt")
-        with open(out_txt, "w", encoding="utf-8") as f:
-            f.write("Prompt:\n")
-            f.write(str(output.prompt) + "\n\n")
-            f.write("vllm_text_output:\n")
-            f.write(str(text).strip() + "\n")
-        print(f"Request ID: {request_id}, text saved to {out_txt}")
-        print("--- response ---")
-        print(text)
-        print("----------------")
+    omni_outputs = omni.generate(prompts, sampling_params)
+    write_outputs(omni_outputs, output_dir)
 
 
 def parse_args():
-    parser = FlexibleArgumentParser(description="Offline inference for Kimi-Audio-7B-Instruct (text-out).")
+    parser = FlexibleArgumentParser(
+        description="Offline inference for Kimi-Audio-7B-Instruct (audio2text, audio2audio, text2audio).",
+    )
+    parser.add_argument(
+        "--task",
+        "-t",
+        choices=TASK_CHOICES,
+        default="audio2text",
+        help="Which Kimi-Audio task to run.",
+    )
     parser.add_argument(
         "--model-name",
         "-m",
@@ -124,14 +273,15 @@ def parse_args():
         "-q",
         type=str,
         default=None,
-        help="Text instruction accompanying the audio (default: transcribe).",
+        help="Text instruction. Default depends on --task.",
     )
     parser.add_argument(
         "--audio-path",
         "-a",
         type=str,
         default=None,
-        help="Path to a local audio file. Falls back to a bundled asset.",
+        help="Path to a local audio file. Ignored for --task text2audio. "
+        "Falls back to a bundled asset for audio-input tasks.",
     )
     parser.add_argument(
         "--sampling-rate",
@@ -143,7 +293,8 @@ def parse_args():
         "--max-tokens",
         type=int,
         default=512,
-        help="Max output tokens.",
+        help="Max output tokens for the thinker stage. Audio-out tasks "
+        "scale this by 8x for the code2wav stage.",
     )
     parser.add_argument(
         "--num-prompts",
@@ -154,10 +305,15 @@ def parse_args():
     parser.add_argument(
         "--stage-configs-path",
         type=str,
-        default="../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
-        help="Path to the stage config YAML.",
+        default=None,
+        help="Override the per-task default stage config YAML.",
     )
-    parser.add_argument("--output-dir", default="./output_text")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Override the per-task default output directory.",
+    )
     parser.add_argument("--enable-stats", action="store_true")
     parser.add_argument("--init-sleep-seconds", type=int, default=20)
     parser.add_argument("--batch-timeout", type=int, default=5)

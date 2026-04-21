@@ -1,29 +1,25 @@
 # Kimi-Audio-7B online serving
 
 vLLM-Omni exposes Kimi-Audio through the OpenAI-compatible
-`/v1/chat/completions` endpoint. Both audio-in and audio-out flow over
-chat (no `/v1/audio/speech` handler is needed — Kimi is a chat model, not
-a TTS service).
+`/v1/chat/completions` endpoint. All three task modes — audio-in /
+text-out, audio-in / audio-out, and text-in / audio-out — flow over
+chat (no `/v1/audio/speech` handler is needed; Kimi is a chat model,
+not a TTS service).
 
 ## Launch the server
 
-Text-out only (Slice 1 stage config — single-stage, lighter):
+Pick the stage config that matches the task(s) you want to serve:
 
 ```bash
+# audio -> text only (single-stage, lighter)
 vllm serve moonshotai/Kimi-Audio-7B-Instruct --omni --port 8091 \
     --stage-configs-path vllm_omni/model_executor/stage_configs/kimi_audio.yaml
-```
 
-Audio-in / audio-out (Slice 2 — two-stage, needs 2 GPUs by default):
-
-```bash
+# audio -> audio and/or text -> audio (two-stage, needs 2 GPUs by default)
 vllm serve moonshotai/Kimi-Audio-7B-Instruct --omni --port 8091 \
     --stage-configs-path vllm_omni/model_executor/stage_configs/kimi_audio_audio_out.yaml
-```
 
-Streaming audio output (Slice 3 — async-chunk, lower TTFB):
-
-```bash
+# audio -> audio / text -> audio with sub-second TTFB streaming
 vllm serve moonshotai/Kimi-Audio-7B-Instruct --omni --port 8091 \
     --stage-configs-path vllm_omni/model_executor/stage_configs/kimi_audio_async_chunk.yaml
 ```
@@ -34,45 +30,44 @@ detokenizer + BigVGAN vocoder.
 
 ## Send a request
 
-### Audio-in / text-out (ASR or audio QA)
+### Unified Python client (`client_streaming.py`)
 
 ```bash
-bash run_curl_audio_in_text_out.sh
+# audio -> text (non-streaming)
+python client_streaming.py --task audio2text
+
+# audio -> audio (streaming, writes output.wav)
+python client_streaming.py --task audio2audio --audio-path /path/to/clip.wav
+
+# text -> audio (streaming, writes output.wav)
+python client_streaming.py --task text2audio \
+    --question "Please say the following in audio: \"Hello, my name is Kimi.\""
 ```
 
-Backend: stage 0 returns `final_output_type: text`, so the response uses
-the standard `choices[0].message.content` field.
+For audio-out tasks the client opens a server-sent-event stream against
+`/v1/chat/completions`, collects `delta.content` chunks (each is a
+base64-encoded audio chunk), and writes the concatenated waveform to
+`--out` (default `output.wav`).
 
-### Audio-in / audio-out
+### Unified curl script (`run_curl.sh`)
 
 ```bash
-bash run_curl_audio_in_audio_out.sh
+TASK=audio2text  bash run_curl.sh
+TASK=audio2audio bash run_curl.sh   # writes response.wav
+TASK=text2audio  bash run_curl.sh   # writes response.wav
 ```
 
-Backend: stage 1 returns `final_output_type: audio`. The response uses
-`choices[0].message.audio.data` (base64-encoded WAV at 24 kHz mono).
-The `modalities` field on the request must include `"audio"`.
-
-### Streaming audio output
-
-```bash
-python client_streaming.py \
-    --host localhost --port 8091 \
-    --audio-path /path/to/clip.wav
-```
-
-The client opens a server-sent-event stream against `/v1/chat/completions`,
-collects `content` chunks (each is a base64-encoded audio chunk), and
-writes the concatenated waveform to `output.wav`.
+Overrides: `PORT`, `HOST`, `OUT_FILE`, `QUESTION`.
 
 ## Endpoint summary
 
-| Modalities       | Stage config                      | Final output type |
-|------------------|-----------------------------------|-------------------|
-| audio in, text out | `kimi_audio.yaml`                 | `text`            |
-| audio in, audio out | `kimi_audio_audio_out.yaml`       | `audio`           |
-| audio in, streaming audio out | `kimi_audio_async_chunk.yaml` | `audio` (chunked) |
-| audio in, audio out (TP=2) | `kimi_audio_tp.yaml`         | `audio`           |
+| Task        | Stage config                    | Stream? | Response field                       |
+|-------------|---------------------------------|---------|--------------------------------------|
+| `audio2text`| `kimi_audio.yaml`               | no      | `choices[0].message.content`         |
+| `audio2audio` | `kimi_audio_audio_out.yaml` or `kimi_audio_async_chunk.yaml` | yes (async-chunk) / no | `choices[0].message.audio.data` (WAV b64, 24 kHz mono) |
+| `text2audio`  | `kimi_audio_audio_out.yaml` or `kimi_audio_async_chunk.yaml` | yes (async-chunk) / no | `choices[0].message.audio.data` (WAV b64, 24 kHz mono) |
+
+For audio-out responses the request must set `modalities: ["text", "audio"]`.
 
 ## Multi-GPU (TP)
 
