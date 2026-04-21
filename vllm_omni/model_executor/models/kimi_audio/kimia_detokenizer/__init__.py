@@ -1,14 +1,14 @@
 import torch
 import os
 from .bigvgan_wrapper import BigVGANWrapper
-from .semantic_fm_prefix_streaming import StreamingSemanticFMWrapper
+from .flow_matching.model import DiTPrefix
 
 
 class PrefixStreamingFlowMatchingDetokenizer:
     def __init__(
         self,
         vocoder: BigVGANWrapper,
-        fm: StreamingSemanticFMWrapper,
+        fm: DiTPrefix,
         look_ahead_tokens: int = 0,
     ) -> None:
         self.dtype = torch.bfloat16
@@ -18,6 +18,9 @@ class PrefixStreamingFlowMatchingDetokenizer:
         self.vocoder = vocoder
         self.vocoder.to_dtype(self.dtype)
 
+        # ``semantic_fm`` kept as the attribute name for continuity with
+        # upstream Moonshot code; it now points at a ``DiTPrefix`` that
+        # owns its own ODE solver and streaming KV cache (Voxtral-style).
         self.semantic_fm = fm
 
         # initialize mel_spec
@@ -51,7 +54,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
         cfg_schedule="linear",
     ):
         bigvgan = BigVGANWrapper.from_pretrained(vocoder_config, vocoder_ckpt, device)
-        semantic_fm = StreamingSemanticFMWrapper.from_pretrained(
+        semantic_fm = DiTPrefix.from_pretrained(
             fm_config,
             fm_ckpt,
             device,
@@ -116,7 +119,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
             chunk_size=chunk_size,
             verbose=False,
         )
-        self.state_dict_backup = self.semantic_fm.state_dict()
+        self.state_dict_backup = self.semantic_fm.snapshot_streaming_state()
 
     @torch.inference_mode()
     def detokenize_streaming(
@@ -167,9 +170,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
         length = speech_mel.shape[0]
         self.semantic_fm.start_position_id += length
         self.semantic_fm.update_incremental_state()
-        self.semantic_fm.reserve_kv_cache_tokens += (
-            self.semantic_fm.ode_wrapper.kv_cache_tokens
-        )
+        self.semantic_fm.reserve_kv_cache_tokens += self.semantic_fm.kv_cache_tokens
 
         # smoothing
 
@@ -247,7 +248,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
         ):
             # out of position id,
             self.semantic_fm.clear_all_states()
-            self.semantic_fm.load_state_dict(self.state_dict_backup)
+            self.semantic_fm.restore_streaming_state(self.state_dict_backup)
 
         return ret_wav
 
