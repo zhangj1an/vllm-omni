@@ -1,20 +1,19 @@
 import torch
 import os
-from .bigvgan_wrapper import BigVGANWrapper
+from .bigvgan_wrapper import KimiBigVGAN
 from .flow_matching.model import DiTPrefix
 
 
 class PrefixStreamingFlowMatchingDetokenizer:
     def __init__(
         self,
-        vocoder: BigVGANWrapper,
+        vocoder: KimiBigVGAN,
         fm: DiTPrefix,
         look_ahead_tokens: int = 0,
     ) -> None:
         self.dtype = torch.bfloat16
 
-        self.vocoder = vocoder
-        self.vocoder.to_dtype(self.dtype)
+        self.vocoder = vocoder.to(self.dtype)
 
         # Attribute name kept for continuity with upstream Moonshot.
         self.semantic_fm = fm
@@ -48,7 +47,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
         cfg_scale=7.5,
         cfg_schedule="linear",
     ):
-        bigvgan = BigVGANWrapper.from_pretrained(vocoder_config, vocoder_ckpt, device)
+        bigvgan = KimiBigVGAN.load_kimi_checkpoint(vocoder_config, vocoder_ckpt, device)
         semantic_fm = DiTPrefix.from_pretrained(
             fm_config,
             fm_ckpt,
@@ -62,56 +61,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
             cfg_schedule=cfg_schedule,
         )
         return cls(bigvgan, semantic_fm, look_ahead_tokens=look_ahead_tokens)
-
-    @torch.inference_mode()
-    def prefill(
-        self, timbre_speech, timbre_semantic_token, chunk_size: int, timbre_mel=None
-    ):
-        """
-        Arguments:
-            timbre_speech: torch.Tensor, shape [B, N_speech_24k]
-            timbre_semantic_token: torch.Tensor, shape [B, N]
-            chunk_size: int, chunk size for prefilling
-            timbre_mel: torch.Tensor, shape [B, N, 80], optional, if not None, use this mel spectrogram instead of extracting from timbre_speech
-        """
-        if timbre_mel is None:
-            assert (
-                timbre_speech is not None
-            ), "timbre_speech should not be None if timbre_mel is not None"
-            assert (
-                len(timbre_semantic_token.shape) == 2
-                and len(timbre_speech.shape) == 2
-                and chunk_size > 0
-            )
-            assert timbre_speech.shape[0] == 1 and timbre_semantic_token.shape[0] == 1
-
-            mel_spec = self.vocoder.extract_mel_from_wav(
-                wav_data=timbre_speech.squeeze(0)
-            )
-        else:
-            assert (
-                len(timbre_mel.shape) == 3
-                and len(timbre_semantic_token.shape) == 2
-                and chunk_size > 0
-            )
-            assert timbre_mel.shape[0] == 1 and timbre_semantic_token.shape[0] == 1
-            mel_spec = timbre_mel.squeeze(0)
-
-        if mel_spec.shape[0] < timbre_semantic_token.shape[1]:
-            mel_spec = torch.nn.functional.pad(
-                mel_spec, (0, 0, 0, timbre_semantic_token.shape[1] - mel_spec.shape[0])
-            )
-        elif mel_spec.shape[0] > timbre_semantic_token.shape[1]:
-            mel_spec = mel_spec[: timbre_semantic_token.shape[1], :]
-
-        self.semantic_fm.clear_all_states()
-        self.semantic_fm.prefill(
-            mel_spec,
-            timbre_semantic_token.squeeze(0),
-            chunk_size=chunk_size,
-            verbose=False,
-        )
-        self.state_dict_backup = self.semantic_fm.snapshot_streaming_state()
 
     @torch.inference_mode()
     def detokenize_streaming(
@@ -265,51 +214,6 @@ def get_audio_detokenizer(model_path):
     return detokenizer
 
 
-def detokenize(detokenizer, tokens, ref_wav, ref_tokens):
-    with torch.no_grad():
-        detokenizer.clear_states()
-        detokenizer.prefill(ref_wav, ref_tokens, chunk_size=150)
-        cache_speech_collection = []
-        chunk_size = 150
-        first_chunk_size = 100
-        first_chunk_tokens = tokens[:, :first_chunk_size]
-        gen_speech = detokenizer.detokenize_streaming(
-            first_chunk_tokens, is_final=tokens.size(1) <= first_chunk_size
-        )
-        cache_speech_collection.append(gen_speech)
-        res_tokens = tokens[:, first_chunk_size:]
-        for i in range(0, res_tokens.size(1), chunk_size):
-            chunk_tokens = res_tokens[:, i : i + chunk_size]
-            gen_speech = detokenizer.detokenize_streaming(
-                chunk_tokens, is_final=(i + chunk_size >= res_tokens.size(1))
-            )
-            cache_speech_collection.append(gen_speech)
-
-        gen_speech_all = torch.cat(cache_speech_collection, dim=-1)
-        return gen_speech_all
-
-
-def detokenize_streaming(detokenizer, tokens, ref_wav, ref_tokens):
-    with torch.no_grad():
-        detokenizer.clear_states()
-        detokenizer.prefill(ref_wav, ref_tokens, chunk_size=150)
-        cache_speech_collection = []
-        chunk_size = 150
-        first_chunk_size = 100
-        first_chunk_tokens = tokens[:, :first_chunk_size]
-        gen_speech = detokenizer.detokenize_streaming(
-            first_chunk_tokens, is_final=tokens.size(1) <= first_chunk_size
-        )
-        yield gen_speech
-        res_tokens = tokens[:, first_chunk_size:]
-        for i in range(0, res_tokens.size(1), chunk_size):
-            chunk_tokens = res_tokens[:, i : i + chunk_size]
-            gen_speech = detokenizer.detokenize_streaming(
-                chunk_tokens, is_final=(i + chunk_size >= res_tokens.size(1))
-            )
-            yield gen_speech
-
-
 def detokenize_noref(detokenizer, tokens):
     with torch.no_grad():
         detokenizer.clear_states()
@@ -331,23 +235,3 @@ def detokenize_noref(detokenizer, tokens):
 
         gen_speech_all = torch.cat(cache_speech_collection, dim=-1)
         return gen_speech_all
-
-
-def detokenize_noref_streaming(detokenizer, tokens):
-    with torch.no_grad():
-        detokenizer.clear_states()
-        cache_speech_collection = []
-        chunk_size = 150
-        first_chunk_size = 100
-        first_chunk_tokens = tokens[:, :first_chunk_size]
-        gen_speech = detokenizer.detokenize_streaming(
-            first_chunk_tokens, is_final=tokens.size(1) <= first_chunk_size
-        )
-        yield gen_speech
-        res_tokens = tokens[:, first_chunk_size:]
-        for i in range(0, res_tokens.size(1), chunk_size):
-            chunk_tokens = res_tokens[:, i : i + chunk_size]
-            gen_speech = detokenizer.detokenize_streaming(
-                chunk_tokens, is_final=(i + chunk_size >= res_tokens.size(1))
-            )
-            yield gen_speech
