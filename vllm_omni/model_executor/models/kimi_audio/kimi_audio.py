@@ -1,16 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inference-only Kimi-Audio-7B unified model (fused thinker + code2wav).
-
-Stage routing dispatcher. Selects KimiAudioFusedThinker (Whisper encoder +
-VQ-Adaptor + Qwen2 LLM, with audio heads added in Slice 2) or
-KimiAudioCode2Wav (flow-matching detokenizer + BigVGAN, Slice 2) based on
-``vllm_config.model_config.model_stage``.
-
-Slice 1 scope: only ``fused_thinker`` stage is wired up; the text-out path
-matches upstream vLLM PR 36127 (ASR / audio-QA). The ``code2wav`` stage and
-the audio-out branch arrive in Slice 2.
-"""
+"""Kimi-Audio-7B unified dispatcher: routes to fused_thinker or code2wav
+based on ``vllm_config.model_config.model_stage``."""
 
 from collections.abc import Iterable
 from functools import cached_property
@@ -45,22 +36,10 @@ logger = init_logger(__name__)
     dummy_inputs=KimiAudioDummyInputsBuilder,
 )
 class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    """Unified Kimi-Audio model dispatcher.
-
-    Architecture:
-    - fused_thinker: Whisper encoder + VQ-Adaptor + Qwen2 LLM -> text logits
-      (Slice 2 will add parallel audio-token heads alongside the text head.)
-    - code2wav: flow-matching detokenizer + BigVGAN -> 24kHz waveform
-      (Slice 2.)
-
-    Usage: set ``model_stage`` in the stage config to ``fused_thinker`` or
-    ``code2wav``.
-    """
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
-            # Mirrors upstream vllm.model_executor.models.kimi_audio.AUDIO_PLACEHOLDER.
             return "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>"
         return None
 
@@ -84,9 +63,8 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             self.code2wav = None
             self.model = self.fused_thinker
             # DefaultModelLoader reads ``secondary_weights`` off the top-level
-            # module; forward the fused thinker's entry (whisper-large-v3
-            # sub-bundle, registered by upstream's ``__init__``) so the
-            # whisper encoder weights actually get fed into load_weights.
+            # module — forward the fused thinker's whisper-large-v3 entry
+            # so encoder weights reach load_weights.
             inner_secondary = getattr(self.fused_thinker, "secondary_weights", None)
             if inner_secondary:
                 self.secondary_weights = inner_secondary
@@ -164,11 +142,6 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         model_outputs: torch.Tensor | OmniOutput,
         **kwargs: Any,
     ) -> OmniOutput:
-        """Wrap raw forward outputs into an OmniOutput.
-
-        Slice 1 always returns the text hidden states; the multimodal_outputs
-        slot is reserved for Slice 2's parallel audio-token codes.
-        """
         if isinstance(model_outputs, OmniOutput):
             return model_outputs
         text_hidden_states = model_outputs
@@ -193,15 +166,9 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         return self.model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Forward checkpoint weights to the active stage.
-
-        Kimi-Audio's HF checkpoint is flat: the fused_thinker owns the
-        upstream weight mapper plus the Slice-2 audio-out keys
-        (mimo_layers / mimo_norm / mimo_output). The code2wav stage loads
-        its own checkpoints (vocoder + flow-matching) directly from the
-        ``<model_path>/{vocoder,audio_detokenizer}/`` subfolders, so it
-        consumes — and ignores — anything routed through here.
-        """
+        # code2wav stage loads its own checkpoints from
+        # <model_path>/{vocoder,audio_detokenizer}/ directly, so it consumes
+        # and ignores anything routed through here.
         loaded: set[str] = set()
         sub_loaded = self.model.load_weights(weights)
         prefix = self.model_stage

@@ -1,27 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CUDA Graph wrapper for Kimi-Audio's flow-matching detokenizer.
-
-The hot loop in Kimi-Audio's code2wav stage is the BigVGAN vocoder forward
-(``vocoder.decode_mel``) called once per chunk, plus the flow-matching
-DiT step called ``ode_step`` (default 15) times per chunk inside
-``StreamingSemanticFMWrapper.infer_chunk``.
-
-Slice 4 wraps the **vocoder** in a CUDA graph for fixed mel-chunk sizes
-because:
-  1. its input shape (``[T_mel, 80]``) is the cleanest fixed-size point in
-     the streaming pipeline,
-  2. it dominates per-chunk wall-clock when the FM model is small, and
-  3. capturing the FM ODE step would require the wrapper to know the
-     internal KV-cache state of ``StreamingSemanticFMWrapper``, which
-     ships from kimia_infer and is not stable API.
-
-For an additional win, also expose a ``capture_ode_step`` hook that the
-caller can wire into the FM model when its internals stabilize.
-
-Pattern follows
-``vllm_omni.model_executor.models.qwen3_tts.cuda_graph_decoder_wrapper``.
-"""
+"""CUDA Graph wrapper around ``vocoder.decode_mel`` for fixed mel-chunk
+sizes. Vocoder's ``[T_mel, 80]`` input is the cleanest fixed-size point
+in the streaming pipeline."""
 
 from __future__ import annotations
 
@@ -32,12 +13,11 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-# 480 samples per mel frame, 24 kHz output, 80 mel bins (BigVGAN config).
+# 24 kHz output, 480 samples per mel frame, 80 mel bins (BigVGAN config).
 _NUM_MELS = 80
 
 
 class KimiAudioCudaGraphDecoderWrapper:
-    """Capture ``vocoder.decode_mel`` at fixed mel-chunk sizes."""
 
     def __init__(
         self,
@@ -61,20 +41,12 @@ class KimiAudioCudaGraphDecoderWrapper:
         codec_chunk_frames: int = 0,
         codec_left_context_frames: int = 0,
     ) -> list[int]:
-        """Pick mel-frame sizes to capture from streaming chunk config.
-
-        Mirrors qwen3_tts: include the streaming chunk size, the chunk +
-        left context window, and a couple of power-of-2 buckets so the
-        first chunk (which is sized differently) and tail chunks still
-        hit a captured graph.
-        """
         sizes: set[int] = set()
         if codec_chunk_frames > 0:
             sizes.add(codec_chunk_frames)
             if codec_left_context_frames > 0:
                 sizes.add(codec_chunk_frames + codec_left_context_frames)
-        # Cover Kimi's first-chunk (100 tokens) and chunk (150) defaults
-        # from kimia_infer.models.detokenizer.detokenize_noref.
+        # Cover Kimi's first-chunk (100) and chunk (150) defaults.
         sizes.update({100, 150, 250})
         for p2 in [32, 64, 128, 256, 512]:
             sizes.add(p2)
@@ -110,7 +82,7 @@ class KimiAudioCudaGraphDecoderWrapper:
             self.capture_sizes,
         )
 
-        # Eager warmup pass to allocate workspaces.
+        # Eager pass first to allocate workspaces.
         for size in self.capture_sizes:
             dummy = torch.zeros(size, _NUM_MELS, dtype=dtype, device=device)
             with torch.no_grad():
@@ -147,11 +119,8 @@ class KimiAudioCudaGraphDecoderWrapper:
         self.static_outputs[size] = static_output
 
     def decode_mel(self, mel: torch.Tensor) -> torch.Tensor:
-        """Drop-in replacement for ``vocoder.decode_mel``.
-
-        Falls back to eager when the input doesn't fit any captured bucket,
-        when the wrapper is disabled, or before warmup.
-        """
+        """Drop-in for ``vocoder.decode_mel``. Falls back to eager when the
+        input doesn't fit any captured bucket."""
         if not self.enabled or not self._warmed_up or mel.dim() != 2:
             return self.vocoder.decode_mel(mel)
         actual_size = mel.shape[0]
@@ -162,8 +131,6 @@ class KimiAudioCudaGraphDecoderWrapper:
         self.static_inputs[padded_size].zero_()
         self.static_inputs[padded_size][:actual_size, :].copy_(mel)
         self.graphs[padded_size].replay()
-        # vocoder.decode_mel returns [1, wav_len]; trim to the actual length
-        # using BigVGAN's frame-to-sample factor (= 480 samples per mel frame
-        # at 24 kHz).
+        # Trim [1, wav_len] to actual length: 480 samples per mel frame.
         actual_out_len = actual_size * 480
         return self.static_outputs[padded_size][..., :actual_out_len].clone()

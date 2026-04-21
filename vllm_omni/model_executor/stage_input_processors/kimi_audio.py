@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stage input processors for Kimi-Audio: thinker -> code2wav handoff.
-
-Slice 2 ships ``kimi2code2wav`` (sync, collect-all). Slice 3 will add
-``kimi2code2wav_async_chunk`` for streaming TTFB.
-"""
+"""Stage input processors for Kimi-Audio thinker -> code2wav handoff."""
 
 from typing import Any
 
@@ -17,9 +13,7 @@ from vllm_omni.inputs.data import OmniTokensPrompt
 
 logger = init_logger(__name__)
 
-# Mirrors KimiAudioCode2Wav.KIMIA_TOKEN_OFFSET — audio tokens occupy IDs in
-# [KIMIA_TOKEN_OFFSET, vocab_size). Anything below is text and is dropped on
-# the way to the code2wav stage.
+# Mirrors KimiAudioCode2Wav.KIMIA_TOKEN_OFFSET.
 KIMIA_TOKEN_OFFSET = 152064
 
 
@@ -27,14 +21,8 @@ def _extract_audio_tokens(
     output_token_ids: list[int] | torch.Tensor,
     multimodal_output: dict[str, Any] | None,
 ) -> list[int]:
-    """Pull audio token IDs out of one thinker output.
-
-    Prefers an explicit ``multimodal_output['audio_tokens']`` payload (set by
-    :class:`KimiAudioFusedThinker` when audio decoding fires). Falls back to
-    filtering the flat token-id stream for IDs >= ``KIMIA_TOKEN_OFFSET`` so
-    we still work even if the thinker only emitted them via the text stream
-    (single-head fallback path during Slice-2 bring-up).
-    """
+    """Prefer the explicit audio_tokens payload; fall back to filtering
+    the token-id stream for IDs >= KIMIA_TOKEN_OFFSET."""
     if multimodal_output and "audio_tokens" in multimodal_output:
         codes = multimodal_output["audio_tokens"]
         if isinstance(codes, torch.Tensor):
@@ -54,14 +42,8 @@ def kimi2code2wav(
     prompt: OmniTokensPrompt | TextPrompt | None = None,
     requires_multimodal_data: bool = False,
 ) -> list[OmniTokensPrompt]:
-    """Sync handoff: collect every audio token, hand it to code2wav at once.
-
-    Stage 0 (fused thinker) emits a per-request mixed text/audio token stream
-    plus an optional ``multimodal_outputs['audio_tokens']`` tensor. We strip
-    the text portion and forward the audio token IDs (still in the model's
-    global vocab, the code2wav stage subtracts the offset) as the next
-    stage's ``prompt_token_ids``.
-    """
+    """Sync handoff: collect every audio token, forward to code2wav as
+    ``prompt_token_ids`` (still in global-vocab space)."""
     if not engine_input_source:
         raise ValueError("engine_input_source cannot be empty")
 
@@ -108,28 +90,15 @@ def kimi2code2wav_async_chunk(
     request: OmniEngineCoreRequest,
     is_finished: bool = False,
 ) -> dict[str, Any] | None:
-    """Streaming handoff: emit per-chunk audio tokens as the thinker decodes.
-
-    Mirrors :func:`vllm_omni.model_executor.stage_input_processors.qwen3_omni
-    .talker2code2wav_async_chunk`. Accumulates audio tokens (either from an
-    explicit ``multimodal_outputs['audio_tokens']`` slot or by filtering the
-    pooling_output's token stream for IDs >= ``KIMIA_TOKEN_OFFSET``) in the
-    connector's per-request buffer; flushes a chunk of
-    ``codec_chunk_frames`` once enough have arrived, or at request end.
-
-    Returns:
-        A dict with ``code_predictor_codes`` (the flat token list for this
-        chunk, still in the global vocab), ``left_context_size``, and
-        ``finished`` — the code2wav stage consumes these as its prompt.
-        Returns ``None`` to signal "wait for more tokens".
-    """
+    """Streaming handoff: buffer per-request audio tokens, flush a chunk
+    of ``codec_chunk_frames`` when enough arrive or at request end. Returns
+    ``None`` to mean "wait for more tokens"."""
     connector = getattr(transfer_manager, "connector", None)
     raw_cfg = getattr(connector, "config", {}) or {}
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
     chunk_size = int(cfg.get("codec_chunk_frames", 25))
     left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
 
-    # Pull new audio tokens out of this step's pooling output.
     audio_tokens_obj = pooling_output.get("audio_tokens") if pooling_output else None
     new_tokens: list[int]
     if audio_tokens_obj is not None:
@@ -138,7 +107,6 @@ def kimi2code2wav_async_chunk(
         else:
             new_tokens = [int(t) for t in audio_tokens_obj]
     else:
-        # Fallback: scan the full token stream for this step.
         step_token_ids = pooling_output.get("token_ids") or [] if pooling_output else []
         if isinstance(step_token_ids, torch.Tensor):
             step_token_ids = step_token_ids.reshape(-1).tolist()
@@ -151,8 +119,6 @@ def kimi2code2wav_async_chunk(
 
     length = len(buffer)
     if length == 0:
-        # Nothing to hand off yet. If the request has finished, tell the
-        # downstream stage so it can close cleanly; otherwise wait.
         if is_finished:
             return {
                 "code_predictor_codes": [],

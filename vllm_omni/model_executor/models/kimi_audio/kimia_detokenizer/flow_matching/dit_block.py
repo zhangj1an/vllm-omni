@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from diffusers.models.embeddings import apply_rotary_emb as _diffusers_apply_rotary_emb
+from diffusers.models.embeddings import apply_rotary_emb
 
 try:
     from flash_attn import flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func
@@ -21,54 +21,23 @@ def _sdpa_varlen_attn(
     cu_seqlens_k: torch.Tensor,
     dropout_p: float = 0.0,
 ) -> torch.Tensor:
-    """SDPA-based fallback for ``flash_attn_varlen_func``.
-
-    Matches the flash-attn varlen contract: ``q``/``k``/``v`` are packed
-    ``(total_tokens, num_heads, head_dim)`` tensors whose per-sample
-    boundaries are given by ``cu_seqlens_q``/``cu_seqlens_k``. Returns a
-    tensor with the same shape as ``q``.
-
-    Per-segment attention is computed in a Python loop to keep the
-    implementation obvious; the detokenizer runs with batch size 1 in
-    practice, so the loop is almost always a single iteration.
-    """
+    """SDPA fallback for ``flash_attn_varlen_func`` with the same packed
+    ``(total_tokens, num_heads, head_dim)`` contract. The per-segment loop
+    is fine because the detokenizer runs at batch size 1."""
     q_bounds = cu_seqlens_q.tolist()
     k_bounds = cu_seqlens_k.tolist()
     outs = []
     for i in range(len(q_bounds) - 1):
         qs, qe = q_bounds[i], q_bounds[i + 1]
         ks, ke = k_bounds[i], k_bounds[i + 1]
-        # (Lq, H, D) -> (1, H, Lq, D) for SDPA
         q_seg = q[qs:qe].transpose(0, 1).unsqueeze(0)
         k_seg = k[ks:ke].transpose(0, 1).unsqueeze(0)
         v_seg = v[ks:ke].transpose(0, 1).unsqueeze(0)
         out_seg = F.scaled_dot_product_attention(
             q_seg, k_seg, v_seg, dropout_p=dropout_p
-        )  # (1, H, Lq, D)
-        outs.append(out_seg.squeeze(0).transpose(0, 1))  # (Lq, H, D)
+        )
+        outs.append(out_seg.squeeze(0).transpose(0, 1))
     return torch.cat(outs, dim=0)
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-):
-    """Apply complex-polar RoPE to q and k.
-
-    Thin wrapper around ``diffusers.apply_rotary_emb`` with
-    ``use_real=False`` — the upstream helper internally does
-    ``view_as_complex → freqs_cis.unsqueeze(2) → multiply → view_as_real →
-    flatten(3)``, which is bit-identical to Kimi's original reshape_for_
-    broadcast + complex multiply path (verified on random inputs).
-
-    ``freqs_cis`` comes in shape ``(bsz, seqlen, head_dim/2)`` (complex);
-    diffusers' ``.unsqueeze(2)`` makes it broadcast over the heads dim of
-    q/k shaped ``(bsz, seqlen, num_heads, head_dim)``.
-    """
-    xq_out = _diffusers_apply_rotary_emb(xq, freqs_cis, use_real=False)
-    xk_out = _diffusers_apply_rotary_emb(xk, freqs_cis, use_real=False)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 class Attention(nn.Module):
@@ -89,8 +58,6 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
-        # Auto-downgrade to SDPA when flash-attn isn't installed; mirrors
-        # the pattern used by qwen3_tts/whisper_encoder.
         self.fused_attn = flash_attention and HAS_FLASH_ATTN
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
@@ -127,7 +94,8 @@ class Attention(nn.Module):
             v = v.view(B, N, self.num_heads, self.head_dim)
 
             if rotary_pos_emb is not None:
-                q, k = apply_rotary_emb(q, k, rotary_pos_emb)
+                q = apply_rotary_emb(q, rotary_pos_emb, use_real=False).type_as(q)
+                k = apply_rotary_emb(k, rotary_pos_emb, use_real=False).type_as(k)
 
             if incremental_state is not None:
                 if "prev_k" in incremental_state:
@@ -217,9 +185,6 @@ def modulate(x, shift, scale):
 
 
 class FinalLayer(nn.Module):
-    """
-    The final layer of DiT.
-    """
 
     def __init__(self, hidden_size, out_channels):
         super().__init__()
@@ -237,9 +202,6 @@ class FinalLayer(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    """
-    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
-    """
 
     def __init__(
         self,

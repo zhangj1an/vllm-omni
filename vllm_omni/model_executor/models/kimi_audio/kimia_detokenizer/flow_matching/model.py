@@ -1,28 +1,4 @@
-"""Kimi-Audio flow-matching DiT (prefix-streaming).
-
-Voxtral-style: the ``DiTPrefix`` ``nn.Module`` owns the transformer blocks,
-the ODE solver, the classifier-free-guidance conditional state, the
-per-layer KV cache, and the streaming/prefill lifecycle. Nothing else in
-``kimia_detokenizer`` orchestrates flow matching — callers go straight from
-``PrefixStreamingFlowMatchingDetokenizer`` into ``DiTPrefix`` methods.
-
-Responsibilities, low-to-high:
-    ``_predict_velocity(x, position_ids, t, condition, ...)``
-        Raw transformer call — embed inputs, run DiT blocks with KV cache,
-        project to velocity.
-    ``_ode_step(t, x)``
-        Single Euler/ODE step — wraps ``_predict_velocity`` with stored
-        ``cu_seqlens`` / ``incremental_state`` / etc.
-    ``_solve_euler`` / ``_solve_neural_ode``
-        The integration loop.
-    ``infer_chunk`` / ``infer_mel``
-        Public chunked streaming inference.
-    ``prefill`` / ``prefill_chunk``
-        Fill the KV cache from a reference audio prompt (voice cloning).
-    ``snapshot_streaming_state`` / ``restore_streaming_state``
-        Save/restore the chunked streaming state (NOT the model weights —
-        those go through the standard ``nn.Module.state_dict``).
-"""
+"""Kimi-Audio flow-matching DiT (prefix-streaming)."""
 
 import copy
 import logging
@@ -56,12 +32,8 @@ def _cached_zeros(numel, device="cpu", dtype=torch.float32):
 
 
 class TimestepEmbedder(nn.Module):
-    """Embeds scalar timesteps via a sinusoidal projection + 2-layer MLP.
-
-    Sinusoidal step delegated to ``diffusers.Timesteps`` (bit-exact).
-    The MLP is kept as ``nn.Sequential`` so state-dict keys
-    (``mlp.0.*``, ``mlp.2.*``) match Moonshot checkpoints.
-    """
+    """MLP is kept as ``nn.Sequential`` so state-dict keys ``mlp.0.*`` /
+    ``mlp.2.*`` match Moonshot checkpoints."""
 
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
@@ -83,14 +55,9 @@ class TimestepEmbedder(nn.Module):
 
 
 class SinusoidalPositionalEmbedding(nn.Module):
-    """Frozen sincos positional table backed by diffusers' helper.
-
-    Preserves Moonshot's ``make_positions`` cumsum semantics at forward —
-    each non-padding token gets its 1-based rank within the chunk (not the
-    absolute id). Table is a non-persistent buffer, same effective serialize
-    behavior as the original class (whose ``self.weights`` was a plain
-    attribute, not a state-dict entry).
-    """
+    """Frozen sincos table with fairseq-style cumsum positions: each
+    non-padding token gets its 1-based rank within the chunk, not its
+    absolute id."""
 
     def __init__(self, embedding_dim: int, padding_idx: int, init_size: int = 1024):
         super().__init__()
@@ -114,10 +81,7 @@ class SinusoidalPositionalEmbedding(nn.Module):
 
 
 class DiTPrefix(nn.Module):
-    """Flow-matching DiT with streaming KV cache and reference-audio prefill.
-
-    Top-level entry points: ``infer_chunk``, ``infer_mel``, ``prefill``.
-    """
+    """Flow-matching DiT with streaming KV cache and reference-audio prefill."""
 
     def __init__(
         self,
@@ -206,16 +170,13 @@ class DiTPrefix(nn.Module):
         self.final_layer = FinalLayer(hidden_size, output_size)
         self.initialize_weights()
 
-        # ----- inference / streaming state (not serialized) -----
-        # Flow-matching solver constants.
         self.sigma_min = 1e-4
         self.t_min = 0.0
         self.t_max = 1.0 - self.sigma_min
-        self._neural_ode = None  # Lazily built on first _solve_neural_ode call
+        self._neural_ode = None
 
-        # CFG params. ``use_cfg`` must be False for streaming (enforced in
-        # ``_ode_step``); kept here so ``from_pretrained`` can accept the
-        # same signature as the old wrapper.
+        # CFG must be False for streaming (enforced in _ode_step); fields
+        # kept so from_pretrained can accept the original signature.
         self.use_cfg = False
         self.use_cfg_rescale = True
         self.cfg_init = 1.0
@@ -223,8 +184,6 @@ class DiTPrefix(nn.Module):
         self.cfg_schedule = "linear"
         self.cfg_token_id = 0
 
-        # Streaming KV cache + condition state. Populated by
-        # ``set_conditions`` / ``_ode_step`` / ``update_incremental_state``.
         self.incremental_state: dict = {}
         self.kv_cache_tokens = 0
         self.position_ids = None
@@ -237,20 +196,16 @@ class DiTPrefix(nn.Module):
         self.cu_maxlen_k = None
         self.previous_seqlen = None
 
-        # Lifecycle / prompt limits (set by ``from_pretrained``).
         self.max_kv_cache_tokens = 900
         self.max_prompt_chunk = 2
         self.reserve_kv_cache_tokens = 0
         self.start_position_id = 0
         self.condition_cache: dict = {"previous_seqlen": 0}
 
-        # Mel normalization (set by ``from_pretrained`` when the yaml carries it).
         self.normalize_mel = False
         self.mel_mean = None
         self.mel_std = None
 
-        # Inference device + compute dtype. Set once we're moved via
-        # ``to(...)`` during ``from_pretrained``.
         self.dtype = torch.bfloat16
 
     def initialize_weights(self):
@@ -277,9 +232,6 @@ class DiTPrefix(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    # ------------------------------------------------------------------ #
-    # Raw transformer call (Voxtral's ``_predict_velocity`` analog).
-    # ------------------------------------------------------------------ #
     def _predict_velocity(
         self,
         x,
@@ -295,14 +247,6 @@ class DiTPrefix(nn.Module):
         incremental_state=None,
         nopadding=True,
     ):
-        """Apply the DiT stack to get a velocity prediction.
-
-        Args:
-            x: (N, T, C) tensor of speech latents.
-            position_ids: (N, T) absolute-position indices.
-            t: (N,) diffusion timesteps.
-            condition: (N, T) semantic tokens.
-        """
         condition = self.semantic_token_embedding(condition)
 
         x = self.input_linear(x)
@@ -354,14 +298,8 @@ class DiTPrefix(nn.Module):
 
         return self.final_layer(x, c)
 
-    # ``forward`` aliases to the raw call so ``dit(...)`` still works for
-    # anything that expects the nn.Module contract. Real callers use the
-    # named high-level methods below.
     forward = _predict_velocity
 
-    # ------------------------------------------------------------------ #
-    # Conditional state (old ``StreamingODEWrapperForPrefix`` internals).
-    # ------------------------------------------------------------------ #
     def set_conditions(self, x_mask, x_cond, start_position_id, cache=None):
         if cache is None:
             cache = {}
@@ -403,7 +341,6 @@ class DiTPrefix(nn.Module):
         return {"previous_seqlen": previous_seqlen}
 
     def update_incremental_state(self, condition_cache=None):
-        """Slide the per-layer KV cache window after a chunk."""
         if condition_cache is None:
             condition_cache = self.condition_cache
         assert (
@@ -477,7 +414,6 @@ class DiTPrefix(nn.Module):
             layer_cache["attn_kvcache"].pop("cur_v")
 
     def clear_all_states(self):
-        """Reset both transformer KV cache and the streaming bookkeeping."""
         self.incremental_state = {}
         self.kv_cache_tokens = 0
         self.cu_seqlens = None
@@ -489,11 +425,9 @@ class DiTPrefix(nn.Module):
         self.condition_cache = {"previous_seqlen": 0}
 
     def snapshot_streaming_state(self):
-        """Save streaming state (NOT model weights).
-
-        Used by the top-level detokenizer to restore post-prefill state
-        between subsequent generations from the same reference audio.
-        """
+        """Save streaming state (NOT model weights) so the detokenizer can
+        restore post-prefill state between generations from the same
+        reference audio."""
         return {
             "start_position_id": self.start_position_id,
             "condition_cache": copy.deepcopy(self.condition_cache),
@@ -522,17 +456,9 @@ class DiTPrefix(nn.Module):
         self.cu_maxlen_k = ow["cu_maxlen_k"]
         self.previous_seqlen = ow["previous_seqlen"]
 
-    # ------------------------------------------------------------------ #
-    # ODE stepping + solvers (Voxtral inlines both; we keep them as
-    # private methods because the streaming KV-cache state is mutated
-    # inside ``_predict_velocity`` and needs a named seam).
-    # ------------------------------------------------------------------ #
     def _ode_step(self, t, x):
-        """Single ODE step: predict velocity at ``t`` given ``x``.
-
-        Multiplier ``t * 1000`` matches upstream Moonshot — the DiT was
-        trained on integer timestep IDs, not [0, 1].
-        """
+        """Predict velocity at ``t``. ``t * 1000`` matches upstream Moonshot:
+        the DiT was trained on integer timestep IDs, not [0, 1]."""
         t_long = (
             _cached_zeros(x.shape[0], device=x.device, dtype=torch.long)
             + (t * 1000).long()
@@ -555,7 +481,6 @@ class DiTPrefix(nn.Module):
         )
 
     def _solve_euler(self, time_steps, xt):
-        """Fixed-step Euler integration. Matches upstream numerics exactly."""
         h = (self.t_max - self.t_min) / len(time_steps)
         h = h * torch.ones(xt.shape[0], dtype=xt.dtype, device=xt.device)
         for t in time_steps:
@@ -563,9 +488,6 @@ class DiTPrefix(nn.Module):
         return xt
 
     def _solve_neural_ode(self, time_steps, xt):
-        """Torchdyn adjoint Euler. Equivalent to ``_solve_euler`` at
-        inference (adjoint matters only for backprop-through-ODE).
-        """
         if not NEURALODE_INSTALLED:
             raise ImportError("NeuralODE is not installed; install torchdyn first.")
         if self._neural_ode is None:
@@ -579,9 +501,6 @@ class DiTPrefix(nn.Module):
         _, traj = self._neural_ode(xt, time_steps)
         return traj[-1]
 
-    # ------------------------------------------------------------------ #
-    # Top-level streaming entry points.
-    # ------------------------------------------------------------------ #
     @torch.inference_mode()
     def infer_chunk(
         self,
@@ -594,17 +513,6 @@ class DiTPrefix(nn.Module):
         verbose=False,
         ode_solver="neural_ode_euler",
     ):
-        """Run one streaming chunk of flow-matching decode.
-
-        Args:
-            xt_chunk: (T, 80) pre-sampled noise tensor (unsqueezed internally).
-            semantic_tokens_chunk: (T,) LongTensor of semantic tokens.
-            start_position_id: absolute position for this chunk's first token.
-            cache: look-ahead carry from the prior chunk (or None).
-            look_ahead_tokens: tokens at the tail shared with the next chunk.
-            ode_steps: integration steps.
-            ode_solver: ``"neural_ode_euler"`` (torchdyn) or ``"naive_euler"``.
-        """
         bs = 1
         device = next(self.parameters()).device
 
@@ -670,7 +578,6 @@ class DiTPrefix(nn.Module):
         verbose=False,
         ode_solver="neural_ode_euler",
     ):
-        """Drive ``infer_chunk`` across all chunks of ``semantic_tokens``."""
         assert semantic_tokens.dim() == 1
         device = next(self.parameters()).device
 
@@ -711,12 +618,7 @@ class DiTPrefix(nn.Module):
 
     @torch.inference_mode()
     def prefill(self, mel, semantic_token, chunk_size=150, verbose=False):
-        """Fill the KV cache from a reference audio prompt.
-
-        Args:
-            mel: (T, 80) reference mel.
-            semantic_token: (T,) LongTensor of reference semantic tokens.
-        """
+        """Fill the KV cache from a reference audio prompt."""
         assert mel.dim() == 2
         assert semantic_token.dim() == 1
         assert (
@@ -759,7 +661,6 @@ class DiTPrefix(nn.Module):
             logger.info("Prefilling done in {:.2f} seconds".format(time.time() - t_start))
 
     def prefill_chunk(self, mel_chunk, semantic_tokens_chunk, start_position_id=0):
-        """Write one chunk's KV cache without running the ODE loop."""
         bs = 1
         device = next(self.parameters()).device
 
@@ -781,9 +682,6 @@ class DiTPrefix(nn.Module):
         x_t = torch.Tensor([0.999]).to(device)
         self._ode_step(x_t, mel_chunk)
 
-    # ------------------------------------------------------------------ #
-    # Checkpoint loader.
-    # ------------------------------------------------------------------ #
     @classmethod
     def from_pretrained(
         cls,
@@ -834,13 +732,10 @@ class DiTPrefix(nn.Module):
             for k, v in state_dict.items()
             if "speech_model" in k
         }
-        # Legacy fairseq ``_float_tensor`` dummy buffer — the refactored
-        # SinusoidalPositionalEmbedding doesn't need it.
         speech_model_params.pop("position_embedding._float_tensor", None)
         dit.load_state_dict(speech_model_params, strict=True)
         logger.info(">>> Loaded checkpoint from %s", ckpt_path)
 
-        # Inference-time knobs (previously carried by StreamingSemanticFMWrapper).
         dit.max_prompt_chunk = max_prompt_chunk
         dit.max_kv_cache_tokens = max_kv_cache_tokens
         dit.use_cfg = use_cfg

@@ -13,21 +13,16 @@ class PrefixStreamingFlowMatchingDetokenizer:
     ) -> None:
         self.dtype = torch.bfloat16
 
-        print("Currently using bfloat16 for PrefixFlowMatchingDetokenizer")
-
         self.vocoder = vocoder
         self.vocoder.to_dtype(self.dtype)
 
-        # ``semantic_fm`` kept as the attribute name for continuity with
-        # upstream Moonshot code; it now points at a ``DiTPrefix`` that
-        # owns its own ODE solver and streaming KV cache (Voxtral-style).
+        # Attribute name kept for continuity with upstream Moonshot.
         self.semantic_fm = fm
 
-        # initialize mel_spec
         self.max_pos_size = 4096
         self.is_timbre_semantic_token = False
         self.pre_mel = None
-        self.frame_size = 480  # how many samples in a frame
+        self.frame_size = 480
         self.pre_wav = None
         self.state_dict_backup = None
         self.hamming_window_cache = {}
@@ -103,15 +98,12 @@ class PrefixStreamingFlowMatchingDetokenizer:
             mel_spec = timbre_mel.squeeze(0)
 
         if mel_spec.shape[0] < timbre_semantic_token.shape[1]:
-            # pad mel_spec
             mel_spec = torch.nn.functional.pad(
                 mel_spec, (0, 0, 0, timbre_semantic_token.shape[1] - mel_spec.shape[0])
             )
         elif mel_spec.shape[0] > timbre_semantic_token.shape[1]:
-            # truncate mel_spec
             mel_spec = mel_spec[: timbre_semantic_token.shape[1], :]
 
-        # clear all states
         self.semantic_fm.clear_all_states()
         self.semantic_fm.prefill(
             mel_spec,
@@ -172,13 +164,9 @@ class PrefixStreamingFlowMatchingDetokenizer:
         self.semantic_fm.update_incremental_state()
         self.semantic_fm.reserve_kv_cache_tokens += self.semantic_fm.kv_cache_tokens
 
-        # smoothing
-
-        # I will maintain the history of seqlen wav
-        # For the first chunk, I will only return the half chunk wav, and save the res half chunk in history
-        # For the rest requests, I will concat the generated wav with the history, output one chunk of the history, save the
-
-        if self.pre_mel is None:  # first chunk, related to TTFB
+        # Cross-faded streaming: first chunk returns a half-chunk of audio;
+        # later chunks concat with the saved tail and Hamming-window the seam.
+        if self.pre_mel is None:
             concat_mel = speech_mel
             concat_reconstructed_wav = self.vocoder.decode_mel(concat_mel)
             if is_final:
@@ -188,11 +176,10 @@ class PrefixStreamingFlowMatchingDetokenizer:
             else:
                 reconstructed_wav = concat_reconstructed_wav[
                     :, : int(self.frame_size * chunk_size // 2)
-                ]  # return the first half chunk
-
+                ]
                 self.pre_wav = concat_reconstructed_wav[
                     :, -int(self.frame_size * chunk_size // 2) :
-                ]  # log the last half chunk for next generation step
+                ]
                 self.pre_mel = speech_mel[-chunk_size // 2 :, :]
 
                 ret_wav = reconstructed_wav.float()
@@ -205,7 +192,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
                 self.state_dict_backup = None
                 ret_wav = concat_reconstructed_wav.float()
             else:
-                # fetch history
                 prev_speech_len = self.pre_wav.shape[1]
 
                 if concat_reconstructed_wav.shape[1] > prev_speech_len * 2:
@@ -213,9 +199,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
                 else:
                     gen_speech_len = concat_reconstructed_wav.shape[1] // 2
 
-                reconstructed_wav = concat_reconstructed_wav[
-                    :, :gen_speech_len
-                ]  # return the first half chunk
+                reconstructed_wav = concat_reconstructed_wav[:, :gen_speech_len]
 
                 if gen_speech_len not in self.hamming_window_cache:
                     self.hamming_window_cache[gen_speech_len] = (
@@ -227,7 +211,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
 
                 hamming_window = self.hamming_window_cache[gen_speech_len]
 
-                # apply smoothing of the first half chunk
+                # Apply smoothing to the first half chunk.
                 reconstructed_wav[:, : int(gen_speech_len // 2)] = (
                     self.pre_wav[:, : int(gen_speech_len // 2)]
                     * hamming_window[:, -int(gen_speech_len // 2) :]
@@ -246,7 +230,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
             not is_final
             and self.semantic_fm.start_position_id + 2 * chunk_size > self.max_pos_size
         ):
-            # out of position id,
+            # Out of position id; reset and restore post-prefill state.
             self.semantic_fm.clear_all_states()
             self.semantic_fm.restore_streaming_state(self.state_dict_backup)
 

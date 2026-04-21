@@ -1,24 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-Audio code2wav stage.
-
-Wraps Moonshot's ``PrefixStreamingFlowMatchingDetokenizer`` (flow-matching DiT
-prefix model + BigVGAN vocoder) as a vLLM-Omni generation stage. Consumes the
-audio-token IDs produced by the Slice-2 fused thinker and emits a 24 kHz
-mono waveform.
-
-The detokenizer is vendored under ``vllm_omni.model_executor.models.kimi_audio
-.kimia_detokenizer`` (originally from ``MoonshotAI/Kimi-Audio``'s
-``kimia_infer`` package) and loads its own checkpoints from
-``<model_path>/audio_detokenizer/`` and ``<model_path>/vocoder/``. We do
-**not** wire those checkpoints through vLLM's weight loader — keeping them
-out of vLLM's mapper avoids fighting the upstream PR-36127 hf_to_vllm_mapper
-every time it changes.
-
-Slice 2 (this file): non-streaming chunked decode (``detokenize_noref``).
-Slice 3 will add an async-chunk path that drains the detokenizer's streaming
-chunks lazily; Slice 4 will add a CUDA-graph wrapper around the ODE step.
-"""
+"""Kimi-Audio code2wav stage: audio-token IDs -> 24 kHz waveform via the
+vendored flow-matching detokenizer + BigVGAN vocoder. The detokenizer
+loads its own checkpoints from ``<model_path>/{audio_detokenizer,vocoder}/``
+and is not routed through vLLM's weight loader."""
 
 from __future__ import annotations
 
@@ -41,23 +26,15 @@ from vllm_omni.model_executor.models.output_templates import OmniOutput
 
 logger = init_logger(__name__)
 
-# From config.json: audio token IDs occupy [kimia_token_offset, vocab_size).
-# We subtract the offset before handing tokens to the detokenizer, which
-# expects local audio-code IDs in [0, 16384) (= num codebook entries minus
-# specials).
+# Audio token IDs occupy [KIMIA_TOKEN_OFFSET, vocab_size); subtract the
+# offset before handing tokens to the detokenizer, which expects local
+# audio-code IDs in [0, 16384).
 KIMIA_TOKEN_OFFSET = 152064
-NUM_AUDIO_SPECIAL_TOKENS = 512  # kept aside; see config.num_audio_special_tokens
-OUTPUT_SAMPLE_RATE = 24000  # vocoder ships at 24 kHz / 480-sample frame
+NUM_AUDIO_SPECIAL_TOKENS = 512
+OUTPUT_SAMPLE_RATE = 24000
 
 
 class KimiAudioCode2Wav(nn.Module):
-    """Stage-1 code2wav: audio-token IDs -> 24 kHz waveform.
-
-    Lifecycle mirrors :class:`Qwen3TTSCode2Wav`: lazy load the underlying
-    decoder on first forward, expose dummy ``embed_input_ids`` /
-    ``compute_logits`` so vLLM's runner is happy, and return audio in the
-    multimodal_outputs slot of :class:`OmniOutput`.
-    """
 
     input_modalities = "audio"
 
@@ -89,20 +66,15 @@ class KimiAudioCode2Wav(nn.Module):
     def _ensure_detokenizer_loaded(self) -> None:
         if self._detokenizer is not None:
             return
-        # ``get_audio_detokenizer(model_path)`` reads
-        # ``<model_path>/{audio_detokenizer,vocoder}/`` and pins the
-        # detokenizer onto ``torch.cuda.current_device()`` — make sure the
-        # stage process owns the right CUDA device first.
+        # ``get_audio_detokenizer`` pins onto torch.cuda.current_device() —
+        # the stage process must own the right CUDA device first.
         self._detokenizer = get_audio_detokenizer(self.model_path)
         logger.info("KimiAudioCode2Wav detokenizer loaded from %s", self.model_path)
         self._maybe_install_cuda_graph_wrapper()
 
     def _maybe_install_cuda_graph_wrapper(self) -> None:
-        """Wrap ``vocoder.decode_mel`` with a CUDA graph capture (Slice 4).
-
-        Skipped if the stage runs on CPU, if ``enforce_eager: true`` is set
-        on the YAML, or if the streaming-chunk config can't be derived.
-        """
+        """Wrap ``vocoder.decode_mel`` with a CUDA graph capture. Skipped on
+        CPU, under ``enforce_eager``, or if chunk config is unavailable."""
         if not torch.cuda.is_available():
             return
         if getattr(self.vllm_config.model_config, "enforce_eager", False):
@@ -114,8 +86,6 @@ class KimiAudioCode2Wav(nn.Module):
             logger.warning("KimiAudioCode2Wav: detokenizer has no `vocoder.decode_mel`; skipping CUDA Graph")
             return
 
-        # Pull chunk math from the connector config (set by the streaming
-        # YAML). Default values come from kimia_infer's defaults.
         codec_chunk_frames = 0
         codec_left = 0
         connector_cfg = getattr(self.vllm_config.model_config, "stage_connector_config", None)
@@ -137,15 +107,14 @@ class KimiAudioCode2Wav(nn.Module):
             logger.warning("KimiAudioCode2Wav: CUDA Graph warmup failed; falling back to eager", exc_info=True)
             return
 
-        # Re-route ``vocoder.decode_mel`` through the wrapper. Stash the
-        # original so callers (or tests) can still reach the eager path.
+        # Stash original so callers can still reach the eager path.
         self._original_decode_mel = vocoder.decode_mel
         vocoder.decode_mel = wrapper.decode_mel
         self._cuda_graph_wrapper = wrapper
         logger.info("KimiAudioCode2Wav: CUDA Graph wrapper installed on vocoder.decode_mel")
 
     def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
-        """Stage ignores token embeddings — keep a stable dummy for the runner."""
+        """Dummy — stage ignores token embeddings but the runner needs a shape."""
         if input_ids.numel() == 0:
             return torch.empty((0, 1), device=input_ids.device, dtype=torch.float32)
         return torch.zeros((input_ids.shape[0], 1), device=input_ids.device, dtype=torch.float32)
@@ -167,18 +136,9 @@ class KimiAudioCode2Wav(nn.Module):
         return [ids]
 
     def _decode_one(self, audio_codes: torch.Tensor) -> torch.Tensor:
-        """Decode one request's audio tokens to waveform (non-streaming).
-
-        Args:
-            audio_codes: 1-D LongTensor of local audio-code IDs in [0, 16384).
-        Returns:
-            1-D FloatTensor [wav_len] at 24 kHz.
-        """
-        # Drop the reference-audio prefill state every request — Slice 2
-        # has no voice cloning and we want each request to start clean.
         self._detokenizer.clear_states()
-        tokens = audio_codes.unsqueeze(0)  # [1, T]
-        wav = detokenize_noref(self._detokenizer, tokens)  # [1, wav_len]
+        tokens = audio_codes.unsqueeze(0)
+        wav = detokenize_noref(self._detokenizer, tokens)
         return wav.squeeze(0).float()
 
     def _decode_chunk_streaming(
@@ -187,16 +147,11 @@ class KimiAudioCode2Wav(nn.Module):
         is_final: bool,
         ode_step: int = 15,
     ) -> torch.Tensor:
-        """Decode one chunk of audio tokens via the streaming path.
-
-        Used by Slice 3 when ``async_chunk: true``. The detokenizer keeps
-        its per-request state (KV cache, mel/wav history) across calls; the
-        first chunk emits a half-chunk's worth of audio while later chunks
-        get cross-faded with a Hamming window. Caller must reset state
-        between requests.
-        """
+        """Decode one chunk via the streaming path. Detokenizer keeps
+        per-request state (KV cache, mel/wav history) across calls; caller
+        must ``clear_states`` between requests."""
         assert self._detokenizer is not None
-        tokens = audio_codes.unsqueeze(0)  # [1, T]
+        tokens = audio_codes.unsqueeze(0)
         wav = self._detokenizer.detokenize_streaming(
             tokens,
             ode_step=ode_step,
@@ -228,9 +183,7 @@ class KimiAudioCode2Wav(nn.Module):
         request_ids_list = self._split_request_ids(ids, kwargs.get("seq_token_counts"))
         async_chunk = bool(self.vllm_config.model_config.async_chunk)
 
-        # Per-request "is_final" hint comes from runtime_additional_information
-        # populated by kimi2code2wav_async_chunk; absent in the non-streaming
-        # path.
+        # Per-request is_final hint set by kimi2code2wav_async_chunk.
         finished_flags: list[bool] = [not async_chunk] * len(request_ids_list)
         if runtime_additional_information is not None:
             for i, info in enumerate(runtime_additional_information):
@@ -247,11 +200,10 @@ class KimiAudioCode2Wav(nn.Module):
             if req_ids.numel() == 0:
                 wav_outputs.append(empty)
                 continue
-            # Filter to audio tokens, normalize into [0, 16384) code space.
             audio_mask = req_ids >= KIMIA_TOKEN_OFFSET
             audio_codes = req_ids[audio_mask] - KIMIA_TOKEN_OFFSET
-            # Drop the 512 special-token region so we don't feed control
-            # codes (BOS/EOS/etc.) into the flow-matching model.
+            # Drop special-token region so control codes (BOS/EOS/etc.)
+            # don't reach the flow-matching model.
             audio_codes = audio_codes[audio_codes < (16896 - NUM_AUDIO_SPECIAL_TOKENS)]
             if audio_codes.numel() == 0:
                 wav_outputs.append(empty)
@@ -271,11 +223,8 @@ class KimiAudioCode2Wav(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """No-op. Detokenizer loads its own checkpoints via ``get_audio_detokenizer``.
-
-        We still drain the iterator so the upstream loader doesn't see
-        unconsumed weights and complain.
-        """
+        # No-op: detokenizer loads its own checkpoints. Drain the iterator
+        # so the upstream loader doesn't complain about unconsumed weights.
         loaded: set[str] = set()
         for name, _ in weights:
             loaded.add(name)

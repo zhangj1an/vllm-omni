@@ -1,21 +1,8 @@
-"""BigVGAN wrapper for Kimi-Audio.
-
-The BigVGAN generator itself is HuggingFace's ``Qwen2_5OmniToken2WavBigVGANModel``
-from ``transformers.models.qwen2_5_omni`` — architecturally identical to NVIDIA
-BigVGAN on the axes Kimi's checkpoint exercises (SnakeBeta activations, no
-final tanh, no final bias, alias-free up/down filters). We subclass it to:
-
-1. Skip ``process_mel_spectrogram`` — that's a Qwen-Omni-specific input
-   normalization (amplitude→dB→[-1,1] scale). Kimi's BigVGAN consumes the mel
-   directly; routing through Qwen's preprocessor would double-normalize.
-2. Drop the ``.squeeze().cpu()`` at the end of HF's forward — the streaming
-   detokenizer needs ``(B, 1, T)`` tensors on the source device.
-
-And a state-dict adapter fuses Kimi's ``weight_norm``-factored conv weights
-(``weight_g`` + ``weight_v``) into plain ``weight`` tensors before loading
-into HF, plus drops the alias-free filter buffers (HF registers those as
-``persistent=False``, so they regenerate from kernel_size at construction).
-"""
+"""BigVGAN for Kimi-Audio built on HF's ``Qwen2_5OmniToken2WavBigVGANModel``.
+The subclass skips Qwen-Omni's mel preprocessor (Kimi's mel is already
+normalized) and keeps the output on-device as (B, 1, T). The state-dict
+adapter fuses ``weight_norm``-factored conv weights into plain weights and
+drops alias-free filter buffers (regenerated at construction)."""
 
 import json
 import logging
@@ -50,10 +37,7 @@ def _get_melspec(
     center: bool = False,
 ) -> torch.Tensor:
     """Log-mel spectrogram with slaney-norm librosa filterbank + Hann STFT.
-
-    Mirrors NVIDIA BigVGAN's ``get_melspec``; kept local so we can drop the
-    vendored ``vocoder/utils.py``.
-    """
+    Mirrors NVIDIA BigVGAN's ``get_melspec``."""
     device = y.device
     key = f"{n_fft}_{num_mels}_{sampling_rate}_{hop_size}_{win_size}_{fmin}_{fmax}_{device}"
     if key not in _mel_basis_cache:
@@ -89,13 +73,9 @@ def _get_melspec(
 
 
 def _kimi_to_hf_bigvgan_config(kimi_h: dict) -> Qwen2_5OmniBigVGANConfig:
-    """Translate Kimi's ``vocoder/config.json`` into an HF config.
-
-    HF hardcodes the axes Kimi also selects (``snakebeta``, no tanh-at-final,
-    no bias-at-final, AMPBlock1). We assert that before constructing so a
-    future checkpoint with different choices fails loudly rather than
-    silently producing wrong audio.
-    """
+    """Translate Kimi's ``vocoder/config.json`` into an HF config. HF
+    hardcodes several axes; we assert first so a divergent future
+    checkpoint fails loudly instead of producing wrong audio."""
     _assert_hf_compatible(kimi_h)
     return Qwen2_5OmniBigVGANConfig(
         mel_dim=kimi_h["num_mels"],
@@ -108,8 +88,7 @@ def _kimi_to_hf_bigvgan_config(kimi_h: dict) -> Qwen2_5OmniBigVGANConfig:
 
 
 def _assert_hf_compatible(h: dict) -> None:
-    # HF's port hardcodes these choices; any divergence would produce wrong
-    # audio without a shape mismatch to catch it.
+    # Any divergence would produce wrong audio without a shape mismatch.
     if h.get("activation", "snakebeta") != "snakebeta":
         raise ValueError(
             f"HF Qwen-Omni BigVGAN hardcodes SnakeBeta; got activation="
@@ -133,29 +112,15 @@ def _assert_hf_compatible(h: dict) -> None:
 
 
 def _adapt_kimi_state_dict(kimi_sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Convert a NVIDIA-BigVGAN-style state dict to HF Qwen-Omni BigVGAN keys.
-
-    Two transforms:
-
-    * Fuse every ``<prefix>.weight_g`` + ``<prefix>.weight_v`` pair into
-      ``<prefix>.weight`` via ``w = v * (g / ||v||_per_out_channel)``. That's
-      how ``torch.nn.utils.weight_norm`` materializes ``weight`` from its
-      factored form.
-    * Drop ``<...>.upsample.filter`` and ``<...>.downsample.lowpass.filter``
-      buffers. HF registers those as ``persistent=False``, so they're
-      regenerated deterministically from ``kernel_size`` at construction.
-    """
+    """Convert NVIDIA-BigVGAN keys to HF Qwen-Omni BigVGAN keys: fuse
+    ``weight_g``/``weight_v`` pairs into ``weight`` (as ``weight_norm``
+    would) and drop alias-free filter buffers (HF regenerates them)."""
     out: dict[str, torch.Tensor] = {}
 
-    # First pass: collect weight_g / weight_v pairs by their shared prefix.
     pending_g: dict[str, torch.Tensor] = {}
     pending_v: dict[str, torch.Tensor] = {}
 
     for k, v in kimi_sd.items():
-        # Drop alias-free filter buffers regardless of NVIDIA's nested
-        # naming (``.downsample.lowpass.filter``) vs HF's flat naming
-        # (``.downsample.filter``). HF registers these ``persistent=False``
-        # and regenerates them deterministically from ``kernel_size``.
         if k.endswith(".filter") and (
             ".upsample." in k or ".downsample." in k
         ):
@@ -167,7 +132,6 @@ def _adapt_kimi_state_dict(kimi_sd: dict[str, torch.Tensor]) -> dict[str, torch.
         else:
             out[k] = v
 
-    # Second pass: fuse each pair.
     prefixes = set(pending_g) | set(pending_v)
     for prefix in prefixes:
         if prefix not in pending_g or prefix not in pending_v:
@@ -185,13 +149,6 @@ def _adapt_kimi_state_dict(kimi_sd: dict[str, torch.Tensor]) -> dict[str, torch.
 
 
 class KimiBigVGAN(Qwen2_5OmniToken2WavBigVGANModel):
-    """HF Qwen-Omni BigVGAN wired up to consume Kimi-style log-mel inputs.
-
-    Overrides ``forward`` to (1) skip ``process_mel_spectrogram`` and (2) keep
-    the output on-device as ``(B, 1, T)`` rather than ``.squeeze().cpu()``.
-    Everything else — layer topology, SnakeBeta, final clamp, alias-free
-    filters — is inherited unchanged.
-    """
 
     def forward(self, mel_spectrogram: torch.Tensor) -> torch.Tensor:
         hidden = self.conv_pre(mel_spectrogram)
@@ -228,13 +185,7 @@ class BigVGANWrapper:
         self.vocoder = self.vocoder.to(dtype)
 
     def extract_mel_from_wav(self, wav_path=None, wav_data=None):
-        """
-        params:
-            wav_path: str, path of the wav, should be 24k
-            wav_data: torch.tensor or numpy array, shape [T], wav data, should be 24k
-        return:
-            mel: [T, num_mels], torch.tensor
-        """
+        """[T] wav @ 24 kHz -> [T, num_mels] mel."""
         if wav_data is None:
             wav_data, _ = librosa.load(wav_path, sr=self.h["sampling_rate"])
 
@@ -274,12 +225,7 @@ class BigVGANWrapper:
         return mel.transpose(1, 2)
 
     def decode_mel(self, mel):
-        """
-        params:
-            mel: [T, num_mels], torch.tensor
-        return:
-            wav: [1, T], torch.tensor
-        """
+        """[T, num_mels] mel -> [1, T] wav."""
         mel = mel.transpose(0, 1).unsqueeze(0).to(self.device)
         wav = self.vocoder(mel)
         return wav.squeeze(0)
@@ -308,9 +254,8 @@ class BigVGANWrapper:
         kimi_sd = checkpoint["generator"]
         hf_sd = _adapt_kimi_state_dict(kimi_sd)
         missing, unexpected = vocoder.load_state_dict(hf_sd, strict=False)
-        # The HF port registers alias-free filter buffers as persistent=False;
-        # they're regenerated at construction, so they count as "missing" from
-        # a saved-state-dict perspective. Tolerate exactly those.
+        # HF alias-free filter buffers are persistent=False and regenerate
+        # at construction, so they're "missing" from a saved dict.
         real_missing = [
             k for k in missing
             if not (
