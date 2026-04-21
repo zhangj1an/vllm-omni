@@ -24,9 +24,10 @@ vllm serve moonshotai/Kimi-Audio-7B-Instruct --omni --port 8091 \
     --stage-configs-path vllm_omni/model_executor/stage_configs/kimi_audio_async_chunk.yaml
 ```
 
-The audio-out configs require `kimia_infer` from
-<https://github.com/MoonshotAI/Kimi-Audio> for the flow-matching
-detokenizer + BigVGAN vocoder.
+The flow-matching detokenizer + BigVGAN vocoder used by the audio-out
+configs is vendored in-tree under
+`vllm_omni/model_executor/models/kimi_audio/kimia_detokenizer/`. It
+still needs `flash_attn` installed at runtime for the DiT prefix model.
 
 ## Send a request
 

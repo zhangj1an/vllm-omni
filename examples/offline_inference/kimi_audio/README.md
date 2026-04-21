@@ -46,8 +46,9 @@ Outputs land under the per-task default directory
 - `kimi_audio_audio_out.yaml`: two-stage pipeline adding the MIMO
   audio-out branch on stage 0 and `code2wav`
   (PrefixStreamingFlowMatchingDetokenizer + BigVGAN) as stage 1.
-  Requires the `kimia_infer` package from
-  <https://github.com/MoonshotAI/Kimi-Audio>. Expects 2 GPUs by
+  The detokenizer is vendored in-tree under
+  `vllm_omni/model_executor/models/kimi_audio/kimia_detokenizer/`;
+  `flash_attn` is still required at runtime. Expects 2 GPUs by
   default and sets `hf_overrides.kimia_generate_audio: true` on
   stage 0 so the MIMO branch is built and runs.
 

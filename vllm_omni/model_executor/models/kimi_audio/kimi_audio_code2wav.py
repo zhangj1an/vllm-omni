@@ -7,8 +7,9 @@ prefix model + BigVGAN vocoder) as a vLLM-Omni generation stage. Consumes the
 audio-token IDs produced by the Slice-2 fused thinker and emits a 24 kHz
 mono waveform.
 
-The detokenizer ships in the ``kimia_infer`` package (from
-``MoonshotAI/Kimi-Audio``) and loads its own checkpoints from
+The detokenizer is vendored under ``vllm_omni.model_executor.models.kimi_audio
+.kimia_detokenizer`` (originally from ``MoonshotAI/Kimi-Audio``'s
+``kimia_infer`` package) and loads its own checkpoints from
 ``<model_path>/audio_detokenizer/`` and ``<model_path>/vocoder/``. We do
 **not** wire those checkpoints through vLLM's weight loader — keeping them
 out of vLLM's mapper avoids fighting the upstream PR-36127 hf_to_vllm_mapper
@@ -31,6 +32,10 @@ from vllm.logger import init_logger
 
 from vllm_omni.model_executor.models.kimi_audio.cuda_graph_decoder_wrapper import (
     KimiAudioCudaGraphDecoderWrapper,
+)
+from vllm_omni.model_executor.models.kimi_audio.kimia_detokenizer import (
+    detokenize_noref,
+    get_audio_detokenizer,
 )
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 
@@ -84,14 +89,6 @@ class KimiAudioCode2Wav(nn.Module):
     def _ensure_detokenizer_loaded(self) -> None:
         if self._detokenizer is not None:
             return
-        try:
-            from kimia_infer.models.detokenizer import get_audio_detokenizer
-        except ImportError as e:
-            raise ImportError(
-                "Kimi-Audio code2wav requires the `kimia_infer` package "
-                "from https://github.com/MoonshotAI/Kimi-Audio. Install it "
-                "alongside vLLM-Omni before running the audio-out stage."
-            ) from e
         # ``get_audio_detokenizer(model_path)`` reads
         # ``<model_path>/{audio_detokenizer,vocoder}/`` and pins the
         # detokenizer onto ``torch.cuda.current_device()`` — make sure the
@@ -177,8 +174,6 @@ class KimiAudioCode2Wav(nn.Module):
         Returns:
             1-D FloatTensor [wav_len] at 24 kHz.
         """
-        from kimia_infer.models.detokenizer import detokenize_noref
-
         # Drop the reference-audio prefill state every request — Slice 2
         # has no voice cloning and we want each request to start clean.
         self._detokenizer.clear_states()
