@@ -18,15 +18,12 @@ For low-TTFB streaming of the audio-out tasks see
 """
 
 import os
-import tempfile
 from typing import NamedTuple
-from urllib.parse import urlparse
-from urllib.request import urlopen
 
 import soundfile as sf
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
-from vllm.multimodal.media.audio import load_audio
+from vllm.multimodal.media import MediaConnector
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from vllm_omni.entrypoints.omni import Omni
@@ -44,8 +41,8 @@ TASK_CHOICES = ("audio2text", "audio2audio", "text2audio")
 # MiniMax TTS-Multilingual test set (sample 10), mirrored to Google Drive
 # for a stable link. The original share URL is
 # https://drive.google.com/file/d/1RHz6uUSbAR_N3Li1Bjh8dPknykw4IVio/view?usp=sharing;
-# we rewrite to the direct-download form so urlopen gets bytes instead of
-# the HTML preview page.
+# we rewrite to the direct-download form so the fetcher receives bytes
+# instead of the HTML preview page.
 AUDIO2TEXT_DEFAULT_URL = "https://drive.google.com/uc?export=download&id=1RHz6uUSbAR_N3Li1Bjh8dPknykw4IVio"
 
 # Per-task stage config (relative to this script's directory) and the
@@ -122,30 +119,20 @@ def get_text_input_query(
 
 
 def _load_audio_or_default(audio_path: str | None, sampling_rate: int, default_audio_url: str | None):
-    if audio_path:
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        return load_audio(audio_path, sr=sampling_rate)
-    if default_audio_url:
-        return _load_audio_from_url(default_audio_url, sampling_rate)
-    return AudioAsset("mary_had_lamb").audio_and_sample_rate[0]
+    """Resolve a local path or remote URL through vLLM's MediaConnector; resample to ``sampling_rate``."""
+    source = audio_path or default_audio_url
+    if source is None:
+        return AudioAsset("mary_had_lamb").audio_and_sample_rate[0]
 
+    connector = MediaConnector(allowed_local_media_path="/")
+    audio, src_sr = connector.fetch_audio(source)
+    if int(src_sr) != sampling_rate:
+        import librosa
 
-def _load_audio_from_url(url: str, sampling_rate: int):
-    """Download a remote audio URL to a temp file and decode via load_audio."""
-    suffix = os.path.splitext(urlparse(url).path)[1] or ".audio"
-    with urlopen(url) as resp:
-        data = resp.read()
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(data)
-        tmp_path = tmp.name
-    try:
-        return load_audio(tmp_path, sr=sampling_rate)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        audio = librosa.resample(
+            audio.astype("float32"), orig_sr=int(src_sr), target_sr=sampling_rate
+        )
+    return audio
 
 
 query_map = {

@@ -55,29 +55,6 @@ def _cached_zeros(numel, device="cpu", dtype=torch.float32):
     return torch.zeros(numel, device=device, dtype=dtype)
 
 
-def precompute_freqs_cis(
-    dim: int,
-    end: int,
-    theta: float = 10000.0,
-    interpolation_factor: int = 1,
-    max_seq_length: int = 4096,
-):
-    """Complex-polar RoPE frequency table via ``diffusers.get_1d_rotary_pos_embed``.
-
-    Bit-exact replacement for the original Moonshot helper.
-    """
-    freqs_cis = get_1d_rotary_pos_embed(
-        dim=dim,
-        pos=end,
-        theta=theta,
-        use_real=False,
-        linear_factor=float(interpolation_factor),
-    )
-    if max_seq_length < end:
-        freqs_cis = freqs_cis[:max_seq_length].clone()
-    return freqs_cis
-
-
 class TimestepEmbedder(nn.Module):
     """Embeds scalar timesteps via a sinusoidal projection + 2-layer MLP.
 
@@ -202,13 +179,15 @@ class DiTPrefix(nn.Module):
             ), "Hidden size must be divisible by num_heads for rope position embedding."
             rope_dim = hidden_size // num_heads
 
-            self.rotary_pos_emb = precompute_freqs_cis(
-                rope_dim,
-                rope_params["max_position_embeddings"],
+            self.rotary_pos_emb = get_1d_rotary_pos_embed(
+                dim=rope_dim,
+                pos=rope_params["max_position_embeddings"],
                 theta=rope_params["rope_base"],
-                interpolation_factor=rope_params["rope_interpolation_factor"],
-                max_seq_length=max_seq_len,
+                use_real=False,
+                linear_factor=float(rope_params["rope_interpolation_factor"]),
             )
+            if max_seq_len < rope_params["max_position_embeddings"]:
+                self.rotary_pos_emb = self.rotary_pos_emb[:max_seq_len].clone()
 
         self.blocks = nn.ModuleList(
             [
