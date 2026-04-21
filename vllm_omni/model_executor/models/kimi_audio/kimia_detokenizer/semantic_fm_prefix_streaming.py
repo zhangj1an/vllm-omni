@@ -409,6 +409,11 @@ class StreamingSemanticFMWrapper:
             for k, v in state_dict.items()
             if "speech_model" in k
         }
+        # The fairseq-style SinusoidalPositionalEmbedding used to register
+        # a ``_float_tensor`` dummy buffer for dtype tracking. The diffusers-
+        # backed replacement doesn't need it — drop it from the checkpoint
+        # so strict loading still succeeds.
+        speech_model_params.pop("position_embedding._float_tensor", None)
         dit.load_state_dict(speech_model_params, strict=True)
         logger.info(f">>> Loaded checkpoint from {ckpt_path}")
 

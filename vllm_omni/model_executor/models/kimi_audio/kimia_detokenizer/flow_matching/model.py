@@ -1,6 +1,11 @@
 import torch
 import torch.nn as nn
-import math
+from diffusers.models.embeddings import (
+    Timesteps,
+    get_1d_rotary_pos_embed,
+    get_timestep_embedding,
+)
+
 from .dit_block import DiTBlock, FinalLayer
 
 
@@ -11,35 +16,39 @@ def precompute_freqs_cis(
     interpolation_factor: int = 1,
     max_seq_length: int = 4096,
 ):
-    print(
-        f"using rope base theta = {theta}, interpolation factor = {interpolation_factor}"
+    """Complex-polar RoPE frequency table. Thin wrapper over diffusers'
+    ``get_1d_rotary_pos_embed(..., use_real=False)``; semantically identical
+    to the original Moonshot implementation (verified bit-exact).
+    """
+    freqs_cis = get_1d_rotary_pos_embed(
+        dim=dim,
+        pos=end,
+        theta=theta,
+        use_real=False,
+        linear_factor=float(interpolation_factor),
     )
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-
-    # ROPE type-A extention
-    # we choose to use interpolation rather than extrapolation for better position encoding
-    # for scale purposes, t should be a float tensor
-    t = torch.arange(end, device=freqs.device).float()
-    scale = 1.0 / float(interpolation_factor)
-    t *= scale
-
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-
-    # Sometimes, we don't need so many rope emb as seq_len is smaller than max_pos_emb
-    # e.g. rope 1M but seqlen 32k, this will cause gpu memory waste
     if max_seq_length < end:
-        freqs_cis = freqs_cis[:max_seq_length,].clone()
+        freqs_cis = freqs_cis[:max_seq_length].clone()
     return freqs_cis
 
 
 class TimestepEmbedder(nn.Module):
-    """
-    Embeds scalar timesteps into vector representations.
+    """Embeds scalar timesteps via a sinusoidal projection + 2-layer MLP.
+
+    The sinusoidal step is delegated to ``diffusers.Timesteps`` (bit-exact to
+    Kimi's original formulation with ``flip_sin_to_cos=True`` and
+    ``downscale_freq_shift=0``). The MLP is kept as ``nn.Sequential`` so
+    state-dict keys (``mlp.0.*``, ``mlp.2.*``) stay compatible with Moonshot
+    checkpoints.
     """
 
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
+        self.time_proj = Timesteps(
+            num_channels=frequency_embedding_size,
+            flip_sin_to_cos=True,
+            downscale_freq_shift=0,
+        )
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
             nn.SiLU(),
@@ -47,125 +56,50 @@ class TimestepEmbedder(nn.Module):
         )
         self.frequency_embedding_size = frequency_embedding_size
 
-    @staticmethod
-    def timestep_embedding(t, dim, max_period=10000):
-        """
-        Create sinusoidal timestep embeddings.
-        :param t: a 1-D Tensor of N indices, one per batch element.
-                          These may be fractional.
-        :param dim: the dimension of the output.
-        :param max_period: controls the minimum frequency of the embeddings.
-        :return: an (N, D) Tensor of positional embeddings.
-        """
-        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
-        half = dim // 2
-        freqs = (
-            torch.exp(
-                -math.log(max_period)
-                * torch.arange(start=0, end=half, dtype=torch.float32)
-                / half
-            )
-            .float()
-            .to(device=t.device)
-        )
-        args = t[:, None].float() * freqs[None]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embedding = torch.cat(
-                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
-            )
-        return embedding
-
     def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-        t_emb = self.mlp(t_freq.to(self.mlp[0].weight.dtype))
-        return t_emb
+        t_freq = self.time_proj(t)
+        return self.mlp(t_freq.to(self.mlp[0].weight.dtype))
 
 
 class SinusoidalPositionalEmbedding(nn.Module):
-    """This module produces sinusoidal positional embeddings of any length.
+    """Frozen sincos positional table, equivalent to Kimi's fairseq-style
+    embedding at inference.
 
-    Padding symbols are ignored.
+    The upstream class carried a fairseq ``incremental_state`` + ``timestep``
+    interface that ``DiTPrefix`` never exercises — only the batch lookup path
+    runs. This implementation builds the table once via diffusers'
+    ``get_timestep_embedding(..., downscale_freq_shift=1, flip_sin_to_cos=False)``
+    (matches Kimi's ``(half_dim - 1)`` normalization), zeros the
+    ``padding_idx`` slot, and indexes it at forward time.
+
+    Stored as a non-persistent buffer so it isn't serialized (the original
+    class's ``self.weights`` was also a plain attribute, not a state-dict
+    entry).
     """
 
-    def __init__(self, embedding_dim, padding_idx, init_size=1024):
+    def __init__(self, embedding_dim: int, padding_idx: int, init_size: int = 1024):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.padding_idx = padding_idx
-        self.weights = SinusoidalPositionalEmbedding.get_embedding(
-            init_size,
-            embedding_dim,
-            padding_idx,
+        table = get_timestep_embedding(
+            torch.arange(init_size, dtype=torch.float32),
+            embedding_dim=embedding_dim,
+            flip_sin_to_cos=False,
+            downscale_freq_shift=1,
+            scale=1,
         )
-        self.register_buffer("_float_tensor", torch.FloatTensor(1))
-
-    @staticmethod
-    def get_embedding(num_embeddings, embedding_dim, padding_idx=None):
-        """Build sinusoidal embeddings.
-
-        This matches the implementation in tensor2tensor, but differs slightly
-        from the description in Section 3.5 of "Attention Is All You Need".
-        """
-        half_dim = embedding_dim // 2  # d/2
-        emb = math.log(10000) / (half_dim - 1)  # 2*log(10000)/(d-2)
-        emb = torch.exp(
-            torch.arange(half_dim, dtype=torch.float) * -emb
-        )  # -2i/(d-2)*log(10000); i from 0 to (d-2)/2; shape: (d/2, )
-        emb = torch.arange(num_embeddings, dtype=torch.float).unsqueeze(
-            1
-        ) * emb.unsqueeze(
-            0
-        )  # pos/[1000 ** (2i/(d-2))]; shape: (num_embeddings, d/2)
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1).view(
-            num_embeddings, -1
-        )  # shape: (num_embeddings, d)
-        if embedding_dim % 2 == 1:
-            # zero pad
-            emb = torch.cat([emb, torch.zeros(num_embeddings, 1)], dim=1)
         if padding_idx is not None:
-            emb[padding_idx, :] = 0
-        return emb
+            table[padding_idx] = 0
+        self.register_buffer("weight", table, persistent=False)
 
-    def forward(self, input, incremental_state=None, timestep=None, **kwargs):
-        """Input is expected to be of size [bsz x seqlen]."""
-        bsz, seq_len = input.shape[:2]
-        max_pos = self.padding_idx + 1 + seq_len
-        if self.weights is None or max_pos > self.weights.size(0):
-            # recompute/expand embeddings if needed
-            self.weights = SinusoidalPositionalEmbedding.get_embedding(
-                max_pos,
-                self.embedding_dim,
-                self.padding_idx,
-            )
-        self.weights = self.weights.to(self._float_tensor)
-
-        if incremental_state is not None:
-            # positions is the same for every token when decoding a single step
-            pos = timestep.view(-1)[0] + 1 if timestep is not None else seq_len
-            return self.weights[self.padding_idx + pos, :].expand(bsz, 1, -1)
-
-        positions = self.make_positions(input, self.padding_idx)
-        return (
-            self.weights.index_select(0, positions.view(-1))
-            .view(bsz, seq_len, -1)
-            .detach()
-        )  # (B, T, dim)
-
-    def max_positions(self):
-        """Maximum number of supported positions."""
-        return int(1e5)  # an arbitrary large number
-
-    def make_positions(self, tensor, padding_idx):
-        """Replace non-padding symbols with their position numbers.
-
-        Position numbers begin at padding_idx+1. Padding symbols are ignored.
-        """
-        # The series of casts and type-conversions here are carefully
-        # balanced to both work with ONNX export and XLA. In particular XLA
-        # prefers ints, cumsum defaults to output longs, and ONNX doesn't know
-        # how to handle the dtype kwarg in cumsum.
-        mask = tensor.ne(padding_idx).int()
-        return (torch.cumsum(mask, dim=1).type_as(mask) * mask).long() + padding_idx
+    def forward(self, position_ids):
+        # Preserve upstream Kimi's ``make_positions`` behavior: for each
+        # non-padding entry, use its 1-based rank within the chunk (not the
+        # absolute id). This makes the sincos signal chunk-relative; RoPE
+        # carries absolute position when ``use_rope=True``.
+        mask = position_ids.ne(self.padding_idx).int()
+        positions = (torch.cumsum(mask, dim=1).type_as(mask) * mask).long() + self.padding_idx
+        return self.weight[positions]
 
 
 class DiTPrefix(nn.Module):

@@ -1,10 +1,7 @@
 import torch
 import torch.nn as nn
-
-
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from diffusers.models.embeddings import apply_rotary_emb as _diffusers_apply_rotary_emb
 
 try:
     from flash_attn import flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func
@@ -52,33 +49,25 @@ def _sdpa_varlen_attn(
     return torch.cat(outs, dim=0)
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    # x shape: bsz, seqlen, self.n_local_heads, self.head_hidden_dim / 2
-    # the last shape is "self.hidden_dim / 2" because we convert to complex
-    assert x.ndim == 4
-    assert freqs_cis.shape == (
-        x.shape[0],
-        x.shape[1],
-        x.shape[-1],
-    ), f"x shape: {x.shape}, freqs_cis shape: {freqs_cis.shape}"
-
-    # reshape freq cis to match and apply pointwise multiply
-    # new shape: bsz, seq_len, 1, self.head_hidden_dim / 2
-    shape = [x.shape[0], x.shape[1], 1, x.shape[-1]]
-    return freqs_cis.view(*shape)
-
-
 def apply_rotary_emb(
     xq: torch.Tensor,
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
 ):
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    """Apply complex-polar RoPE to q and k.
 
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    Thin wrapper around ``diffusers.apply_rotary_emb`` with
+    ``use_real=False`` — the upstream helper internally does
+    ``view_as_complex → freqs_cis.unsqueeze(2) → multiply → view_as_real →
+    flatten(3)``, which is bit-identical to Kimi's original reshape_for_
+    broadcast + complex multiply path (verified on random inputs).
+
+    ``freqs_cis`` comes in shape ``(bsz, seqlen, head_dim/2)`` (complex);
+    diffusers' ``.unsqueeze(2)`` makes it broadcast over the heads dim of
+    q/k shaped ``(bsz, seqlen, num_heads, head_dim)``.
+    """
+    xq_out = _diffusers_apply_rotary_emb(xq, freqs_cis, use_real=False)
+    xk_out = _diffusers_apply_rotary_emb(xk, freqs_cis, use_real=False)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
