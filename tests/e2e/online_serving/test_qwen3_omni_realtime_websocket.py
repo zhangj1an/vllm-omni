@@ -12,35 +12,33 @@ import io
 import json
 import os
 import wave
-from pathlib import Path
 
 import pytest
 import websockets
 
-from tests.conftest import (
-    OmniServerParams,
+from tests.helpers.mark import hardware_test
+from tests.helpers.media import (
     convert_audio_bytes_to_text,
     cosine_similarity_text,
     generate_synthetic_audio,
-    modify_stage_config,
 )
-from tests.utils import hardware_test
-from vllm_omni.platforms import current_omni_platform
+from tests.helpers.runtime import OmniServerParams
+from tests.helpers.stage_config import get_deploy_config_path, modify_stage_config
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODEL = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
-default_stage_config = str(Path(__file__).parent.parent / "stage_configs" / "qwen3_omni_ci.yaml")
-if current_omni_platform.is_xpu():
-    default_stage_config = str(Path(__file__).parent.parent / "stage_configs" / "xpu" / "qwen3_omni_ci.yaml")
+# The new-schema CI overlay bakes in async_chunk: False and covers CUDA/ROCm/XPU
+# via its ``platforms:`` section, so one path serves all three.
+default_stage_config = get_deploy_config_path("ci/qwen3_omni_moe.yaml")
 
 
 def _realtime_stage_config_path() -> str:
     """CI omni layout without async_chunk; stage 0 thinker max_tokens=10."""
     return modify_stage_config(
         default_stage_config,
-        updates={"stage_args": {0: {"default_sampling_params.max_tokens": 10}}},
+        updates={"stages": {0: {"default_sampling_params.max_tokens": 10}}},
     )
 
 
