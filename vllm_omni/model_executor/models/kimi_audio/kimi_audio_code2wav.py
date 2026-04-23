@@ -65,26 +65,21 @@ class KimiAudioCode2Wav(nn.Module):
 
     def _maybe_install_cuda_graph_wrapper(self) -> None:
         """Wrap ``vocoder.decode_mel`` with a CUDA graph capture. Skipped on
-        CPU, under ``enforce_eager``, or if chunk config is unavailable."""
+        CPU, under ``enforce_eager``, or if warmup fails."""
         if not torch.cuda.is_available():
             return
         if getattr(self.vllm_config.model_config, "enforce_eager", False):
             logger.info("KimiAudioCode2Wav: enforce_eager=True; skipping CUDA Graph capture")
             return
 
-        vocoder = getattr(self._detokenizer, "vocoder", None)
-        if vocoder is None or not hasattr(vocoder, "decode_mel"):
-            logger.warning("KimiAudioCode2Wav: detokenizer has no `vocoder.decode_mel`; skipping CUDA Graph")
-            return
+        vocoder = self._detokenizer.vocoder
 
-        codec_chunk_frames = 0
-        codec_left = 0
-        connector_cfg = getattr(self.vllm_config.model_config, "stage_connector_config", None)
-        if isinstance(connector_cfg, dict):
-            extra = connector_cfg.get("extra", connector_cfg)
-            if isinstance(extra, dict):
-                codec_chunk_frames = int(extra.get("codec_chunk_frames") or 0)
-                codec_left = int(extra.get("codec_left_context_frames") or 0)
+        # Async-chunk YAML supplies these via runtime.connectors.<...>.extra;
+        # sync YAML omits the block, in which case the wrapper picks defaults.
+        connector_cfg = getattr(self.vllm_config.model_config, "stage_connector_config", None) or {}
+        extra = connector_cfg.get("extra", {})
+        codec_chunk_frames = int(extra.get("codec_chunk_frames", 0))
+        codec_left = int(extra.get("codec_left_context_frames", 0))
 
         wrapper = KimiAudioCudaGraphDecoderWrapper(vocoder=vocoder, enabled=True)
         try:

@@ -9,7 +9,7 @@ Covers the two audio-out task modes:
 
 The thinker (stage 0) emits audio tokens chunk-by-chunk; ``code2wav``
 starts synthesizing waveform as soon as the first chunk lands. End TTFB
-is bounded by ``codec_chunk_frames`` from ``kimi_audio_async_chunk.yaml``
+is bounded by ``codec_chunk_frames`` from ``vllm_omni/deploy/kimi_audio.yaml``
 (25 frames * 480 samples / 24000 Hz ~ 0.5 s of audio per chunk).
 
 For ``audio2text`` (no streaming audio output) see ``end2end.py``.
@@ -144,7 +144,7 @@ def parse_args():
     parser.add_argument("--num-prompts", type=int, default=1)
     parser.add_argument(
         "--stage-configs-path",
-        default="../../../vllm_omni/model_executor/stage_configs/kimi_audio_async_chunk.yaml",
+        default="../../../vllm_omni/deploy/kimi_audio.yaml",
     )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--enable-stats", action="store_true")

@@ -21,11 +21,9 @@ class PrefixStreamingFlowMatchingDetokenizer:
         self.semantic_fm = fm
 
         self.max_pos_size = 4096
-        self.is_timbre_semantic_token = False
         self.pre_mel = None
         self.frame_size = 480
         self.pre_wav = None
-        self.state_dict_backup = None
         self.hamming_window_cache = {}
         self.previous_chunk_left = None
         self.look_ahead_tokens = look_ahead_tokens
@@ -41,11 +39,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
         look_ahead_tokens=0,
         max_prompt_chunk=2,
         max_kv_cache_tokens=900,
-        use_cfg=False,
-        use_cfg_rescale=True,
-        cfg_init=1.5,
-        cfg_scale=7.5,
-        cfg_schedule="linear",
     ):
         bigvgan = KimiBigVGAN.load_from_hf(device)
         semantic_fm = DiTPrefix.from_pretrained(
@@ -54,11 +47,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
             device,
             max_prompt_chunk=max_prompt_chunk,
             max_kv_cache_tokens=max_kv_cache_tokens,
-            use_cfg=use_cfg,
-            cfg_scale=cfg_scale,
-            use_cfg_rescale=use_cfg_rescale,
-            cfg_init=cfg_init,
-            cfg_schedule=cfg_schedule,
         )
         return cls(bigvgan, semantic_fm, look_ahead_tokens=look_ahead_tokens)
 
@@ -120,7 +108,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
             concat_reconstructed_wav = self.vocoder.decode_mel(concat_mel)
             if is_final:
                 self.clear_states()
-                self.state_dict_backup = None
                 ret_wav = concat_reconstructed_wav.float()
             else:
                 reconstructed_wav = concat_reconstructed_wav[
@@ -138,7 +125,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
 
             if is_final:
                 self.clear_states()
-                self.state_dict_backup = None
                 ret_wav = concat_reconstructed_wav.float()
             else:
                 prev_speech_len = self.pre_wav.shape[1]
@@ -179,9 +165,8 @@ class PrefixStreamingFlowMatchingDetokenizer:
             not is_final
             and self.semantic_fm.start_position_id + 2 * chunk_size > self.max_pos_size
         ):
-            # Out of position id; reset and restore post-prefill state.
+            # Out of position id; reset back to a clean state.
             self.semantic_fm.clear_all_states()
-            self.semantic_fm.restore_streaming_state(self.state_dict_backup)
 
         return ret_wav
 
@@ -202,7 +187,6 @@ def get_audio_detokenizer(model_path):
         fm_config=fm_model_config,
         fm_ckpt=fm_ckpt_path,
         device=device,
-        use_cfg=False,
         look_ahead_tokens=12,
     )
 

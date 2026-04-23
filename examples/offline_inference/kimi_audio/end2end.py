@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Offline inference example for Kimi-Audio-7B-Instruct covering three
 task modes: ``audio2text`` (ASR / audio QA), ``audio2audio``, and
-``text2audio``. All three use ``kimi_audio.yaml`` (two-stage audio-out
-pipeline); ``audio2text`` ignores the stage-1 audio output. For low-TTFB
-streaming see ``end2end_async_chunk.py``."""
+``text2audio``. All three use ``vllm_omni/deploy/kimi_audio.yaml``
+(two-stage audio-out pipeline); ``audio2text`` ignores the stage-1
+audio output. For low-TTFB streaming see ``end2end_async_chunk.py``."""
 
 import os
 from typing import NamedTuple
@@ -38,19 +38,19 @@ AUDIO2TEXT_DEFAULT_URL = "https://drive.google.com/uc?export=download&id=1RHz6uU
 # default user instruction used when ``--question`` is not supplied.
 TASK_DEFAULTS = {
     "audio2text": {
-        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
+        "stage_configs_path": "../../../vllm_omni/deploy/kimi_audio.yaml",
         "question": "Please transcribe the audio.",
         "output_dir": "./output_text",
         "default_audio_url": AUDIO2TEXT_DEFAULT_URL,
     },
     "audio2audio": {
-        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
+        "stage_configs_path": "../../../vllm_omni/deploy/kimi_audio.yaml",
         "question": "Answer in audio. Briefly summarize what was said.",
         "output_dir": "./output_audio",
         "default_audio_url": None,
     },
     "text2audio": {
-        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
+        "stage_configs_path": "../../../vllm_omni/deploy/kimi_audio.yaml",
         "question": "Please say the following in audio: \"Hello, my name is Kimi.\"",
         "output_dir": "./output_tts",
         "default_audio_url": None,

@@ -1,0 +1,69 @@
+# Kimi-Audio-7B deploy: 2-stage fused thinker → code2wav.
+#
+# Default mode is async-chunk streaming through SharedMemoryConnector
+# (stage 0 on cuda:0, stage 1 on cuda:1). Pass ``--no-async-chunk`` to the
+# serve CLI for the legacy single-GPU sync path; in that case stage 1
+# pulls the full token sequence from stage 0 via ``kimi2code2wav``.
+#
+# To run sync mode on a single GPU, also set both stages' ``devices: "0"``
+# and bump stage 0's ``gpu_memory_utilization`` down (e.g. 0.55) so stage 1
+# fits alongside it.
+#
+# enforce_eager=true:
+#   * Stage 0 (fused thinker) — MIMO branch hook on layer N requires eager
+#     forward (CUDA Graph capture would skip the hook).
+#   * Stage 1 (code2wav) — generation loop is cudagraph-incompatible.
+async_chunk: true
+dtype: bfloat16
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      codec_chunk_frames: 25
+      codec_left_context_frames: 25
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 4
+    gpu_memory_utilization: 0.85
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    tokenizer_mode: kimi_audio
+    max_model_len: 8192
+    max_num_batched_tokens: 8192
+    devices: "0"
+    hf_overrides:
+      kimia_generate_audio: true
+    output_connectors:
+      to_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 50
+      max_tokens: 2048
+      seed: 42
+      detokenize: true
+      repetition_penalty: 1.0
+
+  - stage_id: 1
+    max_num_seqs: 4
+    gpu_memory_utilization: 0.30
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    tokenizer_mode: kimi_audio
+    max_model_len: 18192
+    max_num_batched_tokens: 18192
+    async_scheduling: false
+    devices: "1"
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 18192
+      seed: 42
+      detokenize: false

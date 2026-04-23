@@ -10,7 +10,6 @@ from functools import lru_cache
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import yaml
 from diffusers.models.embeddings import (
     Timesteps,
@@ -19,14 +18,15 @@ from diffusers.models.embeddings import (
     get_timestep_embedding,
 )
 
+# flash_attn is required at runtime (see kimi_audio README). We try/except
+# at import so the kimi_audio package still loads in audio2text-only setups
+# that don't construct the detokenizer; ``Attention`` raises on construction
+# if flash_attn is missing.
 try:
     from flash_attn import flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func
-
-    HAS_FLASH_ATTN = True
 except (ImportError, ModuleNotFoundError):
     flash_attn_varlen_func = None
     flash_attn_varlen_qkvpacked_func = None
-    HAS_FLASH_ATTN = False
 
 try:
     from torchdyn.core import NeuralODE
@@ -43,33 +43,6 @@ def _cached_zeros(numel, device="cpu", dtype=torch.float32):
     return torch.zeros(numel, device=device, dtype=dtype)
 
 
-def _sdpa_varlen_attn(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_k: torch.Tensor,
-    dropout_p: float = 0.0,
-) -> torch.Tensor:
-    """SDPA fallback for ``flash_attn_varlen_func`` with the same packed
-    ``(total_tokens, num_heads, head_dim)`` contract. The per-segment loop
-    is fine because the detokenizer runs at batch size 1."""
-    q_bounds = cu_seqlens_q.tolist()
-    k_bounds = cu_seqlens_k.tolist()
-    outs = []
-    for i in range(len(q_bounds) - 1):
-        qs, qe = q_bounds[i], q_bounds[i + 1]
-        ks, ke = k_bounds[i], k_bounds[i + 1]
-        q_seg = q[qs:qe].transpose(0, 1).unsqueeze(0)
-        k_seg = k[ks:ke].transpose(0, 1).unsqueeze(0)
-        v_seg = v[ks:ke].transpose(0, 1).unsqueeze(0)
-        out_seg = F.scaled_dot_product_attention(
-            q_seg, k_seg, v_seg, dropout_p=dropout_p
-        )
-        outs.append(out_seg.squeeze(0).transpose(0, 1))
-    return torch.cat(outs, dim=0)
-
-
 class Attention(nn.Module):
 
     def __init__(
@@ -81,14 +54,18 @@ class Attention(nn.Module):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         norm_layer: nn.Module = nn.LayerNorm,
-        flash_attention: bool = True,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
+        if flash_attn_varlen_func is None:
+            raise ImportError(
+                "Kimi-Audio's flow-matching detokenizer requires flash_attn. "
+                "Install it via `pip install flash_attn` (see the Kimi-Audio "
+                "README) or run in audio2text-only mode (no code2wav stage)."
+            )
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
-        self.fused_attn = flash_attention and HAS_FLASH_ATTN
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.qk_norm = qk_norm
@@ -148,21 +125,16 @@ class Attention(nn.Module):
             k = k.view(-1, self.num_heads, self.head_dim)
             v = v.view(-1, self.num_heads, self.head_dim)
 
-            if self.fused_attn:
-                x = flash_attn_varlen_func(
-                    q=q,
-                    k=k,
-                    v=v,
-                    cu_seqlens_q=cu_seqlens,
-                    cu_seqlens_k=cu_seqlens_k,
-                    max_seqlen_q=max_seqlen,
-                    max_seqlen_k=max_seqlen_k,
-                    dropout_p=dropout_p,
-                )
-            else:
-                x = _sdpa_varlen_attn(
-                    q, k, v, cu_seqlens, cu_seqlens_k, dropout_p=dropout_p
-                )
+            x = flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen_k,
+                dropout_p=dropout_p,
+            )
         else:
             if incremental_state is not None:
                 raise NotImplementedError(
@@ -183,18 +155,12 @@ class Attention(nn.Module):
 
             qkv = torch.cat(qkv_collect, dim=0)
 
-            if self.fused_attn:
-                x = flash_attn_varlen_qkvpacked_func(
-                    qkv=qkv,
-                    cu_seqlens=cu_seqlens,
-                    max_seqlen=max_seqlen,
-                    dropout_p=dropout_p,
-                )
-            else:
-                x = _sdpa_varlen_attn(
-                    qkv[:, 0], qkv[:, 1], qkv[:, 2],
-                    cu_seqlens, cu_seqlens, dropout_p=dropout_p,
-                )
+            x = flash_attn_varlen_qkvpacked_func(
+                qkv=qkv,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                dropout_p=dropout_p,
+            )
 
             # unpack and pad 0
             x_collect = []
@@ -389,12 +355,9 @@ class DiTPrefix(nn.Module):
         },
         position_embedding_type="sincos",
         max_seq_len=4096,
-        prompt_cfg_dropout=0.0,
     ):
         super().__init__()
         self.num_heads = num_heads
-
-        self.prompt_cfg_dropout = prompt_cfg_dropout
 
         self.t_embedder = TimestepEmbedder(hidden_size)
 
@@ -453,15 +416,6 @@ class DiTPrefix(nn.Module):
         self.t_min = 0.0
         self.t_max = 1.0 - self.sigma_min
         self._neural_ode = None
-
-        # CFG must be False for streaming (enforced in _ode_step); fields
-        # kept so from_pretrained can accept the original signature.
-        self.use_cfg = False
-        self.use_cfg_rescale = True
-        self.cfg_init = 1.0
-        self.cfg_scale = 4.0
-        self.cfg_schedule = "linear"
-        self.cfg_token_id = 0
 
         self.incremental_state: dict = {}
         self.kv_cache_tokens = 0
@@ -582,8 +536,6 @@ class DiTPrefix(nn.Module):
     def set_conditions(self, x_mask, x_cond, start_position_id, cache=None):
         if cache is None:
             cache = {}
-        if self.use_cfg:
-            raise NotImplementedError("CFG is not supported in streaming detokenizer.")
 
         self.x_mask = x_mask
         self.x_cond = x_cond
@@ -742,8 +694,6 @@ class DiTPrefix(nn.Module):
             _cached_zeros(x.shape[0], device=x.device, dtype=torch.long)
             + (t * 1000).long()
         )
-        if self.use_cfg:
-            raise NotImplementedError("CFG is not supported in streaming detokenizer.")
         return self._predict_velocity(
             x=x,
             condition=self.x_cond,
@@ -922,11 +872,6 @@ class DiTPrefix(nn.Module):
         device,
         max_prompt_chunk=2,
         max_kv_cache_tokens=900,
-        use_cfg=True,
-        use_cfg_rescale=True,
-        cfg_init=1.5,
-        cfg_scale=7.5,
-        cfg_schedule="linear",
     ):
         with open(model_config, "r") as f:
             config = yaml.safe_load(f)
@@ -950,9 +895,7 @@ class DiTPrefix(nn.Module):
             position_embedding_type=dit_cfg["position_embedding_type"],
             max_seq_len=dit_cfg["max_seq_len"],
             output_size=dit_cfg["input_size"],
-            prompt_cfg_dropout=0,
         )
-        cfg_semantic_token_id = dit_cfg["semantic_vocab_size"]
 
         state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)["state_dict"]
         speech_model_params = {
@@ -966,19 +909,9 @@ class DiTPrefix(nn.Module):
 
         dit.max_prompt_chunk = max_prompt_chunk
         dit.max_kv_cache_tokens = max_kv_cache_tokens
-        dit.use_cfg = use_cfg
-        dit.use_cfg_rescale = use_cfg_rescale
-        dit.cfg_init = cfg_init
-        dit.cfg_scale = cfg_scale
-        dit.cfg_schedule = cfg_schedule
-        dit.cfg_token_id = cfg_semantic_token_id
         dit.normalize_mel = config.get("normalize_mel", False)
         dit.mel_mean = config.get("mel_mean")
         dit.mel_std = config.get("mel_std")
 
         dit.to(device).to(dit.dtype).eval()
-        logger.info(
-            ">>> DiTPrefix on %s: use_cfg=%s, cfg_init=%s, cfg_scale=%s, cfg_schedule=%s",
-            device, use_cfg, cfg_init, cfg_scale, cfg_schedule,
-        )
         return dit

@@ -9,14 +9,12 @@ not a TTS service).
 ## Launch the server
 
 ```bash
-# Two-stage audio-out pipeline (default; needs 2 GPUs). Also serves
-# audio->text if the client ignores the stage-1 audio output.
+# Two-stage audio-out pipeline. Defaults to async-chunk streaming
+# (sub-second TTFB) on 2 GPUs; pass --no-async-chunk for the legacy
+# single-GPU sync path. Also serves audio->text if the client ignores
+# the stage-1 audio output.
 vllm serve moonshotai/Kimi-Audio-7B-Instruct --omni --port 8091 \
-    --stage-configs-path vllm_omni/model_executor/stage_configs/kimi_audio.yaml
-
-# Same pipeline with sub-second TTFB streaming.
-vllm serve moonshotai/Kimi-Audio-7B-Instruct --omni --port 8091 \
-    --stage-configs-path vllm_omni/model_executor/stage_configs/kimi_audio_async_chunk.yaml
+    --stage-configs-path vllm_omni/deploy/kimi_audio.yaml
 ```
 
 The flow-matching detokenizer + BigVGAN vocoder used by the audio-out
@@ -58,19 +56,22 @@ Overrides: `PORT`, `HOST`, `OUT_FILE`, `QUESTION`.
 
 ## Endpoint summary
 
-| Task          | Stage config                  | Stream?                | Response field                                         |
-|---------------|-------------------------------|------------------------|--------------------------------------------------------|
-| `audio2text`  | `kimi_audio.yaml`             | no                     | `choices[0].message.content`                           |
-| `audio2audio` | `kimi_audio.yaml` or `kimi_audio_async_chunk.yaml` | yes (async-chunk) / no | `choices[0].message.audio.data` (WAV b64, 24 kHz mono) |
-| `text2audio`  | `kimi_audio.yaml` or `kimi_audio_async_chunk.yaml` | yes (async-chunk) / no | `choices[0].message.audio.data` (WAV b64, 24 kHz mono) |
+All three tasks load `vllm_omni/deploy/kimi_audio.yaml`. Streaming behavior is
+controlled by `async_chunk` in that file (default `true`).
+
+| Task          | Stream? (when `async_chunk: true`) | Response field                                         |
+|---------------|------------------------------------|--------------------------------------------------------|
+| `audio2text`  | no                                 | `choices[0].message.content`                           |
+| `audio2audio` | yes                                | `choices[0].message.audio.data` (WAV b64, 24 kHz mono) |
+| `text2audio`  | yes                                | `choices[0].message.audio.data` (WAV b64, 24 kHz mono) |
 
 For audio-out responses the request must set `modalities: ["text", "audio"]`.
 
 ## Multi-GPU (TP)
 
 To shard the fused thinker across two GPUs, edit stage 0 in
-`kimi_audio.yaml` to set `tensor_parallel_size: 2`, `devices: "0,1"`,
-and `distributed_executor_backend: "mp"`; move stage 1 onto a free
-device (e.g. `devices: "2"`). The Qwen2 backbone shards via vLLM's
-standard TP path; the 6-layer MIMO branch is replicated on every rank
-(greedy sampling keeps ranks in sync without extra collectives).
+`vllm_omni/deploy/kimi_audio.yaml` to set `tensor_parallel_size: 2`,
+`devices: "0,1"`, and `distributed_executor_backend: "mp"`; move stage 1
+onto a free device (e.g. `devices: "2"`). The Qwen2 backbone shards via
+vLLM's standard TP path; the 6-layer MIMO branch is replicated on every
+rank (greedy sampling keeps ranks in sync without extra collectives).

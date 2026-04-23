@@ -10,6 +10,9 @@ from vllm.logger import init_logger
 
 from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.inputs.data import OmniTokensPrompt
+from vllm_omni.model_executor.stage_input_processors.qwen3_omni import (
+    _validate_stage_inputs,
+)
 
 logger = init_logger(__name__)
 
@@ -44,16 +47,7 @@ def kimi2code2wav(
 ) -> list[OmniTokensPrompt]:
     """Sync handoff: collect every audio token, forward to code2wav as
     ``prompt_token_ids`` (still in global-vocab space)."""
-    if not engine_input_source:
-        raise ValueError("engine_input_source cannot be empty")
-
-    source_stage_id = engine_input_source[0]
-    if source_stage_id >= len(stage_list):
-        raise IndexError(f"Invalid stage_id: {source_stage_id}")
-    if stage_list[source_stage_id].engine_outputs is None:
-        raise RuntimeError(f"Stage {source_stage_id} has no outputs yet")
-
-    thinker_outputs = stage_list[source_stage_id].engine_outputs
+    thinker_outputs = _validate_stage_inputs(stage_list, engine_input_source)
     code2wav_inputs: list[OmniTokensPrompt] = []
 
     for i, thinker_output in enumerate(thinker_outputs):
