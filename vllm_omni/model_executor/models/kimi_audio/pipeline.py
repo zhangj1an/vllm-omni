@@ -36,9 +36,7 @@ KIMI_AUDIO_PIPELINE = PipelineConfig(
             owns_tokenizer=True,
             requires_multimodal_data=True,
             engine_output_type="latent",
-            async_chunk_process_next_stage_input_func=(
-                f"{_PROC}.kimi2code2wav_async_chunk"
-            ),
+            async_chunk_process_next_stage_input_func=(f"{_PROC}.kimi2code2wav_async_chunk"),
             sampling_constraints={"detokenize": True},
         ),
         StagePipelineConfig(

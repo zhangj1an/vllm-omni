@@ -6,7 +6,7 @@ into a waveform. Naming follows the Kimi-Audio paper (Section 2.4)."""
 import copy
 import logging
 import time
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import torch
 import torch.nn as nn
@@ -44,7 +44,6 @@ def _cached_zeros(numel, device="cpu", dtype=torch.float32):
 
 
 class Attention(nn.Module):
-
     def __init__(
         self,
         dim: int,
@@ -137,18 +136,14 @@ class Attention(nn.Module):
             )
         else:
             if incremental_state is not None:
-                raise NotImplementedError(
-                    "It is designed for batching inference. AR-chunk is not supported currently."
-                )
+                raise NotImplementedError("It is designed for batching inference. AR-chunk is not supported currently.")
 
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
             if self.qk_norm:
                 q, k, v = qkv.unbind(2)
                 q, k = self.q_norm(q), self.k_norm(k)
-                # re-bind
                 qkv = torch.stack((q, k, v), dim=2)
 
-            # pack qkv with seq_len
             qkv_collect = []
             for i in range(qkv.shape[0]):
                 qkv_collect.append(qkv[i, : seq_len[i], :, :, :])
@@ -162,13 +157,10 @@ class Attention(nn.Module):
                 dropout_p=dropout_p,
             )
 
-            # unpack and pad 0
             x_collect = []
             for i in range(B):
                 x_collect.append(x[cu_seqlens[i] : cu_seqlens[i + 1], :, :])
-            x = torch.nn.utils.rnn.pad_sequence(
-                x_collect, batch_first=True, padding_value=0
-            )
+            x = torch.nn.utils.rnn.pad_sequence(x_collect, batch_first=True, padding_value=0)
 
         x = x.reshape(B, N, C)
         x = self.proj(x)
@@ -181,14 +173,11 @@ def modulate(x, shift, scale):
 
 
 class FinalLayer(nn.Module):
-
     def __init__(self, hidden_size, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, out_channels, bias=True)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
 
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=2)
@@ -198,7 +187,6 @@ class FinalLayer(nn.Module):
 
 
 class DiTBlock(nn.Module):
-
     def __init__(
         self,
         hidden_size,
@@ -210,24 +198,19 @@ class DiTBlock(nn.Module):
         from timm.models.vision_transformer import Mlp
 
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(
-            hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs
-        )
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
 
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(
             in_features=hidden_size,
             hidden_features=mlp_hidden_dim,
-            act_layer=approx_gelu,
+            act_layer=partial(nn.GELU, approximate="tanh"),
             drop=0,
         )
 
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
     def forward(
         self,
@@ -243,9 +226,7 @@ class DiTBlock(nn.Module):
         incremental_state=None,
         nopadding=True,
     ):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            self.adaLN_modulation(c).chunk(6, dim=2)
-        )
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=2)
 
         x_ = modulate(self.norm1(x), shift_msa, scale_msa)
 
@@ -344,9 +325,7 @@ class DiTPrefix(nn.Module):
         hidden_size=1024,
         depth=12,
         num_heads=4,
-        # mlp related
         mlp_ratio=4.0,
-        # rope
         use_rope=False,
         rope_params={
             "max_position_embeddings": 4096,
@@ -367,16 +346,14 @@ class DiTPrefix(nn.Module):
         # Moonshot's Kimi-Audio DiT config always sets sincos; learnable /
         # skip variants from upstream MoonCast aren't shipped in any
         # checkpoint we load.
-        self.position_embedding = SinusoidalPositionalEmbedding(
-            hidden_size, 0, max_seq_len + 1
-        )
+        self.position_embedding = SinusoidalPositionalEmbedding(hidden_size, 0, max_seq_len + 1)
 
         self.use_rope = use_rope
 
         if self.use_rope:
-            assert (
-                hidden_size % num_heads == 0
-            ), "Hidden size must be divisible by num_heads for rope position embedding."
+            assert hidden_size % num_heads == 0, (
+                "Hidden size must be divisible by num_heads for rope position embedding."
+            )
             rope_dim = hidden_size // num_heads
 
             self.rotary_pos_emb = get_1d_rotary_pos_embed(
@@ -440,16 +417,14 @@ class DiTPrefix(nn.Module):
 
         self.apply(_basic_init)
 
-        # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-        # Zero-out adaLN modulation layers in DiT blocks:
+        # DiT-style zero-init: adaLN modulation + final linear start as
+        # identity so untrained blocks don't perturb the input.
         for block in self.blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-
-        # Zero-out output layers:
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
@@ -529,20 +504,14 @@ class DiTPrefix(nn.Module):
         self.x_mask = x_mask
         self.x_cond = x_cond
 
-        position_ids_cur = list(
-            range(start_position_id, self.x_cond.shape[1] + start_position_id)
-        )
+        position_ids_cur = list(range(start_position_id, self.x_cond.shape[1] + start_position_id))
         position_ids = torch.tensor([position_ids_cur])
 
         self.position_ids = position_ids.to(self.x_cond.device).long()
-        self.seq_len = (
-            torch.Tensor([position_ids.shape[1]]).to(self.x_cond.device).long()
-        )
+        self.seq_len = torch.Tensor([position_ids.shape[1]]).to(self.x_cond.device).long()
 
         cu_seqlens = torch.cumsum(self.seq_len, dim=0)
-        self.cu_seqlens = torch.cat(
-            [torch.Tensor([0]).to(cu_seqlens.device), cu_seqlens], dim=0
-        ).int()
+        self.cu_seqlens = torch.cat([torch.Tensor([0]).to(cu_seqlens.device), cu_seqlens], dim=0).int()
         self.cu_maxlen = self.seq_len.cpu().max()
 
         if self.cu_seqlens_k is None:
@@ -553,9 +522,7 @@ class DiTPrefix(nn.Module):
             previous_seqlen_old = cache["previous_seqlen"]
             previous_seqlen = previous_seqlen_old + self.seq_len
             cu_seqlens_k = torch.cumsum(previous_seqlen, dim=0)
-            self.cu_seqlens_k = torch.cat(
-                [torch.Tensor([0]).to(cu_seqlens_k.device), cu_seqlens_k], dim=0
-            ).int()
+            self.cu_seqlens_k = torch.cat([torch.Tensor([0]).to(cu_seqlens_k.device), cu_seqlens_k], dim=0).int()
             self.cu_maxlen_k = previous_seqlen.cpu().max()
         self.previous_seqlen = previous_seqlen
         return {"previous_seqlen": previous_seqlen}
@@ -563,9 +530,9 @@ class DiTPrefix(nn.Module):
     def update_incremental_state(self, condition_cache=None):
         if condition_cache is None:
             condition_cache = self.condition_cache
-        assert (
-            self.reserve_kv_cache_tokens <= self.max_kv_cache_tokens
-        ), "reserve_kv_cache_tokens must be <= max_kv_cache_tokens"
+        assert self.reserve_kv_cache_tokens <= self.max_kv_cache_tokens, (
+            "reserve_kv_cache_tokens must be <= max_kv_cache_tokens"
+        )
 
         for _, layer_cache in self.incremental_state.items():
             layer_cache["attn_kvcache"]["prev_k"] = layer_cache["attn_kvcache"]["cur_k"]
@@ -574,56 +541,41 @@ class DiTPrefix(nn.Module):
             self.kv_cache_tokens = layer_cache["attn_kvcache"]["prev_k"].shape[1]
 
             if self.kv_cache_tokens > self.max_kv_cache_tokens:
-                reserve_tokens_excludeprompt = (
-                    self.max_kv_cache_tokens - self.reserve_kv_cache_tokens
-                )
+                reserve_tokens_excludeprompt = self.max_kv_cache_tokens - self.reserve_kv_cache_tokens
 
                 if self.reserve_kv_cache_tokens == 0:
-                    layer_cache["attn_kvcache"]["prev_k"] = layer_cache["attn_kvcache"][
-                        "prev_k"
-                    ][:, -reserve_tokens_excludeprompt:]
-                    layer_cache["attn_kvcache"]["prev_v"] = layer_cache["attn_kvcache"][
-                        "prev_v"
-                    ][:, -reserve_tokens_excludeprompt:]
+                    layer_cache["attn_kvcache"]["prev_k"] = layer_cache["attn_kvcache"]["prev_k"][
+                        :, -reserve_tokens_excludeprompt:
+                    ]
+                    layer_cache["attn_kvcache"]["prev_v"] = layer_cache["attn_kvcache"]["prev_v"][
+                        :, -reserve_tokens_excludeprompt:
+                    ]
                 elif reserve_tokens_excludeprompt == 0:
-                    layer_cache["attn_kvcache"]["prev_k"] = layer_cache["attn_kvcache"][
-                        "prev_k"
-                    ][:, : self.reserve_kv_cache_tokens]
-                    layer_cache["attn_kvcache"]["prev_v"] = layer_cache["attn_kvcache"][
-                        "prev_v"
-                    ][:, : self.reserve_kv_cache_tokens]
+                    layer_cache["attn_kvcache"]["prev_k"] = layer_cache["attn_kvcache"]["prev_k"][
+                        :, : self.reserve_kv_cache_tokens
+                    ]
+                    layer_cache["attn_kvcache"]["prev_v"] = layer_cache["attn_kvcache"]["prev_v"][
+                        :, : self.reserve_kv_cache_tokens
+                    ]
                 else:
                     layer_cache["attn_kvcache"]["prev_k"] = torch.cat(
                         [
-                            layer_cache["attn_kvcache"]["prev_k"][
-                                :, : self.reserve_kv_cache_tokens
-                            ],
-                            layer_cache["attn_kvcache"]["prev_k"][
-                                :, -reserve_tokens_excludeprompt:
-                            ],
+                            layer_cache["attn_kvcache"]["prev_k"][:, : self.reserve_kv_cache_tokens],
+                            layer_cache["attn_kvcache"]["prev_k"][:, -reserve_tokens_excludeprompt:],
                         ],
                         dim=1,
                     )
                     layer_cache["attn_kvcache"]["prev_v"] = torch.cat(
                         [
-                            layer_cache["attn_kvcache"]["prev_v"][
-                                :, : self.reserve_kv_cache_tokens
-                            ],
-                            layer_cache["attn_kvcache"]["prev_v"][
-                                :, -reserve_tokens_excludeprompt:
-                            ],
+                            layer_cache["attn_kvcache"]["prev_v"][:, : self.reserve_kv_cache_tokens],
+                            layer_cache["attn_kvcache"]["prev_v"][:, -reserve_tokens_excludeprompt:],
                         ],
                         dim=1,
                     )
 
                 bsz = layer_cache["attn_kvcache"]["prev_k"].shape[0]
                 self.previous_seqlen = (
-                    torch.Tensor(
-                        [
-                            layer_cache["attn_kvcache"]["prev_k"].shape[1]
-                            for _ in range(bsz)
-                        ]
-                    )
+                    torch.Tensor([layer_cache["attn_kvcache"]["prev_k"].shape[1] for _ in range(bsz)])
                     .to(layer_cache["attn_kvcache"]["prev_k"].device)
                     .long()
                 )
@@ -679,10 +631,7 @@ class DiTPrefix(nn.Module):
     def _ode_step(self, t, x):
         """Predict velocity at ``t``. ``t * 1000`` matches upstream Moonshot:
         the DiT was trained on integer timestep IDs, not [0, 1]."""
-        t_long = (
-            _cached_zeros(x.shape[0], device=x.device, dtype=torch.long)
-            + (t * 1000).long()
-        )
+        t_long = _cached_zeros(x.shape[0], device=x.device, dtype=torch.long) + (t * 1000).long()
         return self._predict_velocity(
             x=x,
             condition=self.x_cond,
@@ -754,9 +703,7 @@ class DiTPrefix(nn.Module):
         elif ode_solver == "naive_euler":
             x_t = self._solve_euler(t_span, xt_chunk)
         else:
-            raise NotImplementedError(
-                "ode_solver should be in ('neural_ode_euler', 'naive_euler')"
-            )
+            raise NotImplementedError("ode_solver should be in ('neural_ode_euler', 'naive_euler')")
 
         if look_ahead_tokens > 0:
             semantic_tokens_left = semantic_tokens_chunk.view(-1)[-look_ahead_tokens:]
@@ -766,9 +713,7 @@ class DiTPrefix(nn.Module):
             x_t_ret = x_t
 
         if look_ahead_tokens > 0:
-            x_mask = torch.zeros(
-                bs, xt_chunk.shape[1] - look_ahead_tokens, device=device
-            ).bool()
+            x_mask = torch.zeros(bs, xt_chunk.shape[1] - look_ahead_tokens, device=device).bool()
             self.condition_cache = self.set_conditions(
                 x_mask=x_mask,
                 x_cond=semantic_tokens_chunk[:, :-look_ahead_tokens],
@@ -792,24 +737,20 @@ class DiTPrefix(nn.Module):
         """Fill the KV cache from a reference audio prompt."""
         assert mel.dim() == 2
         assert semantic_token.dim() == 1
-        assert (
-            semantic_token.shape[0] == mel.shape[0]
-        ), "Semantic token and mel shape mismatch"
+        assert semantic_token.shape[0] == mel.shape[0], "Semantic token and mel shape mismatch"
         seq_len = mel.shape[0]
         num_chunks = min(seq_len // chunk_size, self.max_prompt_chunk)
         start_pos = seq_len - num_chunks * chunk_size
 
         res_mel = mel[:start_pos, :]
         res_semantic_token = semantic_token[:start_pos]
-        self.prefill_chunk(
-            res_mel, res_semantic_token, start_position_id=self.start_position_id
-        )
+        self.prefill_chunk(res_mel, res_semantic_token, start_position_id=self.start_position_id)
         self.start_position_id += start_pos
         self.update_incremental_state()
         self.reserve_kv_cache_tokens += self.kv_cache_tokens
 
         if verbose:
-            logger.info("Prefilling prompt with {} chunks".format(num_chunks))
+            logger.info(f"Prefilling prompt with {num_chunks} chunks")
             t_start = time.time()
 
         for chunk_id in range(num_chunks):
@@ -829,7 +770,7 @@ class DiTPrefix(nn.Module):
             self.reserve_kv_cache_tokens += self.kv_cache_tokens
 
         if verbose:
-            logger.info("Prefilling done in {:.2f} seconds".format(time.time() - t_start))
+            logger.info(f"Prefilling done in {time.time() - t_start:.2f} seconds")
 
     def prefill_chunk(self, mel_chunk, semantic_tokens_chunk, start_position_id=0):
         bs = 1
@@ -862,7 +803,7 @@ class DiTPrefix(nn.Module):
         max_prompt_chunk=2,
         max_kv_cache_tokens=900,
     ):
-        with open(model_config, "r") as f:
+        with open(model_config) as f:
             config = yaml.safe_load(f)
         dit_cfg = config["model"]["dit"]
         dit = cls(
@@ -886,11 +827,7 @@ class DiTPrefix(nn.Module):
         )
 
         state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)["state_dict"]
-        speech_model_params = {
-            k.replace("speech_model.", ""): v
-            for k, v in state_dict.items()
-            if "speech_model" in k
-        }
+        speech_model_params = {k.replace("speech_model.", ""): v for k, v in state_dict.items() if "speech_model" in k}
         speech_model_params.pop("position_embedding._float_tensor", None)
         dit.load_state_dict(speech_model_params, strict=True)
         logger.info(">>> Loaded checkpoint from %s", ckpt_path)

@@ -39,7 +39,7 @@ TASK_DEFAULTS = {
         "output_dir": "./output_audio_streaming",
     },
     "text2audio": {
-        "question": "Please say the following in audio: \"Hello, my name is Kimi.\"",
+        "question": 'Please say the following in audio: "Hello, my name is Kimi."',
         "output_dir": "./output_tts_streaming",
     },
 }
@@ -52,10 +52,7 @@ class QueryResult(NamedTuple):
 
 def _build_prompt(question: str, with_audio: bool) -> str:
     placeholder = AUDIO_PLACEHOLDER if with_audio else ""
-    return (
-        f"<|im_kimia_user_msg_start|>{placeholder}{question}"
-        f"<|im_msg_end|><|im_kimia_assistant_msg_start|>"
-    )
+    return f"<|im_kimia_user_msg_start|>{placeholder}{question}<|im_msg_end|><|im_kimia_assistant_msg_start|>"
 
 
 def get_query(task: str, question: str, audio_path: str | None, sr: int) -> QueryResult:

@@ -33,7 +33,7 @@ TASK_CHOICES = ("audio2text", "audio2audio", "text2audio")
 TASK_DEFAULT_QUESTION = {
     "audio2text": "Please transcribe the audio.",
     "audio2audio": "Answer in audio. Briefly summarize.",
-    "text2audio": "Please say the following in audio: \"Hello, my name is Kimi.\"",
+    "text2audio": 'Please say the following in audio: "Hello, my name is Kimi."',
 }
 
 TASK_DEFAULT_AUDIO_URL = {

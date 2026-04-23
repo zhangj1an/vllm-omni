@@ -19,8 +19,7 @@ from vllm_omni.entrypoints.omni import Omni
 
 SEED = 42
 
-# Kimi-Audio audio placeholder (mirrors upstream vLLM PR 36127's
-# AUDIO_PLACEHOLDER / chat template).
+# Mirrors the AUDIO_PLACEHOLDER token sequence Kimi's chat template expects.
 AUDIO_PLACEHOLDER = "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>"
 OUTPUT_SAMPLE_RATE = 24000
 
@@ -34,8 +33,6 @@ TASK_CHOICES = ("audio2text", "audio2audio", "text2audio")
 # instead of the HTML preview page.
 AUDIO2TEXT_DEFAULT_URL = "https://drive.google.com/uc?export=download&id=1RHz6uUSbAR_N3Li1Bjh8dPknykw4IVio"
 
-# Per-task stage config (relative to this script's directory) and the
-# default user instruction used when ``--question`` is not supplied.
 TASK_DEFAULTS = {
     "audio2text": {
         "stage_configs_path": "../../../vllm_omni/deploy/kimi_audio.yaml",
@@ -51,7 +48,7 @@ TASK_DEFAULTS = {
     },
     "text2audio": {
         "stage_configs_path": "../../../vllm_omni/deploy/kimi_audio.yaml",
-        "question": "Please say the following in audio: \"Hello, my name is Kimi.\"",
+        "question": 'Please say the following in audio: "Hello, my name is Kimi."',
         "output_dir": "./output_tts",
         "default_audio_url": None,
     },
@@ -71,10 +68,7 @@ def _build_prompt(question: str, with_audio: bool) -> str:
     a text-only user turn (used for ``text2audio``).
     """
     placeholder = AUDIO_PLACEHOLDER if with_audio else ""
-    return (
-        f"<|im_kimia_user_msg_start|>{placeholder}{question}"
-        f"<|im_msg_end|><|im_kimia_assistant_msg_start|>"
-    )
+    return f"<|im_kimia_user_msg_start|>{placeholder}{question}<|im_msg_end|><|im_kimia_assistant_msg_start|>"
 
 
 def get_audio_input_query(
@@ -116,11 +110,9 @@ def _load_audio_or_default(audio_path: str | None, sampling_rate: int, default_a
     connector = MediaConnector(allowed_local_media_path="/")
     audio, src_sr = connector.fetch_audio(source)
     if int(src_sr) != sampling_rate:
-        import librosa
+        from vllm.multimodal.audio import resample_audio_scipy
 
-        audio = librosa.resample(
-            audio.astype("float32"), orig_sr=int(src_sr), target_sr=sampling_rate
-        )
+        audio = resample_audio_scipy(audio.astype("float32"), orig_sr=int(src_sr), target_sr=sampling_rate)
     return audio
 
 
@@ -269,8 +261,7 @@ def parse_args():
         "--max-tokens",
         type=int,
         default=512,
-        help="Max output tokens for the thinker stage. Audio-out tasks "
-        "scale this by 8x for the code2wav stage.",
+        help="Max output tokens for the thinker stage. Audio-out tasks scale this by 8x for the code2wav stage.",
     )
     parser.add_argument(
         "--num-prompts",

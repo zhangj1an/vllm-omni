@@ -36,7 +36,6 @@ logger = init_logger(__name__)
     dummy_inputs=KimiAudioDummyInputsBuilder,
 )
 class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):

@@ -25,15 +25,12 @@ HF_VOCODER_REPO = "zhangj1an/kimi-audio-bigvgan-hf"
 
 
 class KimiBigVGAN(Qwen2_5OmniToken2WavBigVGANModel):
-
     def forward(self, mel_spectrogram: torch.Tensor) -> torch.Tensor:
         hidden = self.conv_pre(mel_spectrogram)
         for layer_index in range(self.num_upsample_layers):
             hidden = self.ups[layer_index][0](hidden)
             residual = sum(
-                self.resblocks[layer_index * self.num_residual_blocks + block_index](
-                    hidden
-                )
+                self.resblocks[layer_index * self.num_residual_blocks + block_index](hidden)
                 for block_index in range(self.num_residual_blocks)
             )
             hidden = residual / self.num_residual_blocks

@@ -18,7 +18,6 @@ _NUM_MELS = 80
 
 
 class KimiAudioCudaGraphDecoderWrapper:
-
     def __init__(
         self,
         vocoder: torch.nn.Module,

@@ -35,7 +35,6 @@ OUTPUT_SAMPLE_RATE = 24000
 
 
 class KimiAudioCode2Wav(nn.Module):
-
     input_modalities = "audio"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

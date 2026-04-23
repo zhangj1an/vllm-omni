@@ -81,7 +81,6 @@ _HF_TO_VLLM_MAPPER = WeightsMapper(
 
 
 class KimiAudioFusedThinker(_UpstreamKimiAudio):
-
     hf_to_vllm_mapper = _HF_TO_VLLM_MAPPER
 
     def __init__(self, *, vllm_config, prefix: str = ""):

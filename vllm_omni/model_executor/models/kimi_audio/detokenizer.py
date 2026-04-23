@@ -69,15 +69,9 @@ class PrefixStreamingFlowMatchingDetokenizer:
 
         if self.look_ahead_tokens != 0 and self.previous_chunk_left is not None:
             semantic_token_previous = self.previous_chunk_left["semantic_token"]
-            semantic_token = torch.cat(
-                [semantic_token_previous, semantic_token], dim=-1
-            )
+            semantic_token = torch.cat([semantic_token_previous, semantic_token], dim=-1)
 
-        x_t_chunk = (
-            torch.randn(semantic_token.shape[0], 80)
-            .to(semantic_token.device)
-            .to(self.dtype)
-        )
+        x_t_chunk = torch.randn(semantic_token.shape[0], 80).to(semantic_token.device).to(self.dtype)
 
         if self.look_ahead_tokens != 0 and self.previous_chunk_left is None:
             self.previous_chunk_left = {"semantic_token": None}
@@ -88,9 +82,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
             start_position_id=self.semantic_fm.start_position_id,
             ode_steps=ode_step,
             verbose=verbose,
-            look_ahead_tokens=(
-                self.look_ahead_tokens * upsample_factor if not is_final else 0
-            ),
+            look_ahead_tokens=(self.look_ahead_tokens * upsample_factor if not is_final else 0),
             cache=self.previous_chunk_left,
             ode_solver=ode_solver,
         )
@@ -110,12 +102,8 @@ class PrefixStreamingFlowMatchingDetokenizer:
                 self.clear_states()
                 ret_wav = concat_reconstructed_wav.float()
             else:
-                reconstructed_wav = concat_reconstructed_wav[
-                    :, : int(self.frame_size * chunk_size // 2)
-                ]
-                self.pre_wav = concat_reconstructed_wav[
-                    :, -int(self.frame_size * chunk_size // 2) :
-                ]
+                reconstructed_wav = concat_reconstructed_wav[:, : int(self.frame_size * chunk_size // 2)]
+                self.pre_wav = concat_reconstructed_wav[:, -int(self.frame_size * chunk_size // 2) :]
                 self.pre_mel = speech_mel[-chunk_size // 2 :, :]
 
                 ret_wav = reconstructed_wav.float()
@@ -138,20 +126,15 @@ class PrefixStreamingFlowMatchingDetokenizer:
 
                 if gen_speech_len not in self.hamming_window_cache:
                     self.hamming_window_cache[gen_speech_len] = (
-                        torch.hamming_window(gen_speech_len)
-                        .to(self.dtype)
-                        .to(semantic_token.device)
-                        .unsqueeze(0)
+                        torch.hamming_window(gen_speech_len).to(self.dtype).to(semantic_token.device).unsqueeze(0)
                     )
 
                 hamming_window = self.hamming_window_cache[gen_speech_len]
 
                 # Apply smoothing to the first half chunk.
                 reconstructed_wav[:, : int(gen_speech_len // 2)] = (
-                    self.pre_wav[:, : int(gen_speech_len // 2)]
-                    * hamming_window[:, -int(gen_speech_len // 2) :]
-                    + reconstructed_wav[:, : int(gen_speech_len // 2)]
-                    * hamming_window[:, : int(gen_speech_len // 2)]
+                    self.pre_wav[:, : int(gen_speech_len // 2)] * hamming_window[:, -int(gen_speech_len // 2) :]
+                    + reconstructed_wav[:, : int(gen_speech_len // 2)] * hamming_window[:, : int(gen_speech_len // 2)]
                 )
 
                 res_speech_len = concat_reconstructed_wav.shape[1] - gen_speech_len
@@ -161,10 +144,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
                 self.pre_mel = speech_mel[-res_mel_len:, :]
                 ret_wav = reconstructed_wav.float()
 
-        if (
-            not is_final
-            and self.semantic_fm.start_position_id + 2 * chunk_size > self.max_pos_size
-        ):
+        if not is_final and self.semantic_fm.start_position_id + 2 * chunk_size > self.max_pos_size:
             # Out of position id; reset back to a clean state.
             self.semantic_fm.clear_all_states()
 
@@ -200,16 +180,12 @@ def detokenize_noref(detokenizer, tokens):
         chunk_size = 150
         first_chunk_size = 100
         first_chunk_tokens = tokens[:, :first_chunk_size]
-        gen_speech = detokenizer.detokenize_streaming(
-            first_chunk_tokens, is_final=tokens.size(1) <= first_chunk_size
-        )
+        gen_speech = detokenizer.detokenize_streaming(first_chunk_tokens, is_final=tokens.size(1) <= first_chunk_size)
         cache_speech_collection.append(gen_speech)
         res_tokens = tokens[:, first_chunk_size:]
         for i in range(0, res_tokens.size(1), chunk_size):
             chunk_tokens = res_tokens[:, i : i + chunk_size]
-            gen_speech = detokenizer.detokenize_streaming(
-                chunk_tokens, is_final=(i + chunk_size >= res_tokens.size(1))
-            )
+            gen_speech = detokenizer.detokenize_streaming(chunk_tokens, is_final=(i + chunk_size >= res_tokens.size(1)))
             cache_speech_collection.append(gen_speech)
 
         gen_speech_all = torch.cat(cache_speech_collection, dim=-1)
