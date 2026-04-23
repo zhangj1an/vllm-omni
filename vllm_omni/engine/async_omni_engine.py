@@ -105,7 +105,13 @@ _STARTUP_POLL_INTERVAL_S = 1.0
 # Fields that must survive the "equal to default → strip" filter because
 # diffusion stages need them even when equal to vllm's default value
 # (e.g. colocate worker setup relies on worker_extension_cls being forwarded).
-_PARENT_ARGS_KEEP: frozenset[str] = frozenset({"worker_extension_cls"})
+_PARENT_ARGS_KEEP: frozenset[str] = frozenset(
+    {
+        "worker_extension_cls",
+        "allowed_local_media_path",
+        "allowed_media_domains",
+    }
+)
 
 # Omni orchestrator-level fields consumed by ``_resolve_stage_configs`` that
 # must never leak into per-stage EngineArgs (``stage_configs_path`` would
@@ -1318,6 +1324,12 @@ class AsyncOmniEngine:
         # Only set dtype if it was already explicitly passed and normalized
         if "dtype" in normalized_kwargs:
             stage_engine_args["dtype"] = normalized_kwargs["dtype"]
+
+        # New split fields for diffusers adapter kwargs.
+        if kwargs.get("diffusers_load_kwargs") is not None:
+            stage_engine_args["diffusers_load_kwargs"] = kwargs["diffusers_load_kwargs"]
+        if kwargs.get("diffusers_call_kwargs") is not None:
+            stage_engine_args["diffusers_call_kwargs"] = kwargs["diffusers_call_kwargs"]
 
         default_stage_cfg = [
             {
