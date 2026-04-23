@@ -124,9 +124,7 @@ def run_audio_out(url: str, body: dict, out_path: str) -> None:
                     wav_bytes = base64.b64decode(content)
                 except Exception:
                     continue
-                audio, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
-                if sr != OUTPUT_SAMPLE_RATE:
-                    print(f"Warning: chunk sample rate {sr} != {OUTPUT_SAMPLE_RATE}", file=sys.stderr)
+                audio, _sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
                 chunks.append(audio.flatten())
 
     if not chunks:

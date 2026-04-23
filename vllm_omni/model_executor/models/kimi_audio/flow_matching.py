@@ -353,7 +353,6 @@ class DiTPrefix(nn.Module):
             "rope_base": 10000.0,
             "rope_interpolation_factor": 1.0,
         },
-        position_embedding_type="sincos",
         max_seq_len=4096,
     ):
         super().__init__()
@@ -365,21 +364,12 @@ class DiTPrefix(nn.Module):
 
         self.input_linear = nn.Linear(input_size, hidden_size)
 
-        # position embedding
-        if position_embedding_type == "learnable":
-            self.position_embedding = nn.Embedding(max_seq_len + 1, hidden_size)
-        elif position_embedding_type == "sincos":
-            self.position_embedding = SinusoidalPositionalEmbedding(
-                hidden_size, 0, max_seq_len + 1
-            )
-        elif position_embedding_type == "skip":
-            self.position_embedding = None
-        else:
-            raise NotImplementedError(
-                "Position embedding type: {} not implemented.".format(
-                    position_embedding_type
-                )
-            )
+        # Moonshot's Kimi-Audio DiT config always sets sincos; learnable /
+        # skip variants from upstream MoonCast aren't shipped in any
+        # checkpoint we load.
+        self.position_embedding = SinusoidalPositionalEmbedding(
+            hidden_size, 0, max_seq_len + 1
+        )
 
         self.use_rope = use_rope
 
@@ -484,9 +474,8 @@ class DiTPrefix(nn.Module):
 
         x = self.input_linear(x)
 
-        if self.position_embedding is not None:
-            position_emb = self.position_embedding(position_ids)
-            x = x + position_emb
+        position_emb = self.position_embedding(position_ids)
+        x = x + position_emb
 
         if self.use_rope:
             bsz, seqlen = position_ids.shape
@@ -892,7 +881,6 @@ class DiTPrefix(nn.Module):
                     "rope_interpolation_factor": 1,
                 },
             ),
-            position_embedding_type=dit_cfg["position_embedding_type"],
             max_seq_len=dit_cfg["max_seq_len"],
             output_size=dit_cfg["input_size"],
         )
