@@ -67,6 +67,10 @@ _OMNI_PIPELINES: dict[str, tuple[str, str]] = {
         "vllm_omni.model_executor.models.fish_speech.pipeline",
         "FISH_SPEECH_PIPELINE",
     ),
+    "kimi_audio": (
+        "vllm_omni.model_executor.models.kimi_audio.pipeline",
+        "KIMI_AUDIO_PIPELINE",
+    ),
 }
 
 # --- Single-stage diffusion pipelines (populated in PR 3/N) ---

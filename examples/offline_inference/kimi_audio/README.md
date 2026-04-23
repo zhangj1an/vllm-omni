@@ -46,7 +46,7 @@ Outputs land under the per-task default directory
   with `hf_overrides.kimia_generate_audio: true`. Stage 1 is `code2wav`
   (PrefixStreamingFlowMatchingDetokenizer + BigVGAN). The detokenizer is
   vendored in-tree under `vllm_omni/model_executor/models/kimi_audio/`
-  (see `detokenizer.py`, `flow_matching.py`, `bigvgan_wrapper.py`);
+  (see `detokenizer.py`, `flow_matching.py`, `bigvgan.py`);
   `flash_attn` is required at runtime. Expects 2 GPUs by default. For
   text-out only, drop stage 1 and set `kimia_generate_audio: false`.
 - `kimi_audio_async_chunk.yaml`: same pipeline with async-chunk streaming

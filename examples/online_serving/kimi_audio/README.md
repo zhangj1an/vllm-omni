@@ -22,7 +22,7 @@ vllm serve moonshotai/Kimi-Audio-7B-Instruct --omni --port 8091 \
 The flow-matching detokenizer + BigVGAN vocoder used by the audio-out
 configs is vendored in-tree under
 `vllm_omni/model_executor/models/kimi_audio/` (see `detokenizer.py`,
-`flow_matching.py`, `bigvgan_wrapper.py`). It still needs `flash_attn`
+`flow_matching.py`, `bigvgan.py`). It still needs `flash_attn`
 installed at runtime for the DiT prefix model.
 
 ## Send a request
