@@ -93,10 +93,6 @@ class DiTPrefix(nn.Module):
         num_heads=4,
         # mlp related
         mlp_ratio=4.0,
-        ffn_type="conv1d_conv1d",
-        ffn_gated_glu=True,
-        ffn_act_layer="gelu",
-        ffn_conv_kernel_size=5,
         # rope
         use_rope=False,
         rope_params={
@@ -159,10 +155,6 @@ class DiTPrefix(nn.Module):
                     hidden_size,
                     num_heads,
                     mlp_ratio=mlp_ratio,
-                    ffn_type=ffn_type,
-                    ffn_conv_kernel_size=ffn_conv_kernel_size,
-                    ffn_gated_glu=ffn_gated_glu,
-                    ffn_act_layer=ffn_act_layer,
                 )
                 for _ in range(depth)
             ]
@@ -570,53 +562,6 @@ class DiTPrefix(nn.Module):
         return x_t_ret.squeeze(0)
 
     @torch.inference_mode()
-    def infer_mel(
-        self,
-        semantic_tokens,
-        ode_steps=15,
-        chunk_size=150,
-        verbose=False,
-        ode_solver="neural_ode_euler",
-    ):
-        assert semantic_tokens.dim() == 1
-        device = next(self.parameters()).device
-
-        x_t = torch.randn(semantic_tokens.shape[0], 80).to(device).to(self.dtype)
-
-        seq_len = semantic_tokens.shape[0]
-        num_chunks = seq_len // chunk_size
-        if seq_len % chunk_size != 0:
-            num_chunks += 1
-
-        x_pred_collect = []
-        if verbose:
-            t_start = time.time()
-
-        for chunk_id in range(num_chunks):
-            start = chunk_id * chunk_size
-            end = min(start + chunk_size, seq_len)
-            semantic_tokens_chunk = semantic_tokens[start:end]
-            x_t_chunk = x_t[start:end, :]
-
-            x_pred = self.infer_chunk(
-                xt_chunk=x_t_chunk,
-                semantic_tokens_chunk=semantic_tokens_chunk,
-                start_position_id=self.start_position_id,
-                ode_steps=ode_steps,
-                verbose=verbose,
-                ode_solver=ode_solver,
-            )
-            self.start_position_id += end - start
-            self.update_incremental_state()
-
-            x_pred_collect.append(x_pred)
-
-        if verbose:
-            logger.info(f"[ODE] Time cost: {time.time() - t_start}")
-
-        return torch.cat(x_pred_collect, dim=0)
-
-    @torch.inference_mode()
     def prefill(self, mel, semantic_token, chunk_size=150, verbose=False):
         """Fill the KV cache from a reference audio prompt."""
         assert mel.dim() == 2
@@ -706,10 +651,6 @@ class DiTPrefix(nn.Module):
             depth=dit_cfg["depth"],
             num_heads=dit_cfg["num_heads"],
             mlp_ratio=dit_cfg["mlp_ratio"],
-            ffn_type=dit_cfg.get("ffn_type", "conv1d_conv1d"),
-            ffn_gated_glu=dit_cfg.get("ffn_gated_glu", True),
-            ffn_act_layer=dit_cfg.get("ffn_act_layer", "gelu"),
-            ffn_conv_kernel_size=dit_cfg.get("ffn_conv_kernel_size", 5),
             use_rope=dit_cfg.get("use_rope", False),
             rope_params=dit_cfg.get(
                 "rope_params",

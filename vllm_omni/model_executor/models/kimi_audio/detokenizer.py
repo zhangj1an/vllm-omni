@@ -1,7 +1,9 @@
-import torch
 import os
+
+import torch
+
 from .bigvgan_wrapper import KimiBigVGAN
-from .flow_matching.model import DiTPrefix
+from .flow_matching import DiTPrefix
 
 
 class PrefixStreamingFlowMatchingDetokenizer:

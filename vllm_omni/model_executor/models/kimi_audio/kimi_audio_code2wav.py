@@ -18,7 +18,7 @@ from vllm.logger import init_logger
 from vllm_omni.model_executor.models.kimi_audio.cuda_graph_decoder_wrapper import (
     KimiAudioCudaGraphDecoderWrapper,
 )
-from vllm_omni.model_executor.models.kimi_audio.kimia_detokenizer import (
+from vllm_omni.model_executor.models.kimi_audio.detokenizer import (
     detokenize_noref,
     get_audio_detokenizer,
 )
@@ -53,15 +53,6 @@ class KimiAudioCode2Wav(nn.Module):
         self._first_chunk_tokens = 100
         self._chunk_tokens = 150
         self._cuda_graph_wrapper: KimiAudioCudaGraphDecoderWrapper | None = None
-
-    @staticmethod
-    def _module_device(module: nn.Module) -> torch.device:
-        try:
-            return next(module.parameters()).device
-        except StopIteration:
-            for _, buf in module.named_buffers(recurse=True):
-                return buf.device
-            return torch.device("cpu")
 
     def _ensure_detokenizer_loaded(self) -> None:
         if self._detokenizer is not None:

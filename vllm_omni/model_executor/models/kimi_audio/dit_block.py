@@ -208,13 +208,11 @@ class DiTBlock(nn.Module):
         hidden_size,
         num_heads,
         mlp_ratio=4.0,
-        ffn_type="conv1d_conv1d",
-        ffn_gated_glu=True,
-        ffn_act_layer="gelu",
-        ffn_conv_kernel_size=5,
         **block_kwargs,
     ):
         super().__init__()
+        from timm.models.vision_transformer import Mlp
+
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(
             hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs
@@ -222,19 +220,14 @@ class DiTBlock(nn.Module):
 
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
-        if ffn_type == "vanilla_mlp":
-            from timm.models.vision_transformer import Mlp
-
-            mlp_hidden_dim = int(hidden_size * mlp_ratio)
-            approx_gelu = lambda: nn.GELU(approximate="tanh")
-            self.mlp = Mlp(
-                in_features=hidden_size,
-                hidden_features=mlp_hidden_dim,
-                act_layer=approx_gelu,
-                drop=0,
-            )
-        else:
-            raise NotImplementedError(f"FFN type {ffn_type} is not implemented")
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
+        self.mlp = Mlp(
+            in_features=hidden_size,
+            hidden_features=mlp_hidden_dim,
+            act_layer=approx_gelu,
+            drop=0,
+        )
 
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
