@@ -17,6 +17,10 @@ Run:
     python benchmarks/diffusion/bench_attention_backends.py \
         --batch 1 --heads 24 --seq 14336 --head-dim 128
 
+Optional extras:
+    pip install --pre flash-attn-4        # FA4 is currently pre-release only
+    pip install -U flashinfer              # for backend= kwarg support
+
 The table at the end is the data we want on the PR — surface the row where a
 backend is >1.5x the SDPA baseline, that's the one to gate off the auto-route.
 """
@@ -87,7 +91,9 @@ def _make_mask(batch: int, seq: int, device: str, dtype: torch.dtype, pad_tokens
 
 
 def _time_call(fn, *args, warmup: int = 3, iters: int = 10) -> tuple[float, str]:
-    """Return (median ms, error string). Skips on runtime errors."""
+    """Return (median ms, error string). Skips on any exception so that a
+    backend that rejects our args (wrong dtype, missing JIT module, unsupported
+    kwarg value) doesn't abort the whole sweep."""
     try:
         for _ in range(warmup):
             fn(*args)
@@ -101,8 +107,9 @@ def _time_call(fn, *args, warmup: int = 3, iters: int = 10) -> tuple[float, str]
             times.append((time.perf_counter() - t0) * 1000.0)
         times.sort()
         return times[len(times) // 2], ""
-    except RuntimeError as e:
-        return float("nan"), type(e).__name__
+    except Exception as e:  # noqa: BLE001 — probe script, keep the whole table going
+        msg = str(e).split("\n", 1)[0][:60]
+        return float("nan"), f"{type(e).__name__}: {msg}" if msg else type(e).__name__
 
 
 def _run_sdpa_variants(q, k, v, attn_mask, scale: float) -> list[tuple[str, float, str]]:
@@ -207,8 +214,13 @@ def main() -> None:
     # --- No mask (Wan-like hot path) ---
     rows_nomask = _run_sdpa_variants(q, k, v, attn_mask=None, scale=scale)
     rows_nomask.append(("FLASHINFER (default)", *_run_flashinfer(q, k, v, scale)))
-    rows_nomask.append(("FLASHINFER (cutlass)", *_run_flashinfer(q, k, v, scale, backend="cutlass")))
-    rows_nomask.append(("FLASHINFER (fa3)", *_run_flashinfer(q, k, v, scale, backend="fa3")))
+    # Probe several FlashInfer backend names — valid set varies by version
+    # (0.6.x: fa2/fa3/trtllm-gen/auto; newer: also cutlass). _time_call
+    # swallows ValueError so invalid names just show up as failed rows.
+    for fi_backend in ("fa2", "fa3", "trtllm-gen", "cutlass", "auto"):
+        rows_nomask.append(
+            (f"FLASHINFER ({fi_backend})", *_run_flashinfer(q, k, v, scale, backend=fi_backend))
+        )
     rows_nomask.append(("FA4 (direct)", *_run_fa4(q, k, v, scale)))
     _print_table("No attention mask", rows_nomask)
 
