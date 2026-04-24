@@ -293,16 +293,20 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         audio_ids = torch.full_like(input_ids, audio_tok)
 
         # Text stream: pass vLLM's sampled token through, unless the text
-        # stream has already emitted kimia_text_eos — then pad with blanks.
+        # stream has ALREADY emitted kimia_text_eos on a PRIOR step —
+        # then pad with blanks. Critical off-by-one: reference's
+        # _generate_loop passes kimia_text_eos THROUGH the iteration on
+        # which it's first observed, and only substitutes blanks on
+        # subsequent iterations (verified against
+        # /root/output/ref_audio_tokens.json step 9 where text_in=151667).
+        # Replacing on the same step we latch causes the MIMO branch to
+        # permanently diverge starting one decode step later.
         if state["text_eos_seen"]:
             text_ids = torch.full_like(input_ids, _KIMIA_TEXT_BLANK)
         else:
             text_ids = input_ids
-            # Latch once we observe kimia_text_eos on the vLLM-sampled token.
             if input_ids.numel() == 1 and int(input_ids.item()) == _KIMIA_TEXT_EOS:
                 state["text_eos_seen"] = True
-                # Token is consumed, but next step is blank.
-                text_ids = torch.full_like(input_ids, _KIMIA_TEXT_BLANK)
 
         return audio_ids, text_ids
 

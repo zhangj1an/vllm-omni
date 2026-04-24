@@ -176,18 +176,31 @@ def get_audio_detokenizer(model_path):
 
 
 def detokenize_noref(detokenizer, tokens):
+    """Non-streaming detokenize used by the sync code2wav stage. Must match
+    upstream ``KimiAudio.detokenize_audio`` parameters exactly — in particular
+    ``upsample_factor=4`` (each semantic code expands to 4 mel frames before
+    the flow-matcher + BigVGAN), otherwise the output audio is ~4x shorter
+    than expected. chunk_size/first_chunk_size are 30 to match reference."""
     with torch.no_grad():
         detokenizer.clear_states()
         cache_speech_collection = []
-        chunk_size = 150
-        first_chunk_size = 100
+        chunk_size = 30
+        first_chunk_size = 30
         first_chunk_tokens = tokens[:, :first_chunk_size]
-        gen_speech = detokenizer.detokenize_streaming(first_chunk_tokens, is_final=tokens.size(1) <= first_chunk_size)
+        gen_speech = detokenizer.detokenize_streaming(
+            first_chunk_tokens,
+            is_final=tokens.size(1) <= first_chunk_size,
+            upsample_factor=4,
+        )
         cache_speech_collection.append(gen_speech)
         res_tokens = tokens[:, first_chunk_size:]
         for i in range(0, res_tokens.size(1), chunk_size):
             chunk_tokens = res_tokens[:, i : i + chunk_size]
-            gen_speech = detokenizer.detokenize_streaming(chunk_tokens, is_final=(i + chunk_size >= res_tokens.size(1)))
+            gen_speech = detokenizer.detokenize_streaming(
+                chunk_tokens,
+                is_final=(i + chunk_size >= res_tokens.size(1)),
+                upsample_factor=4,
+            )
             cache_speech_collection.append(gen_speech)
 
         gen_speech_all = torch.cat(cache_speech_collection, dim=-1)
