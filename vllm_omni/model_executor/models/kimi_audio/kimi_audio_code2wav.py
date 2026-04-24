@@ -130,17 +130,23 @@ class KimiAudioCode2Wav(nn.Module):
         self,
         audio_codes: torch.Tensor,
         is_final: bool,
-        ode_step: int = 15,
+        ode_step: int = 30,
     ) -> torch.Tensor:
         """Decode one chunk via the streaming path. Detokenizer keeps
         per-request state (KV cache, mel/wav history) across calls; caller
-        must ``clear_states`` between requests."""
+        must ``clear_states`` between requests.
+
+        ``upsample_factor=4`` and ``ode_step=30`` match upstream
+        ``KimiAudio.detokenize_audio`` — the 12.5 Hz semantic tokens expand
+        to the 50 Hz mel rate BigVGAN expects, and the flow-matching ODE
+        gets the full integration budget."""
         assert self._detokenizer is not None
         tokens = audio_codes.unsqueeze(0)
         wav = self._detokenizer.detokenize_streaming(
             tokens,
             ode_step=ode_step,
             is_final=is_final,
+            upsample_factor=4,
         )
         return wav.squeeze(0).float()
 

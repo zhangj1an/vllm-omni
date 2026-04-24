@@ -196,10 +196,17 @@ def write_outputs(omni_outputs, output_dir: str) -> None:
             print(text)
             print("----------------")
         elif stage_outputs.final_output_type == "audio":
-            audio_tensor = output.outputs[0].multimodal_output.get("audio")
-            if audio_tensor is None:
+            audio_data = output.outputs[0].multimodal_output.get("audio")
+            if audio_data is None:
                 print(f"Request {request_id}: no audio emitted (text-only response)")
                 continue
+            # In async-chunk streaming mode the audio arrives as a list of
+            # per-chunk tensors; concatenate before writing.
+            if isinstance(audio_data, list):
+                import torch
+                audio_tensor = torch.cat(audio_data, dim=-1)
+            else:
+                audio_tensor = audio_data
             audio_numpy = audio_tensor.float().detach().cpu().numpy().reshape(-1)
             out_wav = os.path.join(output_dir, f"{request_id}.wav")
             sf.write(out_wav, audio_numpy, samplerate=OUTPUT_SAMPLE_RATE, format="WAV")

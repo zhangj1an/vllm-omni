@@ -33,6 +33,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
     @classmethod
     def from_pretrained(
         cls,
+        model_path,
         fm_config,
         fm_ckpt,
         device,
@@ -40,7 +41,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
         max_prompt_chunk=2,
         max_kv_cache_tokens=900,
     ):
-        bigvgan = KimiBigVGAN.load_from_hf(device)
+        bigvgan = KimiBigVGAN.load_from_local(model_path, device)
         semantic_fm = DiTPrefix.from_pretrained(
             fm_config,
             fm_ckpt,
@@ -165,6 +166,7 @@ def get_audio_detokenizer(model_path):
 
     device = torch.cuda.current_device()
     detokenizer = PrefixStreamingFlowMatchingDetokenizer.from_pretrained(
+        model_path=model_path,
         max_prompt_chunk=10,  # 10 * 3 = 30s
         fm_config=fm_model_config,
         fm_ckpt=fm_ckpt_path,
