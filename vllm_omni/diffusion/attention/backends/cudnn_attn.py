@@ -64,7 +64,13 @@ class CuDNNAttentionImpl(AttentionImpl):
             attention_mask = _maybe_reshape_attn_mask(query, key, attn_metadata.attn_mask, mask_mode="broadcast_k")
 
         query, key, value = (x.permute(0, 2, 1, 3) for x in (query, key, value))
-        with sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.MATH]):
+        # Pin cuDNN exclusively. A priority list like [CUDNN, FLASH, MATH] hits a
+        # PyTorch SDPA dispatch quirk: when FLASH rejects a non-None attn_mask,
+        # cuDNN gets runtime-disabled in the same call and the dispatcher falls
+        # through to MATH even though cuDNN alone handles the mask fine
+        # (~11 ms vs ~215 ms for MATH on sm_120 HV-1.5 shapes). Users who need a
+        # fallback should set DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA.
+        with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]):
             output = torch.nn.functional.scaled_dot_product_attention(
                 query,
                 key,
