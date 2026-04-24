@@ -56,7 +56,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
         semantic_token,
         ode_step=30,
         verbose=False,
-        ode_solver="neural_ode_euler",
         is_final=False,
         upsample_factor=1,
     ):
@@ -69,7 +68,11 @@ class PrefixStreamingFlowMatchingDetokenizer:
 
         if self.look_ahead_tokens != 0 and self.previous_chunk_left is not None:
             semantic_token_previous = self.previous_chunk_left["semantic_token"]
-            semantic_token = torch.cat([semantic_token_previous, semantic_token], dim=-1)
+            if semantic_token_previous is not None:
+                semantic_token = torch.cat(
+                    [semantic_token_previous.to(semantic_token.device), semantic_token],
+                    dim=-1,
+                )
 
         x_t_chunk = torch.randn(semantic_token.shape[0], 80).to(semantic_token.device).to(self.dtype)
 
@@ -84,7 +87,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
             verbose=verbose,
             look_ahead_tokens=(self.look_ahead_tokens * upsample_factor if not is_final else 0),
             cache=self.previous_chunk_left,
-            ode_solver=ode_solver,
         )
 
         chunk_size = speech_mel.shape[0]

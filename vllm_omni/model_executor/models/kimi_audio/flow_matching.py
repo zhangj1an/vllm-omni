@@ -6,7 +6,7 @@ into a waveform. Naming follows the Kimi-Audio paper (Section 2.4)."""
 import copy
 import logging
 import time
-from functools import lru_cache, partial
+from functools import lru_cache
 
 import torch
 import torch.nn as nn
@@ -18,22 +18,7 @@ from diffusers.models.embeddings import (
     get_timestep_embedding,
 )
 
-# flash_attn is required at runtime (see kimi_audio README). We try/except
-# at import so the kimi_audio package still loads in audio2text-only setups
-# that don't construct the detokenizer; ``Attention`` raises on construction
-# if flash_attn is missing.
-try:
-    from flash_attn import flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func
-except (ImportError, ModuleNotFoundError):
-    flash_attn_varlen_func = None
-    flash_attn_varlen_qkvpacked_func = None
-
-try:
-    from torchdyn.core import NeuralODE
-
-    NEURALODE_INSTALLED = True
-except ImportError:
-    NEURALODE_INSTALLED = False
+from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +41,6 @@ class Attention(nn.Module):
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
-        if flash_attn_varlen_func is None:
-            raise ImportError(
-                "Kimi-Audio's flow-matching detokenizer requires flash_attn. "
-                "Install it via `pip install flash_attn` (see the Kimi-Audio "
-                "README) or run in audio2text-only mode (no code2wav stage)."
-            )
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
@@ -150,10 +129,17 @@ class Attention(nn.Module):
 
             qkv = torch.cat(qkv_collect, dim=0)
 
-            x = flash_attn_varlen_qkvpacked_func(
-                qkv=qkv,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
+            # qkv shape after cat is [total_tokens, 3, num_heads, head_dim];
+            # the "3" axis is dim 1, not dim 2 (dim 2 is num_heads).
+            q, k, v = qkv.unbind(1)
+            x = flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
                 dropout_p=dropout_p,
             )
 
@@ -186,6 +172,20 @@ class FinalLayer(nn.Module):
         return x
 
 
+class _DiTMlp(nn.Module):
+    """Two-layer MLP with tanh-approx GELU. Attribute names ``fc1``/``fc2``
+    match timm's ``Mlp`` so existing detokenizer checkpoints load unchanged."""
+
+    def __init__(self, in_features: int, hidden_features: int):
+        super().__init__()
+        self.fc1 = nn.Linear(in_features, hidden_features, bias=True)
+        self.act = nn.GELU(approximate="tanh")
+        self.fc2 = nn.Linear(hidden_features, in_features, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(self.act(self.fc1(x)))
+
+
 class DiTBlock(nn.Module):
     def __init__(
         self,
@@ -195,20 +195,13 @@ class DiTBlock(nn.Module):
         **block_kwargs,
     ):
         super().__init__()
-        from timm.models.vision_transformer import Mlp
-
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
 
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        self.mlp = Mlp(
-            in_features=hidden_size,
-            hidden_features=mlp_hidden_dim,
-            act_layer=partial(nn.GELU, approximate="tanh"),
-            drop=0,
-        )
+        self.mlp = _DiTMlp(in_features=hidden_size, hidden_features=mlp_hidden_dim)
 
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
@@ -382,7 +375,6 @@ class DiTPrefix(nn.Module):
         self.sigma_min = 1e-4
         self.t_min = 0.0
         self.t_max = 1.0 - self.sigma_min
-        self._neural_ode = None
 
         self.incremental_state: dict = {}
         self.kv_cache_tokens = 0
@@ -654,20 +646,6 @@ class DiTPrefix(nn.Module):
             xt = xt + h * self._ode_step(t, xt)
         return xt
 
-    def _solve_neural_ode(self, time_steps, xt):
-        if not NEURALODE_INSTALLED:
-            raise ImportError("NeuralODE is not installed; install torchdyn first.")
-        if self._neural_ode is None:
-            self._neural_ode = NeuralODE(
-                lambda t, x, args=None: self._ode_step(t, x),
-                solver="euler",
-                sensitivity="adjoint",
-                atol=self.sigma_min,
-                rtol=self.sigma_min,
-            )
-        _, traj = self._neural_ode(xt, time_steps)
-        return traj[-1]
-
     @torch.inference_mode()
     def infer_chunk(
         self,
@@ -678,7 +656,6 @@ class DiTPrefix(nn.Module):
         look_ahead_tokens=0,
         ode_steps=15,
         verbose=False,
-        ode_solver="neural_ode_euler",
     ):
         bs = 1
         device = next(self.parameters()).device
@@ -698,12 +675,7 @@ class DiTPrefix(nn.Module):
 
         if verbose:
             t_start = time.time()
-        if ode_solver == "neural_ode_euler":
-            x_t = self._solve_neural_ode(t_span, xt_chunk)
-        elif ode_solver == "naive_euler":
-            x_t = self._solve_euler(t_span, xt_chunk)
-        else:
-            raise NotImplementedError("ode_solver should be in ('neural_ode_euler', 'naive_euler')")
+        x_t = self._solve_euler(t_span, xt_chunk)
 
         if look_ahead_tokens > 0:
             semantic_tokens_left = semantic_tokens_chunk.view(-1)[-look_ahead_tokens:]

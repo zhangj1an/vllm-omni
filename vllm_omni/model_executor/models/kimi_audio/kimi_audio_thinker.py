@@ -30,12 +30,17 @@ logger = init_logger(__name__)
 KIMIA_TOKEN_OFFSET = 152064
 
 
-def _build_mimo_layers(config) -> nn.ModuleList:
+def _build_mimo_layers(config) -> tuple[nn.ModuleList, nn.Module]:
     """Build the MIMO decoder layers with HF's Qwen2DecoderLayer. We skip
     vLLM's optimized layer because it's tied to paged KV cache; the MIMO
-    branch is small enough that eager attention is fine."""
+    branch is small enough that eager attention is fine.
+
+    Returns the layer stack plus a ``Qwen2RotaryEmbedding`` — since
+    transformers>=4.45 moved RoPE out of the attention layer, we must
+    precompute ``(cos, sin)`` and pass it to each layer as
+    ``position_embeddings``."""
     from transformers import Qwen2Config
-    from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
+    from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RotaryEmbedding
 
     qwen2_cfg = Qwen2Config(
         hidden_size=config.hidden_size,
@@ -48,8 +53,11 @@ def _build_mimo_layers(config) -> nn.ModuleList:
         rope_theta=config.rope_theta,
         hidden_act=config.hidden_act,
         attention_dropout=0.0,
+        attn_implementation="eager",
     )
-    return nn.ModuleList([Qwen2DecoderLayer(qwen2_cfg, layer_idx=i) for i in range(config.kimia_mimo_layers)])
+    layers = nn.ModuleList([Qwen2DecoderLayer(qwen2_cfg, layer_idx=i) for i in range(config.kimia_mimo_layers)])
+    rotary_emb = Qwen2RotaryEmbedding(config=qwen2_cfg)
+    return layers, rotary_emb
 
 
 def _build_mimo_norm(config) -> nn.Module:
@@ -93,7 +101,7 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         self._generate_audio = bool(getattr(config, "kimia_generate_audio", False))
 
         if self._generate_audio:
-            self.mimo_layers = _build_mimo_layers(config)
+            self.mimo_layers, self.mimo_rotary_emb = _build_mimo_layers(config)
             self.mimo_norm = _build_mimo_norm(config)
             # Head shares the global vocab with the text head; audio IDs
             # occupy [KIMIA_TOKEN_OFFSET, vocab_size).
@@ -186,17 +194,20 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         causal_block = torch.full((seq_len, seq_len), float("-inf"), device=hidden.device, dtype=hidden.dtype).triu(1)
         attn_mask = attn_mask + causal_block
 
+        position_embeddings = self.mimo_rotary_emb(hidden_3d, position_ids)
+
         h = hidden_3d
         for layer in self.mimo_layers:
             layer_out = layer(
                 hidden_states=h,
                 attention_mask=attn_mask,
                 position_ids=position_ids,
-                past_key_value=None,
-                output_attentions=False,
+                position_embeddings=position_embeddings,
                 use_cache=False,
             )
-            h = layer_out[0]
+            # transformers>=4.50 returns a bare Tensor [B, T, H]; older
+            # versions return a ``(hidden_states, ...)`` tuple.
+            h = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
         h = self.mimo_norm(h)
         audio_logits = self.mimo_output(h)

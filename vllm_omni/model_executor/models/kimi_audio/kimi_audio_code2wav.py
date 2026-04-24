@@ -164,7 +164,13 @@ class KimiAudioCode2Wav(nn.Module):
                 multimodal_outputs={"model_outputs": [empty], "sr": [sr_tensor]},
             )
 
-        ids = input_ids.reshape(-1).to(dtype=torch.long)
+        # input_ids may arrive on CPU (stage-0 → stage-1 hop in sync mode
+        # without a GPU-resident connector). The detokenizer submodules
+        # (DiT + BigVGAN) live on CUDA, so downstream ops would mix
+        # devices. Normalize to the model's device here so every call path
+        # below sees CUDA tensors.
+        target_device = next(self._detokenizer.semantic_fm.parameters()).device
+        ids = input_ids.reshape(-1).to(device=target_device, dtype=torch.long)
         request_ids_list = self._split_request_ids(ids, kwargs.get("seq_token_counts"))
         async_chunk = bool(self.vllm_config.model_config.async_chunk)
 

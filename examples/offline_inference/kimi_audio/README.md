@@ -41,7 +41,9 @@ MIMO branch) with `hf_overrides.kimia_generate_audio: true`. Stage 1 is
 `code2wav` (PrefixStreamingFlowMatchingDetokenizer + BigVGAN). The
 detokenizer is vendored in-tree under
 `vllm_omni/model_executor/models/kimi_audio/` (see `detokenizer.py`,
-`flow_matching.py`, `bigvgan.py`); `flash_attn` is required at runtime.
+`flow_matching.py`, `bigvgan.py`) and uses vLLM's bundled
+`vllm.vllm_flash_attn` for attention — no separate `flash-attn` install
+is needed.
 
 Defaults to async-chunk streaming on 2 GPUs (sub-second TTFB). Set
 `async_chunk: false` in the YAML and put both stages on `devices: "0"`
