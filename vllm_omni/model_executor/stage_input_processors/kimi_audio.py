@@ -25,12 +25,18 @@ def _extract_audio_tokens(
     multimodal_output: dict[str, Any] | None,
 ) -> list[int]:
     """Prefer the explicit audio_tokens payload; fall back to filtering
-    the token-id stream for IDs >= KIMIA_TOKEN_OFFSET."""
+    the token-id stream for IDs >= KIMIA_TOKEN_OFFSET. The MIMO head
+    samples full-vocab (so msg_end/media_end can signal EOD) and emits
+    ``kimia_text_blank`` during the audio-delay lag — filter those out
+    before handing tokens to code2wav, matching upstream's
+    ``t >= kimia_token_offset`` filter in kimia.py."""
     if multimodal_output and "audio_tokens" in multimodal_output:
         codes = multimodal_output["audio_tokens"]
         if isinstance(codes, torch.Tensor):
-            return codes.reshape(-1).to(torch.long).tolist()
-        return list(codes)
+            flat = codes.reshape(-1).to(torch.long).tolist()
+        else:
+            flat = list(codes)
+        return [int(t) for t in flat if int(t) >= KIMIA_TOKEN_OFFSET]
 
     if isinstance(output_token_ids, torch.Tensor):
         flat = output_token_ids.reshape(-1).tolist()
@@ -97,9 +103,12 @@ def kimi2code2wav_async_chunk(
     new_tokens: list[int]
     if audio_tokens_obj is not None:
         if isinstance(audio_tokens_obj, torch.Tensor):
-            new_tokens = audio_tokens_obj.reshape(-1).to(torch.long).tolist()
+            raw = audio_tokens_obj.reshape(-1).to(torch.long).tolist()
         else:
-            new_tokens = [int(t) for t in audio_tokens_obj]
+            raw = [int(t) for t in audio_tokens_obj]
+        # Drop kimia_text_blank (delay lag) and msg_end/media_end EOD —
+        # only real codec tokens belong in the code2wav input buffer.
+        new_tokens = [int(t) for t in raw if int(t) >= KIMIA_TOKEN_OFFSET]
     else:
         step_token_ids = pooling_output.get("token_ids") or [] if pooling_output else []
         if isinstance(step_token_ids, torch.Tensor):

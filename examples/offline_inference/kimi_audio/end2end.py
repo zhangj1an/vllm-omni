@@ -60,13 +60,19 @@ class QueryResult(NamedTuple):
     limit_mm_per_prompt: dict[str, int]
 
 
-def _build_prompt(question: str, with_audio: bool) -> str:
+def _build_prompt(question: str, with_audio: bool, output_type: str = "text") -> str:
     """Wrap a single user turn in the Kimi-Audio chat template.
 
     ``with_audio=True`` inserts the audio placeholder before the text
     instruction (used for tasks that take audio input). ``False`` builds
     a text-only user turn (used for ``text2audio``).
+
+    For ``output_type="both"`` on a TEXT user message the reference
+    tokenize_message does NOT append ``kimia_speech_ctd_id`` — that
+    token is only emitted for ``message_type="audio"`` user turns.
+    Verified against dump_reference_paired_streams.json.
     """
+    del output_type
     placeholder = AUDIO_PLACEHOLDER if with_audio else ""
     return f"<|im_kimia_user_msg_start|>{placeholder}{question}<|im_msg_end|><|im_kimia_assistant_msg_start|>"
 
@@ -76,11 +82,12 @@ def get_audio_input_query(
     audio_path: str | None,
     sampling_rate: int,
     default_audio_url: str | None,
+    output_type: str = "text",
 ) -> QueryResult:
     audio_data = _load_audio_or_default(audio_path, sampling_rate, default_audio_url)
     return QueryResult(
         inputs={
-            "prompt": _build_prompt(question, with_audio=True),
+            "prompt": _build_prompt(question, with_audio=True, output_type=output_type),
             "multi_modal_data": {"audio": [audio_data]},
         },
         limit_mm_per_prompt={"audio": 1},
@@ -92,11 +99,12 @@ def get_text_input_query(
     audio_path: str | None,
     sampling_rate: int,
     default_audio_url: str | None,
+    output_type: str = "text",
 ) -> QueryResult:
     # No audio input; the placeholder + multi_modal_data are omitted.
     del audio_path, sampling_rate, default_audio_url
     return QueryResult(
-        inputs={"prompt": _build_prompt(question, with_audio=False)},
+        inputs={"prompt": _build_prompt(question, with_audio=False, output_type=output_type)},
         limit_mm_per_prompt={},
     )
 
@@ -139,14 +147,24 @@ def build_sampling_params(task: str, max_tokens: int) -> list[SamplingParams]:
 
     # Two-stage audio-out pipelines (audio2audio, text2audio) need one
     # SamplingParams per stage.
+    # Text head mirrors Kimi-Audio upstream defaults (text_temperature=0.0,
+    # text_top_k=5). The model's config.json uses the non-standard plural
+    # `eos_token_ids: [151644, 151645]` so vLLM parses `eos_token_id=None`
+    # and has no stop token by default. For output_type="both" the upstream
+    # loop terminates only on audio-head EOD (not text-stream EOS) — so we
+    # stop on [151644, 151645] (which compute_logits boosts once the MIMO
+    # head samples msg_end/media_end) and deliberately NOT on 151667, which
+    # fires on the text stream after only ~7 tokens and would cut off the
+    # audio stream before it produces real codec tokens.
     thinker = SamplingParams(
-        temperature=0.6,
-        top_p=0.95,
-        top_k=50,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=5,
         max_tokens=max_tokens,
         seed=SEED,
         detokenize=True,
         repetition_penalty=1.0,
+        stop_token_ids=[151644, 151645],
     )
     code2wav = SamplingParams(
         temperature=0.0,
@@ -207,11 +225,13 @@ def main(args):
 
     sampling_params = build_sampling_params(args.task, args.max_tokens)
     query_func = query_map[args.task]
+    output_type = "both" if args.task in ("audio2audio", "text2audio") else "text"
     query = query_func(
         question,
         args.audio_path,
         args.sampling_rate,
         defaults["default_audio_url"],
+        output_type=output_type,
     )
     prompts = [query.inputs for _ in range(args.num_prompts)]
     omni_outputs = omni.generate(prompts, sampling_params)

@@ -37,7 +37,19 @@ KIMI_AUDIO_PIPELINE = PipelineConfig(
             requires_multimodal_data=True,
             engine_output_type="latent",
             async_chunk_process_next_stage_input_func=(f"{_PROC}.kimi2code2wav_async_chunk"),
-            sampling_constraints={"detokenize": True},
+            # Model config has `eos_token_ids: [151644, 151645]` (plural,
+            # non-standard) so vLLM parses `eos_token_id=None` and has no
+            # stop token by default. For audio-out (output_type="both")
+            # upstream only stops on audio-head EOD — compute_logits boosts
+            # 151644 once the MIMO head emits msg_end/media_end so vLLM
+            # terminates cleanly.
+            #   151644 - [EOS], boosted by compute_logits on audio-head EOD
+            #   151645 - <|im_msg_end|>
+            # 151667 (kimia_text_eos) is intentionally NOT listed — it
+            # fires on the text stream well before the audio stream has
+            # produced usable codec tokens and would cut audio generation
+            # short. Callers doing text-only output should override.
+            sampling_constraints={"detokenize": True, "stop_token_ids": [151644, 151645]},
         ),
         StagePipelineConfig(
             stage_id=1,
