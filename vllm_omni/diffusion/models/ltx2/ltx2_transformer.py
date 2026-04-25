@@ -64,30 +64,22 @@ def _make_rms_norm(hidden_size: int, *, eps: float, elementwise_affine: bool) ->
 
 def apply_interleaved_rotary_emb(x: torch.Tensor, freqs: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
     cos, sin = freqs
-    # Concrete pair count instead of -1: Dynamo turns inferred dims into SymInts
-    # that cuDNN SDPA's selector then rejects under torch.compile (#3121).
-    pair_count = x.shape[2] // 2
-    x_real, x_imag = x.unflatten(2, (pair_count, 2)).unbind(-1)  # [B, S, C // 2]
+    # Concrete pair count instead of -1 keeps SDPA shape static under torch.compile (#3121).
+    x_real, x_imag = x.unflatten(2, (x.shape[2] // 2, 2)).unbind(-1)  # [B, S, C // 2]
     x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(2)
     out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
     return out
 
 
-def apply_split_rotary_emb(
-    x: torch.Tensor,
-    freqs: tuple[torch.Tensor, torch.Tensor],
-    *,
-    head_dim: int,
-) -> torch.Tensor:
-    # `head_dim` is passed in (rather than inferred via `-1`) so the SDPA shape
-    # stays concrete under torch.compile / cuDNN — see #3121.
+def apply_split_rotary_emb(x: torch.Tensor, freqs: tuple[torch.Tensor, torch.Tensor], head_dim: int) -> torch.Tensor:
+    # `head_dim` is plumbed in (not inferred via `-1`) so SDPA shape stays static under torch.compile (#3121).
     cos, sin = freqs
 
     x_dtype = x.dtype
     needs_reshape = False
     if x.ndim != 4 and cos.ndim == 4:
-        # cos is (#b, h, t, r) -> reshape x to (b, h, t, head_dim).
-        # The cos/sin batch dim may only be broadcastable, so take batch size from x.
+        # cos is (#b, h, t, r) -> reshape x to (b, h, t, dim_per_head)
+        # The cos/sin batch dim may only be broadcastable, so take batch size from x
         b = x.shape[0]
         _, h, t, _ = cos.shape
         x = x.reshape(b, t, h, head_dim).swapaxes(1, 2)
@@ -475,9 +467,7 @@ class LTX2AudioVideoAttnProcessor:
             elif attn.rope_type == "split":
                 query = apply_split_rotary_emb(query, query_rotary_emb, head_dim=attn.head_dim)
                 key = apply_split_rotary_emb(
-                    key,
-                    key_rotary_emb if key_rotary_emb is not None else query_rotary_emb,
-                    head_dim=attn.head_dim,
+                    key, key_rotary_emb if key_rotary_emb is not None else query_rotary_emb, head_dim=attn.head_dim
                 )
 
         query = query.unflatten(2, (attn.heads, attn.head_dim))
@@ -1333,14 +1323,14 @@ class LTX2AudioVideoRotaryPosEmbed(nn.Module):
                 cos_freq = torch.concatenate([cos_padding, cos_freq], axis=-1)
                 sin_freq = torch.concatenate([sin_padding, sin_freq], axis=-1)
 
-            # Reshape freqs to be compatible with multi-head attention.
-            # Concrete per-head dim — see apply_split_rotary_emb (#3121).
+            # Reshape freqs to be compatible with multi-head attention
             b = cos_freq.shape[0]
             t = cos_freq.shape[1]
-            freq_dim_per_head = self.dim // self.num_attention_heads // 2
+            # Concrete per-head dim instead of -1 — see apply_split_rotary_emb (#3121)
+            r = self.dim // self.num_attention_heads // 2
 
-            cos_freq = cos_freq.reshape(b, t, self.num_attention_heads, freq_dim_per_head)
-            sin_freq = sin_freq.reshape(b, t, self.num_attention_heads, freq_dim_per_head)
+            cos_freq = cos_freq.reshape(b, t, self.num_attention_heads, r)
+            sin_freq = sin_freq.reshape(b, t, self.num_attention_heads, r)
 
             cos_freqs = torch.swapaxes(cos_freq, 1, 2)  # (B,H,T,D//2)
             sin_freqs = torch.swapaxes(sin_freq, 1, 2)  # (B,H,T,D//2)
