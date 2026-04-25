@@ -439,14 +439,9 @@ class DiffusionEngine:
             # validation when cfg_parallel_size > 1.
             extra_args={"cfg_text_scale": 1.0, "cfg_img_scale": 1.0},
         )
-        # Audio-bearing models (LTX-2/2.3) round their audio token count from
-        # num_frames. The default num_frames=1 yields audio_num_frames=1, which
-        # cuDNN SDPA rejects ("does not support key/value sequence length 1")
-        # under torch.compile — Dynamo wraps the dispatch failure before the
-        # runtime fallback in cudnn_attn.forward_cuda can fire (issue #3121).
-        # Use a non-trivial num_frames whenever the pipeline produces or
-        # accepts audio so the warmup graph hits realistic audio attention
-        # shapes.
+        # Audio pipelines round audio token count from num_frames; the default
+        # of 1 yields seq_len=1 K/V which cuDNN SDPA refuses under torch.compile
+        # (#3121). Pick a non-trivial num_frames so audio_num_frames > 1.
         if supports_audio_input(self.od_config.model_class_name) or supports_audio_output(
             self.od_config.model_class_name
         ):

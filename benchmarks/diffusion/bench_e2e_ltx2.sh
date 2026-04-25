@@ -62,9 +62,7 @@ for BACKEND in "${BACKENDS[@]}"; do
   if [[ "${ENFORCE_EAGER:-0}" == "1" ]]; then
     EXTRA_ARGS+=(--enforce-eager)
   fi
-  # Run each backend in its own subshell with pipefail off so a non-zero
-  # python exit (e.g. example-script post-processing error after the timing
-  # has been printed) doesn't abort the sweep before the next backend runs.
+  # Per-backend pipefail off so a non-zero python exit doesn't abort the sweep.
   ( set +e; set +o pipefail
     DIFFUSION_ATTENTION_BACKEND="$BACKEND" \
       python examples/offline_inference/text_to_video/text_to_video.py \
