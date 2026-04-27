@@ -1,37 +1,50 @@
 # Kimi-Audio-7B offline inference
 
-Unified `end2end.py` supports three task modes via the `--task` flag
-(`audio2text`, `audio2audio`, `text2audio`). All three load
-`vllm_omni/deploy/kimi_audio.yaml`. Per-stage sampling params come
-from that file; `--stage-configs-path` / `--output-dir` / `--question`
-can override the defaults.
+Unified `end2end.py` supports three task modes via the `--task` flag,
+mirroring the canonical demos in MoonshotAI/Kimi-Audio's `infer.py`:
+
+  * `asr` — audio in, text out (ASR over upstream `asr_example.wav`)
+  * `qa` — audio in, audio + text out (spoken QA over upstream
+    `qa_example.wav`, audio-only user turn — no text instruction)
+  * `multiturn` — multi-turn audio chat (q1 → assistant audio+text a1 →
+    q2). **Not yet implemented in vllm-omni** — assistant audio history
+    requires the `_split_prefill` mask fix in `kimi_audio_thinker.py`
+    plus a prompt builder that pre-tokenizes prior assistant audio with
+    the GLM-4-Voice tokenizer. Tracked separately.
+
+All tasks load `vllm_omni/deploy/kimi_audio.yaml`. Per-stage sampling
+params come from that file; `--stage-configs-path` / `--output-dir` /
+`--question` can override the defaults.
 
 ## Run
+
+Defaults pull audio from
+[upstream Kimi-Audio's `test_audios/`](https://github.com/MoonshotAI/Kimi-Audio/tree/master/test_audios)
+so the audio-input modes work out of the box. Pass `--audio-path` /
+`--question` to override either.
 
 ```bash
 cd examples/offline_inference/kimi_audio
 
-# audio -> text (ASR with a bundled asset)
-python end2end.py --task audio2text
+# ASR over upstream asr_example.wav (Chinese transcription)
+python end2end.py --task asr
 
-# audio -> text (audio QA over your own file)
-python end2end.py --task audio2text \
+# ASR over your own clip
+python end2end.py --task asr \
     --audio-path /path/to/clip.wav \
     --question "Summarize what the speaker is saying."
 
-# audio -> audio (spoken response)
-python end2end.py --task audio2audio \
-    --audio-path /path/to/clip.wav \
-    --question "Answer in audio. Briefly summarize what was said."
-
-# text -> audio (TTS-style)
-python end2end.py --task text2audio \
-    --question "Please say the following in audio: \"Hello, my name is Kimi.\""
+# Spoken QA over upstream qa_example.wav (audio-only user turn)
+python end2end.py --task qa
 ```
 
 Outputs land under the per-task default directory
-(`./output_text`, `./output_audio`, `./output_tts`) or under
+(`./output_asr`, `./output_qa`, `./output_multiturn`) or under
 `--output-dir` if provided.
+
+For single-GPU hosts, pass
+`--stage-configs-path ../../../vllm_omni/deploy/kimi_audio_single_gpu.yaml`
+(both stages on `cuda:0`, `async_chunk: false`).
 
 ## Deploy config
 

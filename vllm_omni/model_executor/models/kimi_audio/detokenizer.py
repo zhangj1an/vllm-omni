@@ -182,12 +182,15 @@ def detokenize_noref(detokenizer, tokens):
     upstream ``KimiAudio.detokenize_audio`` parameters exactly — in particular
     ``upsample_factor=4`` (each semantic code expands to 4 mel frames before
     the flow-matcher + BigVGAN), otherwise the output audio is ~4x shorter
-    than expected. chunk_size/first_chunk_size are 30 to match reference."""
+    than expected. ``chunk_size=150``/``first_chunk_size=100`` mirror
+    upstream ``Kimi-Audio/kimia_infer/models/detokenizer/__init__.py:detokenize``;
+    smaller values multiply the chunk count and run ``reserve_kv_cache_tokens``
+    past the 900-token cap mid-decode."""
     with torch.no_grad():
         detokenizer.clear_states()
         cache_speech_collection = []
-        chunk_size = 30
-        first_chunk_size = 30
+        chunk_size = 150
+        first_chunk_size = 100
         first_chunk_tokens = tokens[:, :first_chunk_size]
         gen_speech = detokenizer.detokenize_streaming(
             first_chunk_tokens,

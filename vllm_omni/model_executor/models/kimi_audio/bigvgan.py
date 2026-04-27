@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 class KimiBigVGAN(_BigVGAN):
     def decode_mel(self, mel: torch.Tensor) -> torch.Tensor:
         """[T, num_mels] mel -> [1, T] wav. Matches ``BigVGANWrapper.decode_mel``."""
-        mel = mel.transpose(0, 1).unsqueeze(0).to(self.conv_pre.weight.device)
+        # ``conv_pre`` is wrapped with weight_norm; on torch>=2.10 ``.weight``
+        # is recomputed via parametrization and may report a stale device,
+        # while the actual parameters (weight_v/weight_g) live on the
+        # configured device. Use the first parameter's device instead.
+        target_device = next(self.parameters()).device
+        mel = mel.transpose(0, 1).unsqueeze(0).to(target_device)
         wav = self(mel)
         return wav.squeeze(0)
 

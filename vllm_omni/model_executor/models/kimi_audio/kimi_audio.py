@@ -157,23 +157,32 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             hidden_states = hidden_states.text_hidden_states
         text_logits = self.model.compute_logits(hidden_states)
         if text_logits is not None and self.model_stage == "fused_thinker":
-            # Suppress natural EOS emission on the text head — upstream's
+            # In audio-out mode (MIMO branch built), upstream's
             # "output_type=both" loop terminates on audio-head EOD, not on
-            # the text head. Without this the model would trip vLLM's EOS
-            # (151644/151645) before the audio stream completes.
-            text_logits[..., 151644] = float("-inf")
-            text_logits[..., 151645] = float("-inf")
-            # Also mask the audio-stream control tokens the thinker uses
-            # as the prefill-detection set — if the text head ever sampled
-            # one of these we'd reset _req_state mid-decode and lose the
-            # sticky audio_eod_seen flag.
-            for _ctrl in (151661, 151663, 151670, 151671, 151675, 151676):
-                text_logits[..., _ctrl] = float("-inf")
-            if getattr(self.fused_thinker, "_req_state", {}).get("audio_eod_seen"):
-                # When the MIMO audio head emits msg_end/media_end, force
-                # vLLM to stop now by boosting the regular EOS — mirrors
-                # the ``audio_stream_is_finished`` early-return in kimia.py.
-                text_logits[..., 151644] = float("inf")
+            # the text head — so we suppress vLLM's EOS (151644/151645)
+            # until the MIMO audio head emits msg_end/media_end and we
+            # boost EOS back. In text-only mode (kimia_generate_audio=
+            # false, MIMO branch not built) audio_eod_seen never fires,
+            # so suppressing EOS would let generation run to max_tokens
+            # past the natural stop. Skip the suppression there.
+            generate_audio = bool(
+                getattr(self.fused_thinker, "_generate_audio", False)
+            )
+            if generate_audio:
+                text_logits[..., 151644] = float("-inf")
+                text_logits[..., 151645] = float("-inf")
+                # Also mask the audio-stream control tokens the thinker
+                # uses as the prefill-detection set — sampling one would
+                # reset _req_state mid-decode and lose the sticky
+                # audio_eod_seen flag.
+                for _ctrl in (151661, 151663, 151670, 151671, 151675, 151676):
+                    text_logits[..., _ctrl] = float("-inf")
+                if getattr(self.fused_thinker, "_req_state", {}).get("audio_eod_seen"):
+                    # When the MIMO audio head emits msg_end/media_end,
+                    # force vLLM to stop now by boosting the regular EOS
+                    # — mirrors the ``audio_stream_is_finished``
+                    # early-return in kimia.py.
+                    text_logits[..., 151644] = float("inf")
         return text_logits
 
     def sample(

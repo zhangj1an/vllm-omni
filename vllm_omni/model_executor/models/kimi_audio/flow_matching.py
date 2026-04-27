@@ -580,6 +580,12 @@ class DiTPrefix(nn.Module):
     def clear_all_states(self):
         self.incremental_state = {}
         self.kv_cache_tokens = 0
+        # ``reserve_kv_cache_tokens`` accumulates across prompt-prefill
+        # chunks within a single request and must reset between requests
+        # — otherwise the next request's first ``update_incremental_state``
+        # trips the ``reserve <= max`` assertion before generating
+        # anything.
+        self.reserve_kv_cache_tokens = 0
         self.cu_seqlens = None
         self.cu_maxlen = None
         self.cu_seqlens_k = None
