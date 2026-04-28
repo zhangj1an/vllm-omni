@@ -22,6 +22,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.layer import Attention
+from vllm_omni.diffusion.distributed.sp_plan import (
+    SequenceParallelInput,
+    SequenceParallelOutput,
+)
 from vllm_omni.platforms import current_omni_platform
 
 logger = logging.getLogger(__name__)
@@ -808,6 +812,49 @@ class OmniGen2TransformerBlock(nn.Module):
         return hidden_states
 
 
+class _OmniGen2SPInputBoundary(nn.Module):
+    """Marker submodule for the SP input-sharding boundary.
+
+    The SP hook framework attaches a SequenceParallelSplitHook to this module
+    and shards its outputs (hidden_states, rotary_emb) along the sequence dim
+    when sequence parallelism is enabled. With SP disabled this is a no-op.
+
+    OmniGen2 runs the transformer multiple times per diffusion step (one pass
+    per CFG branch), and unconditional vs. conditional branches have different
+    joint sequence lengths because the text portion differs. The SP framework's
+    auto-pad records ``sp_original_seq_len`` only on the *first* call and never
+    clears it, so a stale length from an earlier branch corrupts the gather of
+    later branches. Reset it here before each shard so the auto-pad records the
+    current pass's length.
+    """
+
+    def forward(
+        self, hidden_states: torch.Tensor, rotary_emb: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm_omni.diffusion.forward_context import (
+            get_forward_context,
+            is_forward_context_available,
+        )
+
+        if is_forward_context_available():
+            ctx = get_forward_context()
+            ctx.sp_original_seq_len = None
+            ctx.sp_padding_size = 0
+        return hidden_states, rotary_emb
+
+
+class _OmniGen2SPOutputBoundary(nn.Module):
+    """Marker submodule for the SP output-gathering boundary.
+
+    The SP hook framework attaches a SequenceParallelGatherHook here to
+    all-gather hidden_states back to the full sequence after the main
+    transformer stack runs. No-op without SP.
+    """
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states
+
+
 class OmniGen2Transformer2DModel(nn.Module):
     """
     OmniGen2 Transformer 2D Model.
@@ -835,6 +882,23 @@ class OmniGen2Transformer2DModel(nn.Module):
         text_feat_dim: Dimension of text features
         timestep_scale: Scale factor for timestep embeddings
     """
+
+    # Sequence Parallelism plan: shard hidden_states + rotary_emb at the
+    # entry to the main transformer stack and gather hidden_states at the
+    # exit. attention_mask is intentionally omitted because OmniGen2Attention
+    # never reads it. auto_pad handles non-divisible sequence lengths and
+    # pairs with Ulysses SP (Ring SP requires uniform per-rank sequences).
+    _sp_plan = {
+        "sp_input_boundary": {
+            0: SequenceParallelInput(
+                split_dim=1, expected_dims=3, split_output=True, auto_pad=True
+            ),
+            1: SequenceParallelInput(
+                split_dim=1, expected_dims=3, split_output=True, auto_pad=True
+            ),
+        },
+        "sp_output_boundary": SequenceParallelOutput(gather_dim=1, expected_dims=3),
+    }
 
     def __init__(
         self,
@@ -982,6 +1046,11 @@ class OmniGen2Transformer2DModel(nn.Module):
 
         # Add learnable embeddings to distinguish different images
         self.image_index_embedding = nn.Parameter(torch.randn(5, hidden_size))  # support max 5 ref images
+
+        # Marker submodules: hooks for sequence-parallel sharding/gathering
+        # are attached here per ``_sp_plan``. Hold no parameters.
+        self.sp_input_boundary = _OmniGen2SPInputBoundary()
+        self.sp_output_boundary = _OmniGen2SPOutputBoundary()
 
     def img_patch_embed_and_refine(
         self,
@@ -1251,8 +1320,17 @@ class OmniGen2Transformer2DModel(nn.Module):
 
         hidden_states = joint_hidden_states
 
+        # SP boundary: when sequence parallelism is active, the registered hook
+        # shards the joint hidden_states and rotary_emb along the sequence dim
+        # before the main transformer stack runs.
+        hidden_states, rotary_emb = self.sp_input_boundary(hidden_states, rotary_emb)
+
         for layer in self.layers:
             hidden_states = layer(hidden_states, attention_mask, rotary_emb, temb)
+
+        # SP boundary: gather hidden_states back to the full sequence so that
+        # the per-image rearrange below sees the correct token range.
+        hidden_states = self.sp_output_boundary(hidden_states)
 
         # 4. Output norm & projection
         hidden_states = self.norm_out(hidden_states, temb)
