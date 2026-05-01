@@ -17,7 +17,7 @@ _KIMIA_TOKEN_OFFSET = 152064
 def _load_tokenizer():
     from transformers import WhisperFeatureExtractor
 
-    from .glm4.modeling_whisper import WhisperVQEncoder
+    from .modeling_whisper_vq import WhisperVQEncoder
 
     repo = "THUDM/glm-4-voice-tokenizer"
     model = WhisperVQEncoder.from_pretrained(repo).eval()

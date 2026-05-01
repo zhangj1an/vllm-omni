@@ -2,7 +2,7 @@ import os
 
 import torch
 
-from .bigvgan import KimiBigVGAN
+from .modeling_bigvgan import KimiBigVGAN
 from .flow_matching import DiTPrefix
 
 
