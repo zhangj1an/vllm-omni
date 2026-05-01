@@ -228,16 +228,6 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
     ) -> torch.Tensor:
         embed_tokens = self.language_model.model.embed_tokens
 
-        # Audio-in tasks (ASR / audio-to-audio) arrive with whisper embeddings;
-        # keep upstream's fusion path for those. This dual-stream override
-        # only activates for pure-token prompts (text-in, no multimodal data).
-        if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
-            return super().embed_input_ids(
-                input_ids,
-                multimodal_embeddings=multimodal_embeddings,
-                is_multimodal=is_multimodal,
-            )
-
         # Is this a prefill call? Prefill prompts contain the role marker
         # (kimia_user_msg_start), which can't appear in autoregressive decode
         # input_ids. Using membership in the audio-stream control set is a
@@ -246,13 +236,39 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
 
         if is_prefill:
             audio_ids, text_ids = self._split_prefill(input_ids)
-            # New request starts here. Reset per-request state.
+            # Reset per-request state on every prefill — including
+            # audio-input prefill, otherwise QA reuses stale decode_step /
+            # audio_eod_seen across requests.
             self._req_state = self._fresh_req_state()
         else:
             audio_ids, text_ids = self._build_decode_streams(input_ids)
 
         audio_emb = embed_tokens(audio_ids)
         text_emb = embed_tokens(text_ids)
+
+        # Audio-in fusion at media-content positions: ``audio_emb =
+        # (audio_emb + whisper) * sqrt(2)``. Mirrors upstream HF
+        # ``MoonshotKimiaModel.forward``.
+        if (
+            multimodal_embeddings is not None
+            and len(multimodal_embeddings) > 0
+            and is_multimodal is not None
+            and is_multimodal.any()
+        ):
+            whisper_embeds = multimodal_embeddings[0]
+            if isinstance(whisper_embeds, (list, tuple)):
+                whisper_embeds = torch.cat(list(whisper_embeds), dim=0)
+            elif whisper_embeds.dim() == 3:
+                whisper_embeds = whisper_embeds.reshape(-1, whisper_embeds.shape[-1])
+
+            num_to_use = min(whisper_embeds.shape[0], int(is_multimodal.sum().item()))
+            mm_positions = is_multimodal.nonzero(as_tuple=True)[0]
+            mm_mask = torch.zeros_like(is_multimodal)
+            mm_mask[mm_positions[:num_to_use]] = True
+
+            used_whisper = whisper_embeds[:num_to_use].to(dtype=audio_emb.dtype)
+            audio_emb[mm_mask] = (audio_emb[mm_mask] + used_whisper) * (2.0**0.5)
+
         return audio_emb + text_emb
 
     @staticmethod
@@ -266,14 +282,15 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
 
     @staticmethod
     def _split_prefill(input_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # audio_stream: take control tokens as-is, else blank.
-        # text_stream:  take non-control tokens as-is, else blank.
-        is_audio_ctrl = torch.zeros_like(input_ids, dtype=torch.bool)
+        # Audio stream: control tokens AND discrete codec IDs
+        # (>= KIMIA_TOKEN_OFFSET, GLM-4-Voice tokens for input audio).
+        # Text stream: everything else.
+        is_audio = input_ids >= KIMIA_TOKEN_OFFSET
         for tid in _AUDIO_STREAM_TOKENS:
-            is_audio_ctrl |= input_ids == tid
+            is_audio |= input_ids == tid
 
-        audio_ids = torch.where(is_audio_ctrl, input_ids, torch.full_like(input_ids, _KIMIA_TEXT_BLANK))
-        text_ids = torch.where(is_audio_ctrl, torch.full_like(input_ids, _KIMIA_TEXT_BLANK), input_ids)
+        audio_ids = torch.where(is_audio, input_ids, torch.full_like(input_ids, _KIMIA_TEXT_BLANK))
+        text_ids = torch.where(is_audio, torch.full_like(input_ids, _KIMIA_TEXT_BLANK), input_ids)
         return audio_ids, text_ids
 
     def _build_decode_streams(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

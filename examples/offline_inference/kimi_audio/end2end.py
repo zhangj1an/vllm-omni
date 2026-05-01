@@ -90,20 +90,11 @@ class QueryResult(NamedTuple):
 
 
 def _build_prompt(question: str, with_audio: bool, output_type: str = "text") -> str:
-    """Wrap a single user turn in the Kimi-Audio chat template.
-
-    ``with_audio=True`` inserts the audio placeholder before the text
-    instruction (used for tasks that take audio input). ``False`` builds
-    a text-only user turn (used for ``text2audio``).
-
-    For ``output_type="both"`` on a TEXT user message the reference
-    tokenize_message does NOT append ``kimia_speech_ctd_id`` — that
-    token is only emitted for ``message_type="audio"`` user turns.
-    Verified against dump_reference_paired_streams.json.
-    """
-    del output_type
+    # ctd is the audio-output conditioning marker; without it the audio
+    # head emits off-distribution codec tokens.
     placeholder = AUDIO_PLACEHOLDER if with_audio else ""
-    return f"<|im_kimia_user_msg_start|>{placeholder}{question}<|im_msg_end|><|im_kimia_assistant_msg_start|>"
+    ct_token = "<|im_kimia_speech_ctd_id|>" if output_type == "both" else ""
+    return f"<|im_kimia_user_msg_start|>{placeholder}{question}{ct_token}<|im_msg_end|><|im_kimia_assistant_msg_start|>"
 
 
 def get_audio_input_query(
@@ -279,24 +270,134 @@ def write_outputs(omni_outputs, output_dir: str) -> None:
             print(f"Request {request_id}: audio -> {out_wav}")
 
 
+_KIMIA_TEXT_BLANK = 151666
+_KIMIA_TOKEN_OFFSET = 152064
+_AUDIO_DELAY_TOKENS = 6  # kimia_mimo_audiodelaytokens for the 7B checkpoint
+
+
+def _kimia_text_tokenizer(model_path: str):
+    """Load the Kimia tiktoken tokenizer from the checkpoint."""
+    import sys
+
+    cache_path = os.path.join(model_path) if os.path.isdir(model_path) else model_path
+    sys.path.insert(0, cache_path)
+    from tokenization_kimia import TikTokenTokenizer
+
+    return TikTokenTokenizer(os.path.join(cache_path, "tiktoken.model"))
+
+
+def _build_multiturn_prompt_token_ids(model_path: str, sampling_rate: int):
+    """Build the merged single-stream prompt token ids for multi-turn case2:
+    user q1 (audio) → assistant a1 (audio + text) → user q2 (audio).
+
+    Mirrors upstream ``prompt_manager.tokenize_message``, then merges
+    the audio/text streams into a single sequence (audio token wins
+    where it isn't ``kimia_text_blank``). vllm-omni's ``_split_prefill``
+    re-splits that single stream on the prefill side."""
+    from vllm_omni.model_executor.models.kimi_audio.glm4_voice_tokenizer import tokenize_audio
+
+    text_tok = _kimia_text_tokenizer(model_path)
+    media = MediaConnector()
+
+    USER_MSG_START = 151670
+    ASSISTANT_MSG_START = 151671
+    MEDIA_BEGIN = 151661
+    MEDIA_END = 151663
+    SPEECH_CTD = 151676  # output_type=both conditioning marker
+    MSG_END = 151645
+
+    def _tok_audio(url: str) -> list[int]:
+        wav = _load_audio_or_default(None, sampling_rate, url)
+        return tokenize_audio(wav, sampling_rate)
+
+    def _tok_text(s: str) -> list[int]:
+        return text_tok.encode(s, bos=False, eos=False)
+
+    audio_stream: list[int] = []
+    text_stream: list[int] = []
+
+    def push(audio_id: int, text_id: int):
+        audio_stream.append(audio_id)
+        text_stream.append(text_id)
+
+    def push_audio_seg(codes: list[int]):
+        for c in codes:
+            push(c, _KIMIA_TEXT_BLANK)
+
+    def push_text_seg(toks: list[int]):
+        for t in toks:
+            push(_KIMIA_TEXT_BLANK, t)
+
+    def push_user_audio(url: str):
+        # role marker
+        push(USER_MSG_START, _KIMIA_TEXT_BLANK)
+        codes = _tok_audio(url)
+        push(MEDIA_BEGIN, _KIMIA_TEXT_BLANK)
+        push_audio_seg(codes)
+        push(MEDIA_END, _KIMIA_TEXT_BLANK)
+        push(SPEECH_CTD, _KIMIA_TEXT_BLANK)
+        push(MSG_END, _KIMIA_TEXT_BLANK)
+
+    def push_assistant_audio_text(url: str, text: str):
+        push(ASSISTANT_MSG_START, _KIMIA_TEXT_BLANK)
+        codes = _tok_audio(url)
+        text_tokens = _tok_text(text)
+        # Audio-text streams interleave with the audio_delay alignment
+        # from upstream tokenize_message: audio leads with N blanks then
+        # codes; text leads with text_tokens then pads to match.
+        push_audio_seg([_KIMIA_TEXT_BLANK] * _AUDIO_DELAY_TOKENS)  # audio = blank, text = text[:delay]
+        # roll back the just-added text blanks; we'll add real text instead
+        for _ in range(_AUDIO_DELAY_TOKENS):
+            text_stream.pop()
+        for i in range(_AUDIO_DELAY_TOKENS):
+            text_stream.append(text_tokens[i] if i < len(text_tokens) else _KIMIA_TEXT_BLANK)
+        # main body: codes on audio, remaining text on text
+        for i, c in enumerate(codes):
+            push(c, text_tokens[_AUDIO_DELAY_TOKENS + i] if (_AUDIO_DELAY_TOKENS + i) < len(text_tokens) else _KIMIA_TEXT_BLANK)
+        # If text_tokens was longer than (delay + len(codes)), we silently drop
+        # the tail — matches upstream's truncation behavior for short audios.
+
+    push_user_audio(MULTITURN_Q1_URL)
+    push_assistant_audio_text(MULTITURN_A1_URL, MULTITURN_A1_TEXT)
+    push_user_audio(MULTITURN_Q2_URL)
+    # final assistant turn marker (model generates from here)
+    push(ASSISTANT_MSG_START, _KIMIA_TEXT_BLANK)
+
+    # Merge: at each position, take the audio token if it's non-blank,
+    # otherwise the text token. ``_split_prefill`` will re-route by ID range.
+    merged = [
+        a if a != _KIMIA_TEXT_BLANK else t
+        for a, t in zip(audio_stream, text_stream)
+    ]
+    return merged
+
+
+def _run_multiturn(args):
+    defaults = TASK_DEFAULTS["multiturn"]
+    output_dir = args.output_dir or defaults["output_dir"]
+
+    omni = Omni(
+        model=args.model_name,
+        stage_configs_path=args.stage_configs_path or defaults["stage_configs_path"],
+        log_stats=args.enable_stats,
+        log_file=("omni_pipeline.log" if args.enable_stats else None),
+        init_sleep_seconds=args.init_sleep_seconds,
+        batch_timeout=args.batch_timeout,
+        init_timeout=args.init_timeout,
+        shm_threshold_bytes=args.shm_threshold_bytes,
+    )
+
+    prompt_token_ids = _build_multiturn_prompt_token_ids(args.model_name, args.sampling_rate)
+    print(f">>> multiturn prompt length: {len(prompt_token_ids)} tokens")
+    sampling_params = build_sampling_params("qa", args.max_tokens)
+    prompts = [{"prompt_token_ids": prompt_token_ids} for _ in range(args.num_prompts)]
+    omni_outputs = omni.generate(prompts, sampling_params)
+    write_outputs(omni_outputs, output_dir)
+
+
 def main(args):
     if args.task == "multiturn":
-        # Multi-turn requires:
-        #   1. _split_prefill in kimi_audio_thinker.py to route IDs
-        #      >= KIMIA_TOKEN_OFFSET (152064) to the audio stream.
-        #   2. A prompt builder that pre-tokenizes prior assistant audio
-        #      with the GLM-4-Voice tokenizer and emits parallel
-        #      audio/text streams aligned by kimia_text_audiodelaytokens.
-        # Neither is in place yet — see the integration plan.
-        raise NotImplementedError(
-            "multiturn task is not yet wired through the vllm-omni "
-            "Kimi-Audio integration. Pending work: (a) extend "
-            "_split_prefill in kimi_audio_thinker.py to route discrete "
-            "audio code IDs (>= 152064) to the audio stream, and "
-            "(b) add a multi-turn prompt builder that pre-tokenizes "
-            "prior assistant audio with GLM-4-Voice. Until then, only "
-            "asr and qa run end-to-end."
-        )
+        return _run_multiturn(args)
 
     defaults = TASK_DEFAULTS[args.task]
     stage_configs_path = args.stage_configs_path or defaults["stage_configs_path"]

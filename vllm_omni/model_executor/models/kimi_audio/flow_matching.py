@@ -15,7 +15,6 @@ from diffusers.models.embeddings import (
     Timesteps,
     apply_rotary_emb,
     get_1d_rotary_pos_embed,
-    get_timestep_embedding,
 )
 
 from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -281,32 +280,6 @@ class TimestepEmbedder(nn.Module):
         return self.mlp(t_freq.to(self.mlp[0].weight.dtype))
 
 
-class SinusoidalPositionalEmbedding(nn.Module):
-    """Frozen sincos table with fairseq-style cumsum positions: each
-    non-padding token gets its 1-based rank within the chunk, not its
-    absolute id."""
-
-    def __init__(self, embedding_dim: int, padding_idx: int, init_size: int = 1024):
-        super().__init__()
-        self.embedding_dim = embedding_dim
-        self.padding_idx = padding_idx
-        table = get_timestep_embedding(
-            torch.arange(init_size, dtype=torch.float32),
-            embedding_dim=embedding_dim,
-            flip_sin_to_cos=False,
-            downscale_freq_shift=1,
-            scale=1,
-        )
-        if padding_idx is not None:
-            table[padding_idx] = 0
-        self.register_buffer("weight", table, persistent=False)
-
-    def forward(self, position_ids):
-        mask = position_ids.ne(self.padding_idx).int()
-        positions = (torch.cumsum(mask, dim=1).type_as(mask) * mask).long() + self.padding_idx
-        return self.weight[positions]
-
-
 class DiTPrefix(nn.Module):
     """Flow-matching DiT with streaming KV cache and reference-audio prefill."""
 
@@ -336,10 +309,9 @@ class DiTPrefix(nn.Module):
 
         self.input_linear = nn.Linear(input_size, hidden_size)
 
-        # Moonshot's Kimi-Audio DiT config always sets sincos; learnable /
-        # skip variants from upstream MoonCast aren't shipped in any
-        # checkpoint we load.
-        self.position_embedding = SinusoidalPositionalEmbedding(hidden_size, 0, max_seq_len + 1)
+        # Kimi-Audio's audio_detokenizer ships ``position_embedding_type:
+        # skip`` — RoPE in the attention layers is the sole positional
+        # signal. Adding a sincos sum here roughly doubles output amplitude.
 
         self.use_rope = use_rope
 
@@ -441,9 +413,6 @@ class DiTPrefix(nn.Module):
 
         x = self.input_linear(x)
 
-        position_emb = self.position_embedding(position_ids)
-        x = x + position_emb
-
         if self.use_rope:
             bsz, seqlen = position_ids.shape
             if self.rotary_pos_emb.device != position_ids.device:
@@ -522,10 +491,10 @@ class DiTPrefix(nn.Module):
     def update_incremental_state(self, condition_cache=None):
         if condition_cache is None:
             condition_cache = self.condition_cache
-        assert self.reserve_kv_cache_tokens <= self.max_kv_cache_tokens, (
-            "reserve_kv_cache_tokens must be <= max_kv_cache_tokens"
-        )
 
+        # Sliding window: keep the most recent ``max_kv_cache_tokens``
+        # entries when the cache overflows. Mirrors upstream Moonshot's
+        # rotation, which always passes ``reserve_kv_cache_tokens=0``.
         for _, layer_cache in self.incremental_state.items():
             layer_cache["attn_kvcache"]["prev_k"] = layer_cache["attn_kvcache"]["cur_k"]
             layer_cache["attn_kvcache"]["prev_v"] = layer_cache["attn_kvcache"]["cur_v"]
@@ -533,37 +502,12 @@ class DiTPrefix(nn.Module):
             self.kv_cache_tokens = layer_cache["attn_kvcache"]["prev_k"].shape[1]
 
             if self.kv_cache_tokens > self.max_kv_cache_tokens:
-                reserve_tokens_excludeprompt = self.max_kv_cache_tokens - self.reserve_kv_cache_tokens
-
-                if self.reserve_kv_cache_tokens == 0:
-                    layer_cache["attn_kvcache"]["prev_k"] = layer_cache["attn_kvcache"]["prev_k"][
-                        :, -reserve_tokens_excludeprompt:
-                    ]
-                    layer_cache["attn_kvcache"]["prev_v"] = layer_cache["attn_kvcache"]["prev_v"][
-                        :, -reserve_tokens_excludeprompt:
-                    ]
-                elif reserve_tokens_excludeprompt == 0:
-                    layer_cache["attn_kvcache"]["prev_k"] = layer_cache["attn_kvcache"]["prev_k"][
-                        :, : self.reserve_kv_cache_tokens
-                    ]
-                    layer_cache["attn_kvcache"]["prev_v"] = layer_cache["attn_kvcache"]["prev_v"][
-                        :, : self.reserve_kv_cache_tokens
-                    ]
-                else:
-                    layer_cache["attn_kvcache"]["prev_k"] = torch.cat(
-                        [
-                            layer_cache["attn_kvcache"]["prev_k"][:, : self.reserve_kv_cache_tokens],
-                            layer_cache["attn_kvcache"]["prev_k"][:, -reserve_tokens_excludeprompt:],
-                        ],
-                        dim=1,
-                    )
-                    layer_cache["attn_kvcache"]["prev_v"] = torch.cat(
-                        [
-                            layer_cache["attn_kvcache"]["prev_v"][:, : self.reserve_kv_cache_tokens],
-                            layer_cache["attn_kvcache"]["prev_v"][:, -reserve_tokens_excludeprompt:],
-                        ],
-                        dim=1,
-                    )
+                layer_cache["attn_kvcache"]["prev_k"] = layer_cache["attn_kvcache"]["prev_k"][
+                    :, -self.max_kv_cache_tokens :
+                ]
+                layer_cache["attn_kvcache"]["prev_v"] = layer_cache["attn_kvcache"]["prev_v"][
+                    :, -self.max_kv_cache_tokens :
+                ]
 
                 bsz = layer_cache["attn_kvcache"]["prev_k"].shape[0]
                 self.previous_seqlen = (
@@ -580,11 +524,6 @@ class DiTPrefix(nn.Module):
     def clear_all_states(self):
         self.incremental_state = {}
         self.kv_cache_tokens = 0
-        # ``reserve_kv_cache_tokens`` accumulates across prompt-prefill
-        # chunks within a single request and must reset between requests
-        # — otherwise the next request's first ``update_incremental_state``
-        # trips the ``reserve <= max`` assertion before generating
-        # anything.
         self.reserve_kv_cache_tokens = 0
         self.cu_seqlens = None
         self.cu_maxlen = None

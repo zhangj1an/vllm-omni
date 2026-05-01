@@ -178,19 +178,16 @@ def get_audio_detokenizer(model_path):
 
 
 def detokenize_noref(detokenizer, tokens):
-    """Non-streaming detokenize used by the sync code2wav stage. Must match
-    upstream ``KimiAudio.detokenize_audio`` parameters exactly — in particular
-    ``upsample_factor=4`` (each semantic code expands to 4 mel frames before
-    the flow-matcher + BigVGAN), otherwise the output audio is ~4x shorter
-    than expected. ``chunk_size=150``/``first_chunk_size=100`` mirror
-    upstream ``Kimi-Audio/kimia_infer/models/detokenizer/__init__.py:detokenize``;
-    smaller values multiply the chunk count and run ``reserve_kv_cache_tokens``
-    past the 900-token cap mid-decode."""
+    """Non-streaming detokenize used by the sync code2wav stage. Mirrors
+    upstream ``KimiAudio.detokenize_audio`` (``chunk_size=30``,
+    ``first_chunk_size=30``, ``upsample_factor=4``) — NOT the unrelated
+    ``detokenize`` function in ``models/detokenizer/__init__.py`` which
+    uses 150/100 for the *streaming* path with reference audio."""
     with torch.no_grad():
         detokenizer.clear_states()
         cache_speech_collection = []
-        chunk_size = 150
-        first_chunk_size = 100
+        chunk_size = 30
+        first_chunk_size = 30
         first_chunk_tokens = tokens[:, :first_chunk_size]
         gen_speech = detokenizer.detokenize_streaming(
             first_chunk_tokens,
