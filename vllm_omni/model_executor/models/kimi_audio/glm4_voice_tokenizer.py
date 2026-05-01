@@ -3,49 +3,21 @@
 Upstream Moonshot represents input audio as BOTH discrete codec IDs (from
 ``THUDM/glm-4-voice-tokenizer``) AND continuous Whisper features. The HF
 repo ships only weights + config — the ``WhisperVQEncoder`` modeling code
-lives in the GLM-4-Voice GitHub repo, brought in as a Kimi-Audio submodule.
-Path is configurable via ``KIMIA_GLM4_SOURCE_DIR``."""
+is vendored under ``./glm/``."""
 from __future__ import annotations
 
-import os
-import sys
 from functools import lru_cache
-from pathlib import Path
 
 import torch
 
-_DEFAULT_GLM4_SOURCE_PATHS = (
-    "/workspace/Kimi-Audio/kimia_infer/models/tokenizer/glm4",
-)
 _KIMIA_TOKEN_OFFSET = 152064
-
-
-def _find_glm4_source_dir() -> Path:
-    candidates: list[str] = []
-    env_path = os.environ.get("KIMIA_GLM4_SOURCE_DIR")
-    if env_path:
-        candidates.append(env_path)
-    candidates.extend(_DEFAULT_GLM4_SOURCE_PATHS)
-    for p in candidates:
-        path = Path(p)
-        if (path / "speech_tokenizer" / "modeling_whisper.py").is_file():
-            return path
-    raise RuntimeError(
-        "Could not locate GLM-4-Voice modeling code. Set "
-        "KIMIA_GLM4_SOURCE_DIR to a clone of "
-        "https://github.com/THUDM/GLM-4-Voice (the directory containing "
-        "speech_tokenizer/modeling_whisper.py)."
-    )
 
 
 @lru_cache(maxsize=1)
 def _load_tokenizer():
-    src_dir = _find_glm4_source_dir()
-    if str(src_dir) not in sys.path:
-        sys.path.insert(0, str(src_dir))
-
-    from speech_tokenizer.modeling_whisper import WhisperVQEncoder
     from transformers import WhisperFeatureExtractor
+
+    from .glm4.modeling_whisper import WhisperVQEncoder
 
     repo = "THUDM/glm-4-voice-tokenizer"
     model = WhisperVQEncoder.from_pretrained(repo).eval()
@@ -58,8 +30,7 @@ def _load_tokenizer():
 def tokenize_audio(audio_array, sample_rate: int) -> list[int]:
     """Encode a single waveform into Kimi-Audio absolute codec IDs
     (already offset by ``KIMIA_TOKEN_OFFSET``). Inlines upstream's
-    ``extract_speech_token`` so we don't depend on the upstream package
-    layout."""
+    ``extract_speech_token``."""
     import torchaudio
 
     model, feature_extractor = _load_tokenizer()
