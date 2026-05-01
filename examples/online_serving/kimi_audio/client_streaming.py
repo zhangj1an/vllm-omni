@@ -4,7 +4,7 @@
 """Online client for Kimi-Audio covering three task modes:
 ``audio2text`` (non-streaming chat), ``audio2audio`` and ``text2audio``
 (SSE-streamed base64-WAV chunks concatenated to ``--out``). Launch the
-server with ``vllm_omni/deploy/kimi_audio.yaml``; toggle that file's
+server with ``vllm_omni/model_executor/stage_configs/kimi_audio.yaml``; toggle that file's
 ``async_chunk`` flag for sub-second TTFB on the audio-out tasks."""
 
 from __future__ import annotations

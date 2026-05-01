@@ -9,6 +9,7 @@
 # ``vocoder/alias_free_activation/torch/{act,filter,resample}.py`` and
 # the thin ``KimiBigVGAN`` wrapper that lived at the parent level.
 """Kimi-Audio BigVGAN-v2 vocoder. Mel (B, n_mels, T) -> wav (B, 1, T*hop)."""
+
 import json
 import logging
 import math
@@ -33,7 +34,8 @@ class AttrDict(dict):
 
 
 def load_checkpoint(filepath, device):
-    assert os.path.isfile(filepath)
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"BigVGAN checkpoint not found: {filepath}")
     return torch.load(filepath, map_location=device, weights_only=True)
 
 
@@ -104,7 +106,10 @@ class _UpSample1d(nn.Module):
         _, C, _ = x.shape
         x = F.pad(x, (self.pad, self.pad), mode="replicate")
         x = self.ratio * F.conv_transpose1d(
-            x, self.filter.expand(C, -1, -1), stride=self.stride, groups=C,
+            x,
+            self.filter.expand(C, -1, -1),
+            stride=self.stride,
+            groups=C,
         )
         return x[..., self.pad_left : -self.pad_right]
 
@@ -113,7 +118,10 @@ class _DownSample1d(nn.Module):
     def __init__(self, ratio: int = 2, kernel_size: int = 12):
         super().__init__()
         self.lowpass = _LowPassFilter1d(
-            cutoff=0.5 / ratio, half_width=0.6 / ratio, stride=ratio, kernel_size=kernel_size,
+            cutoff=0.5 / ratio,
+            half_width=0.6 / ratio,
+            stride=ratio,
+            kernel_size=kernel_size,
         )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -155,21 +163,25 @@ class _AMPBlock1(nn.Module):
 
     def __init__(self, channels: int, kernel_size: int, dilation: tuple):
         super().__init__()
-        self.convs1 = nn.ModuleList([
-            weight_norm(Conv1d(channels, channels, kernel_size, stride=1,
-                               dilation=d, padding=get_padding(kernel_size, d)))
-            for d in dilation
-        ])
-        self.convs2 = nn.ModuleList([
-            weight_norm(Conv1d(channels, channels, kernel_size, stride=1,
-                               dilation=1, padding=get_padding(kernel_size, 1)))
-            for _ in dilation
-        ])
+        self.convs1 = nn.ModuleList(
+            [
+                weight_norm(
+                    Conv1d(channels, channels, kernel_size, stride=1, dilation=d, padding=get_padding(kernel_size, d))
+                )
+                for d in dilation
+            ]
+        )
+        self.convs2 = nn.ModuleList(
+            [
+                weight_norm(
+                    Conv1d(channels, channels, kernel_size, stride=1, dilation=1, padding=get_padding(kernel_size, 1))
+                )
+                for _ in dilation
+            ]
+        )
         self.convs1.apply(init_weights)
         self.convs2.apply(init_weights)
-        self.activations = nn.ModuleList(
-            [_Activation1d(channels) for _ in range(2 * len(dilation))]
-        )
+        self.activations = nn.ModuleList([_Activation1d(channels) for _ in range(2 * len(dilation))])
 
     def forward(self, x: Tensor) -> Tensor:
         acts1, acts2 = self.activations[::2], self.activations[1::2]
@@ -189,22 +201,28 @@ class BigVGAN(nn.Module):
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
 
-        self.conv_pre = weight_norm(
-            Conv1d(h.num_mels, h.upsample_initial_channel, 7, 1, padding=3)
-        )
+        self.conv_pre = weight_norm(Conv1d(h.num_mels, h.upsample_initial_channel, 7, 1, padding=3))
 
         # Each upsample stage is wrapped in a ModuleList so the checkpoint
         # keys (``ups.{i}.0.weight*``) load unchanged.
-        self.ups = nn.ModuleList([
-            nn.ModuleList([
-                weight_norm(ConvTranspose1d(
-                    h.upsample_initial_channel // (2 ** i),
-                    h.upsample_initial_channel // (2 ** (i + 1)),
-                    k, u, padding=(k - u) // 2,
-                ))
-            ])
-            for i, (u, k) in enumerate(zip(h.upsample_rates, h.upsample_kernel_sizes))
-        ])
+        self.ups = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        weight_norm(
+                            ConvTranspose1d(
+                                h.upsample_initial_channel // (2**i),
+                                h.upsample_initial_channel // (2 ** (i + 1)),
+                                k,
+                                u,
+                                padding=(k - u) // 2,
+                            )
+                        )
+                    ]
+                )
+                for i, (u, k) in enumerate(zip(h.upsample_rates, h.upsample_kernel_sizes))
+            ]
+        )
         for stage in self.ups:
             stage.apply(init_weights)
 

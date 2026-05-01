@@ -11,8 +11,11 @@
 #
 # enforce_eager=true:
 #   * Stage 0 (fused thinker) — MIMO branch hook on layer N requires eager
-#     forward (CUDA Graph capture would skip the hook).
-#   * Stage 1 (code2wav) — generation loop is cudagraph-incompatible.
+#     forward (vLLM's CUDA Graph capture would skip the hook).
+#   * Stage 1 (code2wav) — outer generation loop is cudagraph-incompatible
+#     (Python-orchestrated). The fixed-shape inner ``vocoder.decode_mel`` IS
+#     captured separately by ``KimiAudioCudaGraphDecoderWrapper`` whenever
+#     ``connectors.<...>.extra.codec_chunk_frames`` is set (async-chunk mode).
 async_chunk: true
 dtype: bfloat16
 
@@ -25,7 +28,7 @@ connectors:
 
 stages:
   - stage_id: 0
-    max_num_seqs: 4
+    max_num_seqs: 1
     gpu_memory_utilization: 0.85
     enforce_eager: true
     trust_remote_code: true

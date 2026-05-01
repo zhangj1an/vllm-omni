@@ -14,7 +14,7 @@ three upstream demo tasks from MoonshotAI/Kimi-Audio's ``infer.py``:
                     that pre-tokenizes prior assistant audio with the
                     GLM-4-Voice tokenizer. See the integration plan.
 
-All tasks load ``vllm_omni/deploy/kimi_audio.yaml`` (two-stage audio-out
+All tasks load ``vllm_omni/model_executor/stage_configs/kimi_audio.yaml`` (two-stage audio-out
 pipeline); ``asr`` ignores the stage-1 audio output. For low-TTFB
 streaming see ``end2end_async_chunk.py``.
 """
@@ -41,9 +41,7 @@ TASK_CHOICES = ("asr", "qa", "multiturn")
 # Default sample audio for audio-input tasks. Pulled from the upstream
 # Kimi-Audio repo's ``test_audios/`` directory so this example mirrors
 # the canonical demos in MoonshotAI/Kimi-Audio's ``infer.py``.
-_KIMI_TEST_AUDIOS = (
-    "https://raw.githubusercontent.com/MoonshotAI/Kimi-Audio/master/test_audios"
-)
+_KIMI_TEST_AUDIOS = "https://raw.githubusercontent.com/MoonshotAI/Kimi-Audio/master/test_audios"
 ASR_DEFAULT_URL = f"{_KIMI_TEST_AUDIOS}/asr_example.wav"
 QA_DEFAULT_URL = f"{_KIMI_TEST_AUDIOS}/qa_example.wav"
 # Multi-turn case2 mirrors the README quick-start in upstream's repo:
@@ -62,13 +60,13 @@ TASK_DEFAULTS = {
         # routing unwanted audio codes through the flow-matching
         # detokenizer, whose ~900-token KV cache budget overflows under
         # vLLM's profile_run.
-        "stage_configs_path": "../../../vllm_omni/deploy/kimi_audio_asr_single_gpu.yaml",
+        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio_asr_single_gpu.yaml",
         "question": "请将音频内容转换为文字。",
         "output_dir": "./output_asr",
         "default_audio_url": ASR_DEFAULT_URL,
     },
     "qa": {
-        "stage_configs_path": "../../../vllm_omni/deploy/kimi_audio.yaml",
+        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
         # Empty question -> audio-only user turn, matching upstream
         # ``infer.py`` for ``qa_example.wav`` (no text instruction).
         "question": "",
@@ -76,7 +74,7 @@ TASK_DEFAULTS = {
         "default_audio_url": QA_DEFAULT_URL,
     },
     "multiturn": {
-        "stage_configs_path": "../../../vllm_omni/deploy/kimi_audio.yaml",
+        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
         "question": "",
         "output_dir": "./output_multiturn",
         "default_audio_url": None,  # uses 3 URLs above, not a single default
@@ -254,6 +252,7 @@ def write_outputs(omni_outputs, output_dir: str) -> None:
             # per-chunk tensors; concatenate before writing.
             if isinstance(audio_data, list):
                 import torch
+
                 audio_tensor = torch.cat(audio_data, dim=-1)
             else:
                 audio_tensor = audio_data
@@ -297,7 +296,6 @@ def _build_multiturn_prompt_token_ids(model_path: str, sampling_rate: int):
     from vllm_omni.model_executor.models.kimi_audio.glm4_voice_tokenizer import tokenize_audio
 
     text_tok = _kimia_text_tokenizer(model_path)
-    media = MediaConnector()
 
     USER_MSG_START = 151670
     ASSISTANT_MSG_START = 151671
@@ -353,7 +351,12 @@ def _build_multiturn_prompt_token_ids(model_path: str, sampling_rate: int):
             text_stream.append(text_tokens[i] if i < len(text_tokens) else _KIMIA_TEXT_BLANK)
         # main body: codes on audio, remaining text on text
         for i, c in enumerate(codes):
-            push(c, text_tokens[_AUDIO_DELAY_TOKENS + i] if (_AUDIO_DELAY_TOKENS + i) < len(text_tokens) else _KIMIA_TEXT_BLANK)
+            push(
+                c,
+                text_tokens[_AUDIO_DELAY_TOKENS + i]
+                if (_AUDIO_DELAY_TOKENS + i) < len(text_tokens)
+                else _KIMIA_TEXT_BLANK,
+            )
         # If text_tokens was longer than (delay + len(codes)), we silently drop
         # the tail — matches upstream's truncation behavior for short audios.
 
@@ -365,10 +368,7 @@ def _build_multiturn_prompt_token_ids(model_path: str, sampling_rate: int):
 
     # Merge: at each position, take the audio token if it's non-blank,
     # otherwise the text token. ``_split_prefill`` will re-route by ID range.
-    merged = [
-        a if a != _KIMIA_TEXT_BLANK else t
-        for a, t in zip(audio_stream, text_stream)
-    ]
+    merged = [a if a != _KIMIA_TEXT_BLANK else t for a, t in zip(audio_stream, text_stream)]
     return merged
 
 

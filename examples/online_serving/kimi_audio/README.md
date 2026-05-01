@@ -14,7 +14,7 @@ not a TTS service).
 # single-GPU sync path. Also serves audio->text if the client ignores
 # the stage-1 audio output.
 vllm serve moonshotai/Kimi-Audio-7B-Instruct --omni --port 8091 \
-    --stage-configs-path vllm_omni/deploy/kimi_audio.yaml
+    --stage-configs-path vllm_omni/model_executor/stage_configs/kimi_audio.yaml
 ```
 
 The flow-matching detokenizer + BigVGAN vocoder used by the audio-out
@@ -56,7 +56,7 @@ Overrides: `PORT`, `HOST`, `OUT_FILE`, `QUESTION`.
 
 ## Endpoint summary
 
-All three tasks load `vllm_omni/deploy/kimi_audio.yaml`. Streaming behavior is
+All three tasks load `vllm_omni/model_executor/stage_configs/kimi_audio.yaml`. Streaming behavior is
 controlled by `async_chunk` in that file (default `true`).
 
 | Task          | Stream? (when `async_chunk: true`) | Response field                                         |
@@ -70,7 +70,7 @@ For audio-out responses the request must set `modalities: ["text", "audio"]`.
 ## Multi-GPU (TP)
 
 To shard the fused thinker across two GPUs, edit stage 0 in
-`vllm_omni/deploy/kimi_audio.yaml` to set `tensor_parallel_size: 2`,
+`vllm_omni/model_executor/stage_configs/kimi_audio.yaml` to set `tensor_parallel_size: 2`,
 `devices: "0,1"`, and `distributed_executor_backend: "mp"`; move stage 1
 onto a free device (e.g. `devices: "2"`). The Qwen2 backbone shards via
 vLLM's standard TP path; the 6-layer MIMO branch is replicated on every

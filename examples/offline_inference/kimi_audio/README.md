@@ -12,7 +12,7 @@ mirroring the canonical demos in MoonshotAI/Kimi-Audio's `infer.py`:
     plus a prompt builder that pre-tokenizes prior assistant audio with
     the GLM-4-Voice tokenizer. Tracked separately.
 
-All tasks load `vllm_omni/deploy/kimi_audio.yaml`. Per-stage sampling
+All tasks load `vllm_omni/model_executor/stage_configs/kimi_audio.yaml`. Per-stage sampling
 params come from that file; `--stage-configs-path` / `--output-dir` /
 `--question` can override the defaults.
 
@@ -43,12 +43,12 @@ Outputs land under the per-task default directory
 `--output-dir` if provided.
 
 For single-GPU hosts, pass
-`--stage-configs-path ../../../vllm_omni/deploy/kimi_audio_single_gpu.yaml`
+`--stage-configs-path ../../../vllm_omni/model_executor/stage_configs/kimi_audio_single_gpu.yaml`
 (both stages on `cuda:0`, `async_chunk: false`).
 
 ## Deploy config
 
-`vllm_omni/deploy/kimi_audio.yaml` is a 2-stage audio-out pipeline. Stage 0
+`vllm_omni/model_executor/stage_configs/kimi_audio.yaml` is a 2-stage audio-out pipeline. Stage 0
 is the fused thinker (Whisper-large-v3 + VQ-Adaptor + Qwen2-7B + 6-layer
 MIMO branch) with `hf_overrides.kimia_generate_audio: true`. Stage 1 is
 `code2wav` (PrefixStreamingFlowMatchingDetokenizer + BigVGAN). The

@@ -13,7 +13,7 @@ dtype: bfloat16
 
 stages:
   - stage_id: 0
-    max_num_seqs: 4
+    max_num_seqs: 1
     gpu_memory_utilization: 0.55
     enforce_eager: true
     trust_remote_code: true

@@ -16,7 +16,6 @@ from diffusers.models.embeddings import (
     apply_rotary_emb,
     get_1d_rotary_pos_embed,
 )
-
 from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 logger = logging.getLogger(__name__)
@@ -652,9 +651,16 @@ class DiTPrefix(nn.Module):
     @torch.inference_mode()
     def prefill(self, mel, semantic_token, chunk_size=150, verbose=False):
         """Fill the KV cache from a reference audio prompt."""
-        assert mel.dim() == 2
-        assert semantic_token.dim() == 1
-        assert semantic_token.shape[0] == mel.shape[0], "Semantic token and mel shape mismatch"
+        if mel.dim() != 2 or semantic_token.dim() != 1:
+            raise ValueError(
+                f"prefill expects mel [T, n_mels] and semantic_token [T]; "
+                f"got mel={tuple(mel.shape)}, semantic_token={tuple(semantic_token.shape)}"
+            )
+        if semantic_token.shape[0] != mel.shape[0]:
+            raise ValueError(
+                f"semantic_token and mel must share T dim; got "
+                f"semantic_token={semantic_token.shape[0]}, mel={mel.shape[0]}"
+            )
         seq_len = mel.shape[0]
         num_chunks = min(seq_len // chunk_size, self.max_prompt_chunk)
         start_pos = seq_len - num_chunks * chunk_size
@@ -719,6 +725,7 @@ class DiTPrefix(nn.Module):
         device,
         max_prompt_chunk=2,
         max_kv_cache_tokens=900,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         with open(model_config) as f:
             config = yaml.safe_load(f)
@@ -754,6 +761,7 @@ class DiTPrefix(nn.Module):
         dit.normalize_mel = config.get("normalize_mel", False)
         dit.mel_mean = config.get("mel_mean")
         dit.mel_std = config.get("mel_std")
+        dit.dtype = dtype
 
         dit.to(device).to(dit.dtype).eval()
         return dit

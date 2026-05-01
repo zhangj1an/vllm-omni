@@ -58,33 +58,41 @@ class KimiAudioCode2Wav(nn.Module):
             return
         # ``get_audio_detokenizer`` pins onto torch.cuda.current_device() —
         # the stage process must own the right CUDA device first.
-        self._detokenizer = get_audio_detokenizer(self.model_path)
-        logger.info("KimiAudioCode2Wav detokenizer loaded from %s", self.model_path)
+        dtype = self.vllm_config.model_config.dtype
+        self._detokenizer = get_audio_detokenizer(self.model_path, dtype=dtype)
+        logger.info("KimiAudioCode2Wav detokenizer loaded from %s (dtype=%s)", self.model_path, dtype)
         self._maybe_install_cuda_graph_wrapper()
 
     def _maybe_install_cuda_graph_wrapper(self) -> None:
-        """Wrap ``vocoder.decode_mel`` with a CUDA graph capture. Skipped on
-        CPU, under ``enforce_eager``, or if warmup fails."""
+        """Wrap ``vocoder.decode_mel`` with a CUDA graph capture for the
+        async-chunk path. Skipped on CPU, when no chunk size is
+        configured (sync path), or if warmup fails.
+
+        Note: the stage's ``enforce_eager: true`` only governs vLLM's
+        outer generation-loop graph capture (which doesn't apply to the
+        custom code2wav forward); ``decode_mel`` is a fixed-shape inner
+        call we can capture independently."""
         if not torch.cuda.is_available():
             return
-        if getattr(self.vllm_config.model_config, "enforce_eager", False):
-            logger.info("KimiAudioCode2Wav: enforce_eager=True; skipping CUDA Graph capture")
-            return
 
-        vocoder = self._detokenizer.vocoder
-
-        # Async-chunk YAML supplies these via runtime.connectors.<...>.extra;
-        # sync YAML omits the block, in which case the wrapper picks defaults.
+        # Async-chunk YAML supplies these via connector ``extra``; sync
+        # YAML omits the block. With no chunk frames configured the
+        # wrapper has no shapes to capture, so skip cleanly.
         connector_cfg = getattr(self.vllm_config.model_config, "stage_connector_config", None) or {}
         extra = connector_cfg.get("extra", {})
         codec_chunk_frames = int(extra.get("codec_chunk_frames", 0))
         codec_left = int(extra.get("codec_left_context_frames", 0))
+        if codec_chunk_frames == 0:
+            logger.info("KimiAudioCode2Wav: no codec_chunk_frames configured; skipping CUDA Graph capture")
+            return
+
+        vocoder = self._detokenizer.vocoder
 
         wrapper = KimiAudioCudaGraphDecoderWrapper(vocoder=vocoder, enabled=True)
         try:
             wrapper.warmup(
                 device=torch.device(f"cuda:{torch.cuda.current_device()}"),
-                dtype=getattr(self._detokenizer, "dtype", torch.bfloat16),
+                dtype=self._detokenizer.dtype,
                 codec_chunk_frames=codec_chunk_frames,
                 codec_left_context_frames=codec_left,
             )

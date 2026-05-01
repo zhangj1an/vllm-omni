@@ -35,30 +35,32 @@ logger = init_logger(__name__)
 # Token IDs for Kimi-Audio special tokens (from the shipped tokenizer_config).
 # Keeping these as module-level constants to avoid per-forward config lookup.
 # See also /root/dump_reference_paired_streams.py for the validation script.
-_KIMIA_MSG_END = 151645                    # <|im_msg_end|>
-_KIMIA_MEDIA_BEGIN = 151661                # <|im_media_begin|>
-_KIMIA_MEDIA_END = 151663                  # <|im_media_end|>
-_KIMIA_TEXT_BLANK = 151666                 # <|im_kimia_text_blank|>
-_KIMIA_TEXT_EOS = 151667                   # <|im_kimia_text_eos|>
-_KIMIA_USER_MSG_START = 151670             # <|im_kimia_user_msg_start|>
-_KIMIA_ASSISTANT_MSG_START = 151671        # <|im_kimia_assistant_msg_start|>
-_KIMIA_SPEECH_CT = 151675                  # <|im_kimia_speech_ct_id|>
-_KIMIA_SPEECH_CTD = 151676                 # <|im_kimia_speech_ctd_id|>
+_KIMIA_MSG_END = 151645  # <|im_msg_end|>
+_KIMIA_MEDIA_BEGIN = 151661  # <|im_media_begin|>
+_KIMIA_MEDIA_END = 151663  # <|im_media_end|>
+_KIMIA_TEXT_BLANK = 151666  # <|im_kimia_text_blank|>
+_KIMIA_TEXT_EOS = 151667  # <|im_kimia_text_eos|>
+_KIMIA_USER_MSG_START = 151670  # <|im_kimia_user_msg_start|>
+_KIMIA_ASSISTANT_MSG_START = 151671  # <|im_kimia_assistant_msg_start|>
+_KIMIA_SPEECH_CT = 151675  # <|im_kimia_speech_ct_id|>
+_KIMIA_SPEECH_CTD = 151676  # <|im_kimia_speech_ctd_id|>
 
 # Tokens that belong on the AUDIO stream; at those positions the TEXT stream
 # carries ``kimia_text_blank``. Everything else (regular tokenizer ids, and
 # the text-only ``kimia_text_eos``) stays on the TEXT stream with the AUDIO
 # stream holding ``kimia_text_blank``. This exactly mirrors
 # ``prompt_manager.tokenize_message`` — verified against the reference dump.
-_AUDIO_STREAM_TOKENS = frozenset({
-    _KIMIA_USER_MSG_START,
-    _KIMIA_ASSISTANT_MSG_START,
-    _KIMIA_MEDIA_BEGIN,
-    _KIMIA_MEDIA_END,
-    _KIMIA_MSG_END,
-    _KIMIA_SPEECH_CT,
-    _KIMIA_SPEECH_CTD,
-})
+_AUDIO_STREAM_TOKENS = frozenset(
+    {
+        _KIMIA_USER_MSG_START,
+        _KIMIA_ASSISTANT_MSG_START,
+        _KIMIA_MEDIA_BEGIN,
+        _KIMIA_MEDIA_END,
+        _KIMIA_MSG_END,
+        _KIMIA_SPEECH_CT,
+        _KIMIA_SPEECH_CTD,
+    }
+)
 
 # Audio codes live in [KIMIA_TOKEN_OFFSET, vocab_size); the MIMO head's
 # logits for the text vocabulary are discarded before sampling.
@@ -132,6 +134,24 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
+
+        # The dual-stream feedback loop (``self._req_state`` /
+        # ``self._mimo_capture_slot``) carries per-request state on the
+        # MODULE, not on ``sampling_metadata``. That's safe only with one
+        # in-flight request per stage. Reject larger ``max_num_seqs``
+        # loudly at init rather than producing silently-corrupted audio
+        # under concurrent decode. Multi-request support would mean
+        # threading the vLLM request id through ``embed_input_ids`` /
+        # ``forward`` and keying state on it.
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        if max_num_seqs != 1:
+            raise ValueError(
+                f"KimiAudioFusedThinker requires max_num_seqs=1 on stage 0 "
+                f"(got {max_num_seqs}). The MIMO branch's per-request state is "
+                f"kept on the module instance and would race under concurrent "
+                f"requests. See _req_state / _mimo_capture_slot in "
+                f"kimi_audio_thinker.py."
+            )
 
         # Used by ``_load_whisper_subbundle`` to locate the subbundle.
         self.model_path = vllm_config.model_config.model
@@ -415,7 +435,9 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         if positions is not None and positions.reshape(-1).shape[0] == seq_len:
             position_ids = positions.reshape(1, -1).to(torch.long)
         else:
-            position_ids = torch.arange(past_len, past_len + seq_len, device=capture.device, dtype=torch.long).unsqueeze(0)
+            position_ids = torch.arange(
+                past_len, past_len + seq_len, device=capture.device, dtype=torch.long
+            ).unsqueeze(0)
 
         cache_position = torch.arange(past_len, past_len + seq_len, device=capture.device, dtype=torch.long)
 
@@ -430,7 +452,7 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
                 torch.full((seq_len, seq_len), float("-inf"), device=capture.device, dtype=hidden_3d.dtype),
                 diagonal=1,
             )
-            attn_mask[:, :, :, past_len:past_len + seq_len] = causal_block.unsqueeze(0).unsqueeze(0)
+            attn_mask[:, :, :, past_len : past_len + seq_len] = causal_block.unsqueeze(0).unsqueeze(0)
         else:
             attn_mask = None
 
@@ -459,7 +481,7 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         else:
             sample_idx = logits_index.reshape(-1).to(capture.device).to(torch.long)
 
-        h_sample = h[0, sample_idx, :]              # [num_sample, hidden]
+        h_sample = h[0, sample_idx, :]  # [num_sample, hidden]
         audio_logits_full = self.mimo_output(h_sample)
         # Sample from the FULL vocab (mirrors reference: the audio head
         # can emit eod tokens like media_end/msg_end to signal end-of-audio;

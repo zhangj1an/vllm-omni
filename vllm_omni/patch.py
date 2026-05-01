@@ -103,20 +103,27 @@ except ImportError:
 try:
     from vllm.tokenizers.kimi_audio import KimiAudioTokenizer as _KimiAudioTokenizer
 
-    _KIMI_ALLOWED_SPECIAL = frozenset({
-        "<|im_media_begin|>",
-        "<|im_media_end|>",
-        "<|im_kimia_text_blank|>",
-        "<|im_kimia_text_eos|>",
-        "<|im_msg_end|>",
-        "<|im_kimia_user_msg_start|>",
-        "<|im_kimia_assistant_msg_start|>",
-        "<|im_kimia_speech_ct_id|>",
-        "<|im_kimia_speech_ctd_id|>",
-    })
+    _KIMI_ALLOWED_SPECIAL = frozenset(
+        {
+            "<|im_media_begin|>",
+            "<|im_media_end|>",
+            "<|im_kimia_text_blank|>",
+            "<|im_kimia_text_eos|>",
+            "<|im_msg_end|>",
+            "<|im_kimia_user_msg_start|>",
+            "<|im_kimia_assistant_msg_start|>",
+            "<|im_kimia_speech_ct_id|>",
+            "<|im_kimia_speech_ctd_id|>",
+        }
+    )
 
     def _kimi_audio_encode(
-        self, text, truncation=None, max_length=None, add_special_tokens=True, **kwargs,
+        self,
+        text,
+        truncation=None,
+        max_length=None,
+        add_special_tokens=True,
+        **kwargs,
     ):
         del add_special_tokens
         tokens = self._tokenizer.encode(text, allowed_special=_KIMI_ALLOWED_SPECIAL)

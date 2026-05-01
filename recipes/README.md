@@ -31,6 +31,9 @@ recipes/
   recipe for Wan2.2 14B on `8x Ascend NPU (A2/A3)`
 - [`inclusionAI/Ming-flash-omni-2.0.md`](./inclusionAI/Ming-flash-omni-2.0.md):
   online serving recipe for multimodal chat (`4x H100 80GB`) and standalone TTS (`1x H100 80GB`)
+- [`moonshotai/Kimi-Audio-7B-Instruct.md`](./moonshotai/Kimi-Audio-7B-Instruct.md):
+  offline-inference recipe for ASR, single-turn audio chat, and multi-turn audio chat
+  on `1x RTX PRO 6000 Blackwell`
 
 Within a single recipe file, include different hardware support sections such
 as `GPU`, `ROCm`, and `NPU`, and add concrete tested configurations like

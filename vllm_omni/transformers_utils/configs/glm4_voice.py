@@ -5,6 +5,7 @@ Only the fields the encoder actually reads at inference are kept; the
 training-only EMA / restart / spec-augment / pooling-type knobs are
 hardcoded into the model code instead. See
 ``vllm_omni.model_executor.models.kimi_audio.glm4.modeling_whisper``."""
+
 from transformers import WhisperConfig
 
 

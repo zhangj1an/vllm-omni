@@ -4,6 +4,7 @@ Upstream Moonshot represents input audio as BOTH discrete codec IDs (from
 ``THUDM/glm-4-voice-tokenizer``) AND continuous Whisper features. The HF
 repo ships only weights + config — the ``WhisperVQEncoder`` modeling code
 is vendored under ``./glm/``."""
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -41,9 +42,7 @@ def tokenize_audio(audio_array, sample_rate: int) -> list[int]:
     if audio_tensor.dim() == 1:
         audio_tensor = audio_tensor.unsqueeze(0)
     if sample_rate != 16000:
-        audio_tensor = torchaudio.functional.resample(
-            audio_tensor, orig_freq=sample_rate, new_freq=16000
-        )
+        audio_tensor = torchaudio.functional.resample(audio_tensor, orig_freq=sample_rate, new_freq=16000)
     audio = audio_tensor[0].cpu().numpy()
 
     pooling_kernel_size = model.config.pooling_kernel_size or 1
@@ -69,7 +68,7 @@ def tokenize_audio(audio_array, sample_rate: int) -> list[int]:
         outputs = model(**features)
         speech_tokens = outputs.quantized_token_ids
         attn_mask = features["attention_mask"][:, :: model.conv1.stride[0] * model.conv2.stride[0]]
-        attn_mask = attn_mask[:, :: pooling_kernel_size]
+        attn_mask = attn_mask[:, ::pooling_kernel_size]
         for i in range(len(speech_tokens)):
             tokens = speech_tokens[i][attn_mask[i].bool()].tolist()
             all_tokens.extend(tokens)

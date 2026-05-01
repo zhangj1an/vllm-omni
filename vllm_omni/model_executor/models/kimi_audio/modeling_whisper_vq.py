@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2022 The OpenAI Authors and The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +16,6 @@ needed by Kimi-Audio's input-audio tokenizer."""
 
 import math
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 from torch import nn
@@ -31,39 +29,28 @@ from vllm_omni.transformers_utils.configs.glm4_voice import WhisperVQConfig
 
 @dataclass
 class QuantizedBaseModelOutput(BaseModelOutput):
-    quantized_token_ids: Optional[torch.LongTensor] = None
+    quantized_token_ids: torch.LongTensor | None = None
 
 
 def vector_quantize(inputs, codebook):
     embedding_size = codebook.size(1)
     inputs_flatten = inputs.reshape(-1, embedding_size)
-    codebook_sqr = torch.sum(codebook ** 2, dim=1)
-    inputs_sqr = torch.sum(inputs_flatten ** 2, dim=1, keepdim=True)
+    codebook_sqr = torch.sum(codebook**2, dim=1)
+    inputs_sqr = torch.sum(inputs_flatten**2, dim=1, keepdim=True)
     # Compute the distances to the codebook
-    distances = torch.addmm(codebook_sqr + inputs_sqr,
-                            inputs_flatten, codebook.t(), alpha=-2.0, beta=1.0)
+    distances = torch.addmm(codebook_sqr + inputs_sqr, inputs_flatten, codebook.t(), alpha=-2.0, beta=1.0)
 
     _, indices_flatten = torch.min(distances, dim=1)
-    codes_flatten = torch.index_select(codebook, dim=0,
-                                       index=indices_flatten)
+    codes_flatten = torch.index_select(codebook, dim=0, index=indices_flatten)
     codes = codes_flatten.view_as(inputs)
     return codes, indices_flatten, distances
 
 
 class CausalConv1d(nn.Conv1d):
     def __init__(
-        self,
-        in_channels,
-        out_channels,
-        kernel_size,
-        stride=1,
-        padding=0,
-        dilation=1,
-        groups=1,
-        bias=True,
-        **kwargs
+        self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True, **kwargs
     ):
-        super(CausalConv1d, self).__init__(
+        super().__init__(
             in_channels,
             out_channels,
             kernel_size,
@@ -72,7 +59,7 @@ class CausalConv1d(nn.Conv1d):
             dilation=dilation,
             groups=groups,
             bias=bias,
-            **kwargs
+            **kwargs,
         )
 
         self.left_padding = dilation * (kernel_size - 1)
@@ -80,20 +67,17 @@ class CausalConv1d(nn.Conv1d):
     def forward(self, inp):
         x = torch.nn.functional.pad(inp.unsqueeze(2), (self.left_padding, 0, 0, 0)).squeeze(2)
 
-        return super(CausalConv1d, self).forward(x)
+        return super().forward(x)
 
 
 def sinusoids(length: int, channels: int, max_timescale: float = 10000) -> torch.Tensor:
     """Returns sinusoids for positional embedding"""
     if channels % 2 != 0:
-        raise ValueError(
-            f"Number of channels has to be divisible by 2 for sinusoidal positional embeddings, got {channels} channels."
-        )
+        raise ValueError(f"channels must be divisible by 2 for sinusoidal positional embeddings, got {channels}.")
     log_timescale_increment = math.log(max_timescale) / (channels // 2 - 1)
     inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
     scaled_time = torch.arange(length).view(-1, 1) * inv_timescales.view(1, -1)
     return torch.cat([scaled_time.sin(), scaled_time.cos()], dim=1)
-
 
 
 class WhisperVQEncoderLayer(nn.Module):
@@ -177,8 +161,6 @@ class WhisperPreTrainedModel(PreTrainedModel):
         return input_lengths
 
 
-
-
 class WhisperVQEncoder(WhisperPreTrainedModel):
     """GLM-4-Voice's VQ-augmented Whisper encoder. Stripped to the
     fixed-config inference path: causal-conv stem, encoder_only layer
@@ -199,9 +181,7 @@ class WhisperVQEncoder(WhisperPreTrainedModel):
         self.conv2 = CausalConv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
         self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
         self.embed_positions.requires_grad_(False)
-        self.layers = nn.ModuleList(
-            [WhisperVQEncoderLayer(config) for _ in range(config.quantize_position)]
-        )
+        self.layers = nn.ModuleList([WhisperVQEncoderLayer(config) for _ in range(config.quantize_position)])
         self.pooling_layer = nn.AvgPool1d(kernel_size=config.pooling_kernel_size)
 
         # VQ codebook + a second positional embedding sized to the
@@ -223,7 +203,8 @@ class WhisperVQEncoder(WhisperPreTrainedModel):
         dtype = self.dtype
         batch_size, seq_length = attention_mask.shape
         causal_mask = torch.torch.tril(
-            torch.ones(1, seq_length, seq_length, dtype=torch.bool, device=attention_mask.device))
+            torch.ones(1, seq_length, seq_length, dtype=torch.bool, device=attention_mask.device)
+        )
         block_square_mask = []
         for start in range(0, seq_length, block_size):
             end = min(start + block_size, seq_length)
@@ -248,7 +229,8 @@ class WhisperVQEncoder(WhisperPreTrainedModel):
 
         attention_mask = attention_mask[:, ::stride]
         extended_attention_mask = self.get_block_causal_attention_mask(
-            attention_mask, block_size=self.config.quantize_causal_block_size,
+            attention_mask,
+            block_size=self.config.quantize_causal_block_size,
         )
 
         hidden_states = nn.functional.gelu(self.conv1(input_features))
@@ -281,11 +263,9 @@ class WhisperVQEncoder(WhisperPreTrainedModel):
             if idx + 1 == self.config.quantize_position:
                 hidden_quantized, indices_flat, _ = vector_quantize(hidden_states, self.codebook.weight)
                 quantized_token_ids = indices_flat.reshape(batch_size, hidden_quantized.shape[1])
-                hidden_states = hidden_quantized + self.embed_positions2.weight[:hidden_quantized.shape[1]]
+                hidden_states = hidden_quantized + self.embed_positions2.weight[: hidden_quantized.shape[1]]
 
         return QuantizedBaseModelOutput(
             last_hidden_state=hidden_states,
             quantized_token_ids=quantized_token_ids,
         )
-
-

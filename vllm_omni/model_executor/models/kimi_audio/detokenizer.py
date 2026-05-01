@@ -2,8 +2,8 @@ import os
 
 import torch
 
-from .modeling_bigvgan import KimiBigVGAN
 from .flow_matching import DiTPrefix
+from .modeling_bigvgan import KimiBigVGAN
 
 
 class PrefixStreamingFlowMatchingDetokenizer:
@@ -12,8 +12,9 @@ class PrefixStreamingFlowMatchingDetokenizer:
         vocoder: KimiBigVGAN,
         fm: DiTPrefix,
         look_ahead_tokens: int = 0,
+        dtype: torch.dtype = torch.bfloat16,
     ) -> None:
-        self.dtype = torch.bfloat16
+        self.dtype = dtype
 
         self.vocoder = vocoder.to(self.dtype)
 
@@ -40,6 +41,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
         look_ahead_tokens=0,
         max_prompt_chunk=2,
         max_kv_cache_tokens=900,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         bigvgan = KimiBigVGAN.load_from_local(model_path, device)
         semantic_fm = DiTPrefix.from_pretrained(
@@ -48,8 +50,9 @@ class PrefixStreamingFlowMatchingDetokenizer:
             device,
             max_prompt_chunk=max_prompt_chunk,
             max_kv_cache_tokens=max_kv_cache_tokens,
+            dtype=dtype,
         )
-        return cls(bigvgan, semantic_fm, look_ahead_tokens=look_ahead_tokens)
+        return cls(bigvgan, semantic_fm, look_ahead_tokens=look_ahead_tokens, dtype=dtype)
 
     @torch.inference_mode()
     def detokenize_streaming(
@@ -60,8 +63,12 @@ class PrefixStreamingFlowMatchingDetokenizer:
         is_final=False,
         upsample_factor=1,
     ):
-        assert len(semantic_token.shape) == 2 and ode_step > 0
-        assert semantic_token.shape[0] == 1
+        if semantic_token.dim() != 2 or semantic_token.shape[0] != 1 or ode_step <= 0:
+            raise ValueError(
+                f"detokenize_streaming expects semantic_token of shape "
+                f"[1, T] and ode_step > 0; got shape={tuple(semantic_token.shape)}, "
+                f"ode_step={ode_step}"
+            )
 
         semantic_token = semantic_token.repeat_interleave(upsample_factor, dim=1)
 
@@ -160,7 +167,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
         self.pre_wav = None
 
 
-def get_audio_detokenizer(model_path):
+def get_audio_detokenizer(model_path, dtype: torch.dtype = torch.bfloat16):
     fm_model_config = os.path.join(model_path, "audio_detokenizer", "config.yaml")
     fm_ckpt_path = os.path.join(model_path, "audio_detokenizer", "model.pt")
 
@@ -172,6 +179,7 @@ def get_audio_detokenizer(model_path):
         fm_ckpt=fm_ckpt_path,
         device=device,
         look_ahead_tokens=12,
+        dtype=dtype,
     )
 
     return detokenizer
