@@ -1,22 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Offline inference example for Kimi-Audio-7B-Instruct covering the
-three upstream demo tasks from MoonshotAI/Kimi-Audio's ``infer.py``:
+four task modes vllm-omni exposes:
 
-  * ``asr``       — audio in, text out (ASR over ``asr_example.wav``).
-  * ``qa``        — audio in, audio + text out (spoken QA over
-                    ``qa_example.wav``, no text instruction in the user
-                    turn).
-  * ``multiturn`` — multi-turn audio chat (q1 → assistant audio+text a1
-                    → q2). NOT YET IMPLEMENTED in vllm-omni; assistant
-                    audio history requires the ``_split_prefill`` mask
-                    fix in ``kimi_audio_thinker.py`` and a prompt builder
-                    that pre-tokenizes prior assistant audio with the
-                    GLM-4-Voice tokenizer. See the integration plan.
+  * ``audio2text``  — audio in, text out (ASR over ``asr_example.wav``).
+  * ``audio2audio`` — audio in, audio + text out (spoken QA over
+                      ``qa_example.wav``, no text instruction in the
+                      user turn).
+  * ``multiturn``   — multi-turn audio2audio (q1 → assistant audio+text
+                      a1 → q2). Uses the same pipeline as
+                      ``audio2audio`` but with a custom prompt builder
+                      that pre-tokenizes prior assistant audio with the
+                      GLM-4-Voice tokenizer.
+  * ``text2audio``  — text in, audio + text out (TTS-style).
 
-All tasks load ``vllm_omni/model_executor/stage_configs/kimi_audio.yaml`` (two-stage audio-out
-pipeline); ``asr`` ignores the stage-1 audio output. For low-TTFB
-streaming see ``end2end_async_chunk.py``.
+All tasks share ``vllm_omni/deploy/kimi_audio.yaml``
+(two-stage thinker → code2wav, single-GPU sync). ``audio2text`` ignores
+the stage-1 audio output. For multi-GPU async-chunk streaming, edit the
+YAML per the comments at its top.
 """
 
 import os
@@ -36,7 +37,7 @@ SEED = 42
 AUDIO_PLACEHOLDER = "<|im_media_begin|><|im_kimia_text_blank|><|im_media_end|>"
 OUTPUT_SAMPLE_RATE = 24000
 
-TASK_CHOICES = ("asr", "qa", "multiturn")
+TASK_CHOICES = ("audio2text", "audio2audio", "multiturn", "text2audio")
 
 # Default sample audio for audio-input tasks. Pulled from the upstream
 # Kimi-Audio repo's ``test_audios/`` directory so this example mirrors
@@ -53,31 +54,34 @@ MULTITURN_A1_URL = f"{_KIMI_TEST_AUDIOS}/multiturn/{MULTITURN_CASE}/multiturn_a1
 MULTITURN_A1_TEXT = "当然可以，这很简单。一二三四五六七八九十。"
 MULTITURN_Q2_URL = f"{_KIMI_TEST_AUDIOS}/multiturn/{MULTITURN_CASE}/multiturn_q2.wav"
 
+_STAGE_YAML = "../../../vllm_omni/deploy/kimi_audio.yaml"
+
 TASK_DEFAULTS = {
-    "asr": {
-        # Text-only single-stage YAML: drops stage 1 and disables the
-        # MIMO branch on stage 0 (kimia_generate_audio: false). Avoids
-        # routing unwanted audio codes through the flow-matching
-        # detokenizer, whose ~900-token KV cache budget overflows under
-        # vLLM's profile_run.
-        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio_asr_single_gpu.yaml",
+    "audio2text": {
+        "stage_configs_path": _STAGE_YAML,
         "question": "请将音频内容转换为文字。",
-        "output_dir": "./output_asr",
+        "output_dir": "./output_audio2text",
         "default_audio_url": ASR_DEFAULT_URL,
     },
-    "qa": {
-        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
+    "audio2audio": {
+        "stage_configs_path": _STAGE_YAML,
         # Empty question -> audio-only user turn, matching upstream
         # ``infer.py`` for ``qa_example.wav`` (no text instruction).
         "question": "",
-        "output_dir": "./output_qa",
+        "output_dir": "./output_audio2audio",
         "default_audio_url": QA_DEFAULT_URL,
     },
     "multiturn": {
-        "stage_configs_path": "../../../vllm_omni/model_executor/stage_configs/kimi_audio.yaml",
+        "stage_configs_path": _STAGE_YAML,
         "question": "",
         "output_dir": "./output_multiturn",
         "default_audio_url": None,  # uses 3 URLs above, not a single default
+    },
+    "text2audio": {
+        "stage_configs_path": _STAGE_YAML,
+        "question": 'Please say the following in audio: "Hello, my name is Kimi."',
+        "output_dir": "./output_text2audio",
+        "default_audio_url": None,
     },
 }
 
@@ -143,30 +147,28 @@ def _load_audio_or_default(audio_path: str | None, sampling_rate: int, default_a
 
 
 query_map = {
-    "asr": get_audio_input_query,
-    "qa": get_audio_input_query,
+    "audio2text": get_audio_input_query,
+    "audio2audio": get_audio_input_query,
+    "text2audio": get_text_input_query,
     # ``multiturn`` is dispatched separately in ``main`` because it
     # needs a multi-message prompt builder, not the single-turn helpers.
 }
 
 
 def build_sampling_params(task: str, max_tokens: int) -> list[SamplingParams]:
-    if task == "asr":
-        # ASR's YAML keeps stage 1 defined (orchestrator requires two
-        # stages) but stage 0 has kimia_generate_audio=false, so stage 1
-        # never sees audio codes. Pass a placeholder SamplingParams for
-        # stage 1; it will not actually run.
+    if task == "audio2text":
+        # The shared YAML keeps stage 1 defined (orchestrator requires
+        # two stages) but for audio2text stage 0 emits text only and
+        # stage 1's input filter drops everything to empty. Pass a
+        # placeholder SamplingParams for stage 1.
         # stop_token_ids:
         #   151644 - [EOS]
         #   151645 - <|im_msg_end|>
         #   151667 - <|im_kimia_text_eos|>  (text-stream EOS)
-        # The pipeline default omits 151667 because for audio-out tasks
-        # the text head naturally fires it before the audio stream is
-        # done (and that would truncate audio). For text-only ASR we
-        # MUST include it — otherwise the text head emits 151667 once
-        # transcription finishes, then runs to max_tokens repeating
-        # the last text token (since the audio EOD path that normally
-        # halts generation never fires when kimia_generate_audio=false).
+        # Audio-out tasks omit 151667 because the text head fires it
+        # before audio is done. For audio2text we MUST include it,
+        # otherwise the text head loops past max_tokens repeating the
+        # last text token.
         thinker = SamplingParams(
             temperature=0.0,
             top_p=1.0,
@@ -187,8 +189,8 @@ def build_sampling_params(task: str, max_tokens: int) -> list[SamplingParams]:
         )
         return [thinker, code2wav_placeholder]
 
-    # Two-stage audio-out pipelines (qa, multiturn) need one
-    # SamplingParams per stage.
+    # Two-stage audio-out pipelines (audio2audio, multiturn, text2audio)
+    # need one SamplingParams per stage.
     # Text head mirrors Kimi-Audio upstream defaults (text_temperature=0.0,
     # text_top_k=5). The model's config.json uses the non-standard plural
     # `eos_token_ids: [151644, 151645]` so vLLM parses `eos_token_id=None`
@@ -258,9 +260,9 @@ def write_outputs(omni_outputs, output_dir: str) -> None:
                 audio_tensor = audio_data
             audio_numpy = audio_tensor.float().detach().cpu().numpy().reshape(-1)
             # Skip writing empty WAVs (44-byte header only). Happens when
-            # the upstream stage produces no audio tokens — e.g. ASR runs
-            # with kimia_generate_audio=false where stage 1 still fires
-            # but receives an empty token buffer.
+            # the upstream stage produces no audio tokens — e.g.
+            # audio2text runs where stage 1 still fires but receives an
+            # empty token buffer.
             if audio_numpy.size == 0:
                 print(f"Request {request_id}: audio output empty (text-only task); skipping wav write")
                 continue
@@ -389,7 +391,7 @@ def _run_multiturn(args):
 
     prompt_token_ids = _build_multiturn_prompt_token_ids(args.model_name, args.sampling_rate)
     print(f">>> multiturn prompt length: {len(prompt_token_ids)} tokens")
-    sampling_params = build_sampling_params("qa", args.max_tokens)
+    sampling_params = build_sampling_params("audio2audio", args.max_tokens)
     prompts = [{"prompt_token_ids": prompt_token_ids} for _ in range(args.num_prompts)]
     omni_outputs = omni.generate(prompts, sampling_params)
     write_outputs(omni_outputs, output_dir)
@@ -417,7 +419,7 @@ def main(args):
 
     sampling_params = build_sampling_params(args.task, args.max_tokens)
     query_func = query_map[args.task]
-    output_type = "both" if args.task == "qa" else "text"
+    output_type = "both" if args.task in ("audio2audio", "text2audio") else "text"
     query = query_func(
         question,
         args.audio_path,
@@ -432,13 +434,13 @@ def main(args):
 
 def parse_args():
     parser = FlexibleArgumentParser(
-        description="Offline inference for Kimi-Audio-7B-Instruct (asr, qa, multiturn).",
+        description="Offline inference for Kimi-Audio-7B-Instruct (audio2text, audio2audio, multiturn, text2audio).",
     )
     parser.add_argument(
         "--task",
         "-t",
         choices=TASK_CHOICES,
-        default="asr",
+        default="audio2text",
         help="Which Kimi-Audio task to run.",
     )
     parser.add_argument(
@@ -461,8 +463,8 @@ def parse_args():
         type=str,
         default=None,
         help="Path to a local audio file. Falls back to the upstream "
-        "Kimi-Audio test_audios sample (asr_example.wav for asr, "
-        "qa_example.wav for qa).",
+        "Kimi-Audio test_audios sample (asr_example.wav for "
+        "audio2text, qa_example.wav for audio2audio).",
     )
     parser.add_argument(
         "--sampling-rate",

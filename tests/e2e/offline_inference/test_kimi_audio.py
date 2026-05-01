@@ -5,13 +5,13 @@
 
 Covers the two task modes the example exercises end-to-end:
 
-* ``asr``  — audio in, text out (single-stage, MIMO branch disabled)
-* ``qa``   — audio in, text + spoken audio out (two-stage, async-chunk
-  off so this fits on one GPU)
+* ``audio2text``  — audio in, text out (stage 1 receives no audio
+  codes, so its decode loop is a no-op).
+* ``audio2audio`` — audio in, text + spoken audio out (two-stage,
+  async-chunk off so this fits on one GPU).
 
-Multi-turn requires a custom ``prompt_token_ids`` builder (see
-``examples/offline_inference/kimi_audio/end2end.py``); we don't drive
-that path from CI.
+Multi-turn and text2audio share the audio2audio pipeline; we don't
+drive those from CI.
 """
 
 import os
@@ -31,9 +31,7 @@ from tests.helpers.runtime import OmniRunner
 
 KIMI_MODEL = os.environ.get("KIMI_AUDIO_MODEL", "moonshotai/Kimi-Audio-7B-Instruct")
 _REPO_ROOT = Path(__file__).parent.parent.parent.parent
-_STAGE = _REPO_ROOT / "vllm_omni" / "model_executor" / "stage_configs"
-ASR_STAGE_CONFIG = str(_STAGE / "kimi_audio_asr_single_gpu.yaml")
-QA_STAGE_CONFIG = str(_STAGE / "kimi_audio_single_gpu.yaml")
+STAGE_CONFIG = str(_REPO_ROOT / "vllm_omni" / "deploy" / "kimi_audio.yaml")
 
 OUTPUT_SAMPLE_RATE = 24000
 SEED = 42
@@ -69,7 +67,7 @@ def _load_audio(url: str, sample_rate: int = 16000) -> np.ndarray:
     return audio
 
 
-def _asr_query() -> dict[str, Any]:
+def _audio2text_query() -> dict[str, Any]:
     audio = _load_audio("https://raw.githubusercontent.com/MoonshotAI/Kimi-Audio/master/test_audios/asr_example.wav")
     return {
         "prompt": _build_prompt("请将音频内容转换为文字。", output_type="text"),
@@ -77,7 +75,7 @@ def _asr_query() -> dict[str, Any]:
     }
 
 
-def _qa_query() -> dict[str, Any]:
+def _audio2audio_query() -> dict[str, Any]:
     audio = _load_audio("https://raw.githubusercontent.com/MoonshotAI/Kimi-Audio/master/test_audios/qa_example.wav")
     return {
         "prompt": _build_prompt("", output_type="both"),
@@ -85,9 +83,10 @@ def _qa_query() -> dict[str, Any]:
     }
 
 
-def _asr_sampling_params() -> list[SamplingParams]:
-    """ASR YAML defines two stages but stage 1 never runs — pass a
-    placeholder so the orchestrator's per-stage list lines up."""
+def _audio2text_sampling_params() -> list[SamplingParams]:
+    """audio2text YAML defines two stages but stage 1 receives no audio
+    codes — pass a placeholder so the orchestrator's per-stage list
+    lines up."""
     thinker = SamplingParams(
         temperature=0.0,
         top_p=1.0,
@@ -95,8 +94,9 @@ def _asr_sampling_params() -> list[SamplingParams]:
         max_tokens=512,
         seed=SEED,
         detokenize=True,
-        # 151667 = <|im_kimia_text_eos|> — needed for text-only ASR
-        # because the audio-EOD path that normally halts QA never fires.
+        # 151667 = <|im_kimia_text_eos|> — needed for text-only
+        # audio2text because the audio-EOD path that normally halts
+        # audio2audio never fires.
         stop_token_ids=[151644, 151645, 151667],
     )
     placeholder = SamplingParams(
@@ -110,7 +110,7 @@ def _asr_sampling_params() -> list[SamplingParams]:
     return [thinker, placeholder]
 
 
-def _qa_sampling_params() -> list[SamplingParams]:
+def _audio2audio_sampling_params() -> list[SamplingParams]:
     thinker = SamplingParams(
         temperature=0.0,
         top_p=1.0,
@@ -168,38 +168,38 @@ def _final_outputs(stage_outputs):
 @pytest.mark.core_model
 @pytest.mark.omni
 @hardware_test(res={"cuda": "L4"}, num_cards=1)
-def test_kimi_audio_asr(tmp_path: Path):
-    with OmniRunner(KIMI_MODEL, stage_configs_path=ASR_STAGE_CONFIG) as runner:
-        outputs = list(runner.omni.generate([_asr_query()], _asr_sampling_params()))
+def test_kimi_audio_audio2text(tmp_path: Path):
+    with OmniRunner(KIMI_MODEL, stage_configs_path=STAGE_CONFIG) as runner:
+        outputs = list(runner.omni.generate([_audio2text_query()], _audio2text_sampling_params()))
 
-    assert outputs, "no outputs returned from ASR run"
+    assert outputs, "no outputs returned from audio2text run"
     text, _ = _final_outputs(outputs)
-    assert text is not None and len(text.strip()) > 0, f"empty ASR transcript: {text!r}"
+    assert text is not None and len(text.strip()) > 0, f"empty audio2text transcript: {text!r}"
 
 
 @pytest.mark.core_model
 @pytest.mark.omni
 @hardware_test(res={"cuda": "L4"}, num_cards=1)
-def test_kimi_audio_qa(tmp_path: Path):
-    with OmniRunner(KIMI_MODEL, stage_configs_path=QA_STAGE_CONFIG) as runner:
-        outputs = list(runner.omni.generate([_qa_query()], _qa_sampling_params()))
+def test_kimi_audio_audio2audio(tmp_path: Path):
+    with OmniRunner(KIMI_MODEL, stage_configs_path=STAGE_CONFIG) as runner:
+        outputs = list(runner.omni.generate([_audio2audio_query()], _audio2audio_sampling_params()))
 
-    assert outputs, "no outputs returned from QA run"
+    assert outputs, "no outputs returned from audio2audio run"
     text, audio = _final_outputs(outputs)
 
-    assert text is not None and len(text.strip()) > 0, f"empty QA text: {text!r}"
-    assert audio.numel() > OUTPUT_SAMPLE_RATE // 2, f"QA audio too short: {audio.numel()} samples"
+    assert text is not None and len(text.strip()) > 0, f"empty audio2audio text: {text!r}"
+    assert audio.numel() > OUTPUT_SAMPLE_RATE // 2, f"audio2audio output too short: {audio.numel()} samples"
 
     duration_s = audio.shape[0] / OUTPUT_SAMPLE_RATE
-    assert 0.5 < duration_s < 60.0, f"QA audio duration out of range: {duration_s:.2f}s"
+    assert 0.5 < duration_s < 60.0, f"audio2audio duration out of range: {duration_s:.2f}s"
 
     audio_np = audio.numpy()
     rms = float(np.sqrt(np.mean(np.square(audio_np))))
     peak = float(np.abs(audio_np).max())
-    assert rms > 1e-3, f"QA audio RMS too low ({rms:.4g}) — likely silence"
-    assert peak < 0.99, f"QA audio peak {peak:.3f} suggests clipping (expected ≲0.5)"
+    assert rms > 1e-3, f"audio2audio RMS too low ({rms:.4g}) — likely silence"
+    assert peak < 0.99, f"audio2audio peak {peak:.3f} suggests clipping (expected ≲0.5)"
 
     # Smoke-write so a maintainer can listen at the failure site.
-    out_path = tmp_path / "qa_output.wav"
+    out_path = tmp_path / "audio2audio_output.wav"
     sf.write(str(out_path), audio_np, OUTPUT_SAMPLE_RATE)
     assert out_path.stat().st_size > 1000

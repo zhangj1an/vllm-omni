@@ -1,21 +1,26 @@
-# Kimi-Audio-7B for ASR and audio chat
+# Kimi-Audio-7B for audio2text and audio chat
 
 ## Summary
 
 - Vendor: moonshotai
 - Model: `moonshotai/Kimi-Audio-7B-Instruct`
-- Task: ASR (audio in, text out) and single-turn audio chat (audio in, text + spoken audio out)
+- Tasks: `audio2text` (audio in, text out), `audio2audio` (audio in,
+  text + spoken audio out, including multi-turn), and `text2audio`
+  (text in, audio out)
 - Mode: Online serving with the OpenAI-compatible API
 - Maintainer: Community
 
 ## When to use this recipe
 
 Use this recipe when you want a known-good starting point for serving
-`moonshotai/Kimi-Audio-7B-Instruct` with vLLM-Omni in one of two modes:
+`moonshotai/Kimi-Audio-7B-Instruct` with vLLM-Omni in one of three modes:
 
-- **ASR / audio-to-text** — transcribe an audio clip with `"modalities": ["text"]`.
-- **Audio chat** — respond to an audio prompt with text and synthesized
-  speech using `"modalities": ["text", "audio"]`.
+- **`audio2text`** — transcribe an audio clip with `"modalities": ["text"]`.
+- **`audio2audio`** — respond to an audio prompt with text and
+  synthesized speech using `"modalities": ["text", "audio"]`.
+  Multi-turn audio chat uses the same pipeline.
+- **`text2audio`** — synthesize speech from a text prompt with
+  `"modalities": ["text", "audio"]`.
 
 The pipeline runs the fused thinker (Whisper-large-v3 + VQ-Adaptor +
 Qwen2-7B + 6-layer MIMO branch) on stage 0 and a flow-matching DiT +
@@ -38,12 +43,14 @@ as community validation lands.
 
 ## GPU
 
-### 2x H100 80GB — async-chunked audio chat
+### 1x L4 24GB — single-GPU sync audio chat
 
-The bundled `kimi_audio.yaml` runs the fused thinker on `cuda:0` and
-the code2wav stage on `cuda:1`, connected by `SharedMemoryConnector`
-for sub-second TTFB. Adjust `devices` in the YAML to match your
-hardware.
+The bundled `kimi_audio.yaml` ships in single-GPU sync mode: both
+stages pin to `cuda:0`, stage 0 reserves 0.55 of GPU memory, and stage
+1 fits alongside it. To enable multi-GPU async-chunk streaming for
+sub-second TTFB, edit the YAML per the comments at its top
+(`async_chunk: true`, move stage 1 to `devices: "1"`, add a
+`SharedMemoryConnector`).
 
 #### Environment
 
@@ -59,13 +66,13 @@ hardware.
 vllm serve moonshotai/Kimi-Audio-7B-Instruct \
     --omni \
     --port 8091 \
-    --stage-configs-path vllm_omni/model_executor/stage_configs/kimi_audio.yaml
+    --stage-configs-path vllm_omni/deploy/kimi_audio.yaml
 ```
 
-For sync (non-streaming) operation, edit the YAML to set
-`async_chunk: false`. For text-out-only deployment, point at
-`kimi_audio_asr_single_gpu.yaml` and request `"modalities": ["text"]`
-only.
+For text-out-only (`audio2text`) deployments where you want to skip
+loading the MIMO audio branch and save ~4 GB of weights, override
+`hf_overrides.kimia_generate_audio: false` on stage 0 in the YAML and
+request `"modalities": ["text"]` from the client.
 
 #### Verification
 
@@ -133,10 +140,9 @@ curl http://localhost:8091/v1/chat/completions \
 
 #### Notes
 
-- **Two stage YAMLs ship**:
-  - `kimi_audio.yaml` — async-chunked, 2-GPU (default)
-  - `kimi_audio_single_gpu.yaml` — sync, both stages on `cuda:0`
-  - `kimi_audio_asr_single_gpu.yaml` — text-out only, single stage
+- **One stage YAML ships**: `kimi_audio.yaml`. Default is single-GPU
+  sync; flip `async_chunk` and rewire devices for multi-GPU streaming
+  per the comments at the top of the YAML.
 - **`max_tokens=2048`** on the thinker is the right setting for
   audio-out tasks — the audio head needs room to reach its natural
   EOD (`<|im_msg_end|>` / `<|im_media_end|>`). Smaller caps truncate

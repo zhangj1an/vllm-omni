@@ -19,34 +19,33 @@ to size GPU memory for your setup.
 cd examples/offline_inference/kimi_audio
 ```
 
-ASR (audio in, text out) — uses the single-GPU text-only YAML
-(`kimi_audio_asr_single_gpu.yaml`):
+`audio2text` (audio in, text out):
 
 ```bash
-python end2end.py --task asr
+python end2end.py --task audio2text
 ```
 
-Single-turn audio chat (audio in, text + spoken audio out):
+`audio2audio` (audio in, text + spoken audio out):
 
 ```bash
-python end2end.py --task qa \
-    --stage-configs-path ../../../vllm_omni/model_executor/stage_configs/kimi_audio_single_gpu.yaml \
-    --max-tokens 2048
+python end2end.py --task audio2audio
 ```
 
-Multi-turn audio chat (q1 audio → a1 audio + text → q2 audio):
+Multi-turn `audio2audio` (q1 audio → a1 audio + text → q2 audio):
 
 ```bash
-python end2end.py --task multiturn \
-    --stage-configs-path ../../../vllm_omni/model_executor/stage_configs/kimi_audio_single_gpu.yaml \
-    --max-tokens 2048
+python end2end.py --task multiturn
 ```
 
-Async-chunked streaming (sub-second TTFB on 2 GPUs):
+`text2audio` (text in, audio out — TTS-style):
 
 ```bash
-python end2end_async_chunk.py --task qa
+python end2end.py --task text2audio
 ```
 
-Outputs land in `output_asr/`, `output_qa/`, or `output_multiturn/`
-(one `.txt` transcript and one `.wav` per request).
+All four tasks share the single-GPU sync `kimi_audio.yaml`. To enable
+multi-GPU async-chunk streaming for sub-second TTFB, edit the YAML per
+the comments at its top.
+
+Outputs land in `output_<task>/` (one `.txt` transcript and one `.wav`
+per request, where applicable).

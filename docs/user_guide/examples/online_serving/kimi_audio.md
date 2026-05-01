@@ -7,28 +7,27 @@ For a hardware-tagged step-by-step guide, see the
 
 ## Launch the server
 
-Two-stage audio-out pipeline (default async-chunk streaming on 2 GPUs):
+Two-stage audio-out pipeline (default single-GPU sync):
 
 ```bash
 vllm serve moonshotai/Kimi-Audio-7B-Instruct \
     --omni \
     --port 8091 \
-    --stage-configs-path vllm_omni/model_executor/stage_configs/kimi_audio.yaml
+    --stage-configs-path vllm_omni/deploy/kimi_audio.yaml
 ```
 
-For sync (non-streaming) operation, edit the YAML to set
-`async_chunk: false`. For text-out only deployment, point at
-`kimi_audio_asr_single_gpu.yaml` and request `"modalities": ["text"]`.
+To enable multi-GPU async-chunk streaming for sub-second TTFB, edit the
+YAML per the comments at its top. For `audio2text`-only deployments
+where the MIMO audio branch is unused, override
+`hf_overrides.kimia_generate_audio: false` on stage 0 to save ~4 GB.
 
 ## Curl examples
 
-The example dir ships a unified curl script:
+The example dir ships a unified curl script covering all three task
+modes:
 
 ```bash
 TASK=audio2text  bash examples/online_serving/kimi_audio/run_curl.sh
 TASK=audio2audio bash examples/online_serving/kimi_audio/run_curl.sh
 TASK=text2audio  bash examples/online_serving/kimi_audio/run_curl.sh
 ```
-
-A Python streaming client mirroring the same three modes lives at
-`examples/online_serving/kimi_audio/client_streaming.py`.
