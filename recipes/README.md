@@ -31,6 +31,7 @@ recipes/
   recipe for Wan2.2 14B on `8x Ascend NPU (A2/A3)`
 - [`inclusionAI/Ming-flash-omni-2.0.md`](./inclusionAI/Ming-flash-omni-2.0.md):
   online serving recipe for multimodal chat (`4x H100 80GB`) and standalone TTS (`1x H100 80GB`)
+- [`fishaudio/Fish-Speech-S2-Pro.md`](./fishaudio/Fish-Speech-S2-Pro.md): online serving recipe for TTS on `1x A800 80GB`
 - [`moonshotai/Kimi-Audio-7B-Instruct.md`](./moonshotai/Kimi-Audio-7B-Instruct.md):
   offline-inference recipe for ASR, single-turn audio chat, and multi-turn audio chat
   on `1x RTX PRO 6000 Blackwell`
