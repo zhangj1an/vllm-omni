@@ -77,6 +77,13 @@ def _build_mimo_layers(config) -> tuple[nn.ModuleList, nn.Module]:
     from transformers import Qwen2Config
     from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RotaryEmbedding
 
+    # transformers 5 moved ``rope_theta`` into ``rope_parameters``. Older
+    # 4.x configs expose it as a flat attribute; support both.
+    if hasattr(config, "rope_parameters"):
+        rope_theta = config.rope_parameters.get("rope_theta", 10000.0)
+    else:
+        rope_theta = config.rope_theta
+
     qwen2_cfg = Qwen2Config(
         hidden_size=config.hidden_size,
         intermediate_size=config.intermediate_size,
@@ -85,12 +92,11 @@ def _build_mimo_layers(config) -> tuple[nn.ModuleList, nn.Module]:
         num_key_value_heads=config.num_key_value_heads,
         max_position_embeddings=config.max_position_embeddings,
         rms_norm_eps=config.rms_norm_eps,
-        rope_theta=config.rope_theta,
+        rope_theta=rope_theta,
         hidden_act=config.hidden_act,
         attention_dropout=0.0,
         # sdpa avoids the O(N^2) attention matrix eager would materialize
-        # at the 8192-token dummy profile run (prefill peak drops from a
-        # few GB to a few hundred MB).
+        # at the 8192-token dummy profile run.
         attn_implementation="sdpa",
     )
     layers = nn.ModuleList([Qwen2DecoderLayer(qwen2_cfg, layer_idx=i) for i in range(config.kimia_mimo_layers)])
