@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-Audio code2wav stage: audio-token IDs -> 24 kHz waveform via the
-vendored flow-matching detokenizer + BigVGAN vocoder. The detokenizer
-loads its own checkpoints from ``<model_path>/{audio_detokenizer,vocoder}/``
-and is not routed through vLLM's weight loader."""
+vendored flow-matching detokenizer + BigVGAN vocoder. The flow-matching
+half loads from ``<model_path>/audio_detokenizer/``; the BigVGAN vocoder
+loads weight_norm-folded weights from a separate HF repo (see
+``modeling_bigvgan.DEFAULT_HF_REPO``). Neither is routed through vLLM's
+weight loader."""
 
 from __future__ import annotations
 

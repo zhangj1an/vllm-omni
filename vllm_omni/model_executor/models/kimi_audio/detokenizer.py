@@ -43,7 +43,7 @@ class PrefixStreamingFlowMatchingDetokenizer:
         max_kv_cache_tokens=900,
         dtype: torch.dtype = torch.bfloat16,
     ):
-        bigvgan = KimiBigVGAN.load_from_local(model_path, device)
+        bigvgan = KimiBigVGAN.load_from_hf(device)
         semantic_fm = DiTPrefix.from_pretrained(
             fm_config,
             fm_ckpt,
