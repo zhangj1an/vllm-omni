@@ -10,7 +10,6 @@ checkpoint at ``<model_path>/vocoder/model.pt`` is no longer used.
 
 import json
 import logging
-import os
 
 import torch
 from huggingface_hub import hf_hub_download
@@ -25,10 +24,8 @@ from vllm_omni.model_executor.models.qwen2_5_omni.qwen2_5_omni_token2wav import 
 
 logger = logging.getLogger(__name__)
 
-# Default HF repo holding the weight_norm-folded BigVGAN. The fold is a
-# math-preserving collapse of ``weight_g``/``weight_v`` into ``weight``;
-# audio outputs match the original to float32 epsilon. See the conversion
-# script in tools/ for how to regenerate.
+# weight_norm-folded checkpoint: weight_g/weight_v collapsed into weight at
+# rest, math-preserving (audio matches original to float32 epsilon).
 DEFAULT_HF_REPO = "zhangj1an/kimi-audio-bigvgan-hf"
 
 

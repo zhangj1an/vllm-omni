@@ -190,9 +190,9 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         return self.model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # code2wav stage loads its own checkpoints from
-        # <model_path>/{vocoder,audio_detokenizer}/ directly, so it consumes
-        # and ignores anything routed through here.
+        # code2wav loads its detokenizer/vocoder out-of-band (audio_detokenizer
+        # from <model_path>/, BigVGAN from a separate HF repo) and ignores
+        # anything routed through here.
         loaded: set[str] = set()
         sub_loaded = self.model.load_weights(weights)
         prefix = self.model_stage

@@ -89,18 +89,11 @@ class KimiAudioCudaGraphDecoderWrapper:
         torch.cuda.synchronize(device)
 
         for size in self.capture_sizes:
-            try:
-                self._capture(size, device, dtype)
-                logger.info("  Captured KimiAudio vocoder graph size=%d", size)
-            except Exception:
-                logger.warning("  Failed to capture vocoder graph size=%d", size, exc_info=True)
+            self._capture(size, device, dtype)
+            logger.info("  Captured KimiAudio vocoder graph size=%d", size)
 
         self._warmed_up = True
-        logger.info(
-            "KimiAudio CUDA Graph warmup complete: %d/%d captured",
-            len(self.graphs),
-            len(self.capture_sizes),
-        )
+        logger.info("KimiAudio CUDA Graph warmup complete: %d sizes captured", len(self.graphs))
 
     def _capture(self, size: int, device: torch.device, dtype: torch.dtype) -> None:
         static_input = torch.zeros(size, _NUM_MELS, dtype=dtype, device=device)

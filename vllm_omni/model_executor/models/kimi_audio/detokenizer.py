@@ -34,7 +34,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
     @classmethod
     def from_pretrained(
         cls,
-        model_path,
         fm_config,
         fm_ckpt,
         device,
@@ -141,7 +140,6 @@ class PrefixStreamingFlowMatchingDetokenizer:
 
                 hamming_window = self.hamming_window_cache[gen_speech_len]
 
-                # Apply smoothing to the first half chunk.
                 reconstructed_wav[:, : int(gen_speech_len // 2)] = (
                     self.pre_wav[:, : int(gen_speech_len // 2)] * hamming_window[:, -int(gen_speech_len // 2) :]
                     + reconstructed_wav[:, : int(gen_speech_len // 2)] * hamming_window[:, : int(gen_speech_len // 2)]
@@ -173,7 +171,6 @@ def get_audio_detokenizer(model_path, dtype: torch.dtype = torch.bfloat16):
 
     device = torch.cuda.current_device()
     detokenizer = PrefixStreamingFlowMatchingDetokenizer.from_pretrained(
-        model_path=model_path,
         max_prompt_chunk=10,  # 10 * 3 = 30s
         fm_config=fm_model_config,
         fm_ckpt=fm_ckpt_path,

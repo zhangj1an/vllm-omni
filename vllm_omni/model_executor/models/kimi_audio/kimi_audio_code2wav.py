@@ -91,18 +91,13 @@ class KimiAudioCode2Wav(nn.Module):
         vocoder = self._detokenizer.vocoder
 
         wrapper = KimiAudioCudaGraphDecoderWrapper(vocoder=vocoder, enabled=True)
-        try:
-            wrapper.warmup(
-                device=torch.device(f"cuda:{torch.cuda.current_device()}"),
-                dtype=self._detokenizer.dtype,
-                codec_chunk_frames=codec_chunk_frames,
-                codec_left_context_frames=codec_left,
-            )
-        except Exception:
-            logger.warning("KimiAudioCode2Wav: CUDA Graph warmup failed; falling back to eager", exc_info=True)
-            return
+        wrapper.warmup(
+            device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+            dtype=self._detokenizer.dtype,
+            codec_chunk_frames=codec_chunk_frames,
+            codec_left_context_frames=codec_left,
+        )
 
-        # Stash original so callers can still reach the eager path.
         self._original_decode_mel = vocoder.decode_mel
         vocoder.decode_mel = wrapper.decode_mel
         self._cuda_graph_wrapper = wrapper

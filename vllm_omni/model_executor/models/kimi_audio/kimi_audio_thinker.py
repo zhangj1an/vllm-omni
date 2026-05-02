@@ -33,8 +33,6 @@ from vllm_omni.model_executor.models.output_templates import OmniOutput
 logger = init_logger(__name__)
 
 # Token IDs for Kimi-Audio special tokens (from the shipped tokenizer_config).
-# Keeping these as module-level constants to avoid per-forward config lookup.
-# See also /root/dump_reference_paired_streams.py for the validation script.
 _KIMIA_MSG_END = 151645  # <|im_msg_end|>
 _KIMIA_MEDIA_BEGIN = 151661  # <|im_media_begin|>
 _KIMIA_MEDIA_END = 151663  # <|im_media_end|>
@@ -153,23 +151,17 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
                 f"kimi_audio_thinker.py."
             )
 
-        # Used by ``_load_whisper_subbundle`` to locate the subbundle.
         self.model_path = vllm_config.model_config.model
 
         self._generate_audio = bool(getattr(config, "kimia_generate_audio", False))
 
-        # Reference uses 6 for kimi-audio-7b. Pull from config so finetunes
-        # with a different lag keep working.
+        # kimi-audio-7b uses 6; finetunes may differ.
         self._audio_delay = int(getattr(config, "kimia_mimo_audiodelaytokens", 6))
 
-        # Audio sampling knobs. Reference defaults (kimia README) are
-        # temp=0.8, top_k=10. Allow HF config override via ``hf_overrides``.
+        # Defaults match the kimia README. Override via ``hf_overrides``.
         self._audio_temperature = float(getattr(config, "kimia_audio_temperature", 0.8))
         self._audio_top_k = int(getattr(config, "kimia_audio_top_k", 10))
 
-        # Per-request state for the dual-stream feedback loop. Assumes
-        # batch_size=1 (single request in flight). Multi-request support
-        # would key this by request id (from the vLLM runner).
         self._req_state: dict[str, Any] = self._fresh_req_state()
 
         if self._generate_audio:
@@ -230,15 +222,6 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         else:
             self._mimo_capture_slot[0] = output[0] if isinstance(output, tuple) else output
 
-    # ------------------------------------------------------------------
-    # Dual-stream embedding. vLLM hands us a single ``input_ids`` tensor;
-    # the real Kimi-Audio model wants paired (audio_stream, text_stream)
-    # tensors and sums their embeddings. The split rule mirrors
-    # ``prompt_manager.tokenize_message`` — audio-stream control tokens
-    # stay on the audio stream, everything else on the text stream, and
-    # the "other" stream always carries ``kimia_text_blank`` at that
-    # position.
-    # ------------------------------------------------------------------
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -246,12 +229,15 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """vLLM hands a single ``input_ids`` tensor; Kimi-Audio is
+        dual-stream (audio + text) and sums the two embeddings. Split rule
+        mirrors ``prompt_manager.tokenize_message``: audio-control tokens go
+        to the audio stream, everything else to the text stream, and the
+        "other" stream carries ``kimia_text_blank`` at that position."""
         embed_tokens = self.language_model.model.embed_tokens
 
-        # Is this a prefill call? Prefill prompts contain the role marker
-        # (kimia_user_msg_start), which can't appear in autoregressive decode
-        # input_ids. Using membership in the audio-stream control set is a
-        # reliable prefill signal at batch_size=1.
+        # Prefill detection at batch_size=1: prefill prompts contain the
+        # role marker (kimia_user_msg_start) which can't appear in decode.
         is_prefill = bool(self._contains_any(input_ids, _AUDIO_STREAM_TOKENS))
 
         if is_prefill:
@@ -329,15 +315,9 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
             audio_tok = int(last_audio)
         audio_ids = torch.full_like(input_ids, audio_tok)
 
-        # Text stream: pass vLLM's sampled token through, unless the text
-        # stream has ALREADY emitted kimia_text_eos on a PRIOR step —
-        # then pad with blanks. Critical off-by-one: reference's
-        # _generate_loop passes kimia_text_eos THROUGH the iteration on
-        # which it's first observed, and only substitutes blanks on
-        # subsequent iterations (verified against
-        # /root/output/ref_audio_tokens.json step 9 where text_in=151667).
-        # Replacing on the same step we latch causes the MIMO branch to
-        # permanently diverge starting one decode step later.
+        # Off-by-one: pass kimia_text_eos through on the step it's first
+        # observed; substitute blanks only on subsequent steps. Replacing
+        # on the same step we latch causes the MIMO branch to diverge.
         if state["text_eos_seen"]:
             text_ids = torch.full_like(input_ids, _KIMIA_TEXT_BLANK)
         else:
@@ -347,11 +327,6 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
 
         return audio_ids, text_ids
 
-    # ------------------------------------------------------------------
-    # Forward: runs the base LLM, captures layer-21 hidden states via the
-    # forward hook, then runs the MIMO branch and samples the audio head
-    # at the vLLM-provided ``logits_index`` positions.
-    # ------------------------------------------------------------------
     def forward(
         self,
         input_ids: torch.Tensor | None = None,
@@ -364,10 +339,8 @@ class KimiAudioFusedThinker(_UpstreamKimiAudio):
             # Clear stale capture before the hook fires inside super().forward.
             self._mimo_capture_slot[0] = None
 
-        # super().forward passes through to the ASR-only upstream model.
-        # It only accepts input_ids/positions/inputs_embeds/intermediate_tensors —
-        # drop any extra model-runner kwargs (logits_index, sampler, etc.)
-        # so the upstream positional call stays well-formed.
+        # Drop runner-only kwargs (logits_index, sampler, ...) — the
+        # upstream ASR-only forward takes only input_ids/positions/etc.
         text_hidden = super().forward(
             input_ids=input_ids,
             positions=positions,
