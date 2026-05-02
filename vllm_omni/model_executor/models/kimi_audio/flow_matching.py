@@ -264,9 +264,7 @@ class DiTPrefix(nn.Module):
             if max_seq_len < rope_params["max_position_embeddings"]:
                 self.rotary_pos_emb = self.rotary_pos_emb[:max_seq_len].clone()
 
-        self.blocks = nn.ModuleList(
-            [DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)]
-        )
+        self.blocks = nn.ModuleList([DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)])
         self.final_layer = FinalLayer(hidden_size, output_size)
         self.initialize_weights()
 
