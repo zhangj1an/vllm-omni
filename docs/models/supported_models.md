@@ -67,5 +67,6 @@ th {
 | `VoxtralTTSForConditionalGeneration` | Voxtral TTS | `mistralai/Voxtral-4B-TTS-2603` | ✅︎ | ✅︎ | | |
 |`DyninOmniForConditionalGeneration` | Dynin-Omni | `snu-aidas/Dynin-Omni` | ✅︎ | | | |
 | `KimiAudioForConditionalGeneration` | Kimi-Audio | `moonshotai/Kimi-Audio-7B-Instruct` | ✅︎ | | | |
+| `ErnieImagePipeline` | ERNIE-Image | `baidu/ERNIE-Image`, `baidu/ERNIE-Image-Turbo` | ✅︎ | ✅︎ | ✅︎ | ✅︎ |
 
 ✅︎ indicates the model is supported on that backend. Empty cells mean not listed as supported on that backend.
