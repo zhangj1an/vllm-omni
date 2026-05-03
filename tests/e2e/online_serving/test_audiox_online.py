@@ -16,7 +16,7 @@ from tests.helpers.mark import hardware_marks
 from tests.helpers.runtime import OmniServer, OmniServerParams, OpenAIClientHandler, dummy_messages_from_mix_data
 
 # Tiny / random checkpoint usable in CI; override to a real bundle locally.
-AUDIOX_TEST_MODEL = os.environ.get("AUDIOX_TEST_MODEL", "linyueqian/audiox_random")
+AUDIOX_TEST_MODEL = os.environ.get("AUDIOX_TEST_MODEL", "zhangj1an/audiox_random")
 T2A_PROMPT = "A quiet living room with soft fabric rustle and gentle cat breathing."
 
 SINGLE_CARD_FEATURE_MARKS = hardware_marks(res={"cuda": "L4"})

@@ -23,7 +23,7 @@ from vllm_omni import Omni
 
 # Prefer a tiny/random checkpoint for CI.
 # Override in CI if needed: AUDIOX_TEST_MODEL=<model-or-local-path>
-models = [os.environ.get("AUDIOX_TEST_MODEL", "linyueqian/audiox_random")]
+models = [os.environ.get("AUDIOX_TEST_MODEL", "zhangj1an/audiox_random")]
 
 
 @pytest.mark.core_model

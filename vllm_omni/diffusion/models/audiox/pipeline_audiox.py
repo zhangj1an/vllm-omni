@@ -381,7 +381,12 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
                 "see https://huggingface.co/zhangj1an/AudioX)."
             )
 
-        self._model_root = os.path.abspath(od_config.model)
+        if os.path.exists(od_config.model):
+            self._model_root = os.path.abspath(od_config.model)
+        else:
+            from vllm_omni.model_executor.model_loader.weight_utils import download_weights_from_hf_specific
+
+            self._model_root = download_weights_from_hf_specific(od_config.model, None, ["*"])
         self._model_config = _load_audiox_bundle_config(self._model_root)
 
         model_config = self._model_config["model"]
