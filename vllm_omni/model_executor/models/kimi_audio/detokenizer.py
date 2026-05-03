@@ -166,6 +166,14 @@ class PrefixStreamingFlowMatchingDetokenizer:
 
 
 def get_audio_detokenizer(model_path, dtype: torch.dtype = torch.bfloat16):
+    if not os.path.exists(model_path):
+        # HF Hub repo id — fetch the audio_detokenizer subdir into the cache.
+        from huggingface_hub import snapshot_download
+
+        model_path = snapshot_download(
+            repo_id=model_path,
+            allow_patterns=["audio_detokenizer/*"],
+        )
     fm_model_config = os.path.join(model_path, "audio_detokenizer", "config.yaml")
     fm_ckpt_path = os.path.join(model_path, "audio_detokenizer", "model.pt")
 
