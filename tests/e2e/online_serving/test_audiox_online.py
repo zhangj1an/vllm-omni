@@ -12,13 +12,8 @@ import os
 
 import pytest
 
-from tests.conftest import (
-    OmniServer,
-    OmniServerParams,
-    OpenAIClientHandler,
-    dummy_messages_from_mix_data,
-)
-from tests.utils import hardware_marks
+from tests.helpers.mark import hardware_marks
+from tests.helpers.runtime import OmniServer, OmniServerParams, OpenAIClientHandler, dummy_messages_from_mix_data
 
 # Tiny / random checkpoint usable in CI; override to a real bundle locally.
 AUDIOX_TEST_MODEL = os.environ.get("AUDIOX_TEST_MODEL", "linyueqian/audiox_random")

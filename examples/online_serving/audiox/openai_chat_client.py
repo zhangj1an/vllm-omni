@@ -69,8 +69,8 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--seconds-total", type=float, default=10.0)
     p.add_argument("--seconds-start", type=float, default=0.0)
-    p.add_argument("--sigma-min", type=float, default=0.3)
-    p.add_argument("--sigma-max", type=float, default=500.0)
+    p.add_argument("--sigma-min", type=float, default=0.03)
+    p.add_argument("--sigma-max", type=float, default=1000.0)
     args = p.parse_args()
 
     if args.task in VIDEO_TASKS and not args.video:

@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from tests.utils import hardware_test
+from tests.helpers.mark import hardware_test
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.outputs import OmniRequestOutput
 from vllm_omni.platforms import current_omni_platform
@@ -35,7 +35,9 @@ def test_audiox_model(model_name: str):
 
     # Keep runtime short for CI.
     seconds_total = 2.0
-    sample_rate = 48000
+    # AudioXPipeline always emits 44.1 kHz stereo (advertised via class-level
+    # ``audio_sample_rate``); the trimmed output should match this rate.
+    sample_rate = 44100
 
     outputs = m.generate(
         prompts={"prompt": "A dog barking in a quiet park."},
@@ -54,7 +56,10 @@ def test_audiox_model(model_name: str):
 
     assert outputs is not None
     first_output = outputs[0]
-    assert first_output.final_output_type == "image"
+    # AudioXPipeline is special-cased in async_omni_engine._create_default_diffusion_stage_cfg
+    # so the outer stage metadata final_output_type is "audio" (unlike StableAudio which falls
+    # through to the "image" default).
+    assert first_output.final_output_type == "audio"
     assert hasattr(first_output, "request_output") and first_output.request_output
 
     req_out = first_output.request_output

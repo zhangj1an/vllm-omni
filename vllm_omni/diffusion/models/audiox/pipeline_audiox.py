@@ -3,27 +3,19 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import math
 import os
-import tempfile
 from collections.abc import Iterable
 from typing import Any, ClassVar
-from urllib.parse import urlparse
-from urllib.request import urlopen
 
-import numpy as np
-import soundfile
 import torch
 import torch.nn.functional as F
-import torchaudio.functional as taF
 import torchsde
 from diffusers import AutoencoderOobleck
 from einops import rearrange
 from torch import einsum, nn
 from torchvision import transforms
-from torchvision.io import read_image, read_video
 from transformers import AutoConfig, CLIPVisionModelWithProjection, T5EncoderModel, T5TokenizerFast
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import AutoWeightsLoader
@@ -36,14 +28,19 @@ from vllm_omni.diffusion.models.audiox.audiox_transformer import MMDiffusionTran
 from vllm_omni.diffusion.models.interface import SupportAudioOutput
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.transformers_utils.processors import audiox as _audiox_transforms
 
-_VIDEO_ONLY_TASKS = frozenset({"v2a", "v2m"})
-_TEXT_VIDEO_TASKS = frozenset({"tv2a", "tv2m"})
-_VIDEO_CONDITIONED_TASKS = _VIDEO_ONLY_TASKS | _TEXT_VIDEO_TASKS
+_VIDEO_ONLY_TASKS = _audiox_transforms.VIDEO_ONLY_TASKS
+_TEXT_VIDEO_TASKS = _audiox_transforms.TEXT_VIDEO_TASKS
+_VIDEO_CONDITIONED_TASKS = _audiox_transforms.VIDEO_CONDITIONED_TASKS
+_normalize_prompts = _audiox_transforms.normalize_prompts
+prepare_audio_reference = _audiox_transforms.prepare_audio_reference
+prepare_video_reference = _audiox_transforms.prepare_video_reference
 
-# Polyexponential sigma schedule defaults; match upstream AudioX sample scripts (``sigma_min=0.3``, ``sigma_max=500``).
-_DEFAULT_UPSTREAM_SIGMA_MIN = 0.3
-_DEFAULT_UPSTREAM_SIGMA_MAX = 500.0
+# Polyexponential sigma schedule defaults; mirror upstream AudioX gradio interface
+# (``audiox/interface/gradio.py`` ``generate_cond`` defaults: ``sigma_min=0.03``, ``sigma_max=1000``).
+_DEFAULT_UPSTREAM_SIGMA_MIN = 0.03
+_DEFAULT_UPSTREAM_SIGMA_MAX = 1000.0
 
 logger = init_logger(__name__)
 
@@ -59,174 +56,19 @@ def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int:
     return int(cfg["latent_seq_len"]) * int(cfg["pretransform_config"]["config"]["downsampling_ratio"])
 
 
-def _normalize_prompt_item(raw: Any, index: int) -> dict[str, Any]:
-    if isinstance(raw, str):
-        p: dict[str, Any] = {"prompt": raw.strip()}
-    elif isinstance(raw, dict):
-        p = dict(raw)
-        p["prompt"] = str(p.get("prompt") or "").strip()
-    else:
-        raise TypeError(f"AudioX prompt {index} must be str or dict, got {type(raw)!r}")
-    return p
+def get_audiox_post_process_func(od_config: OmniDiffusionConfig):
+    """Convert the pipeline's float audio tensor to a CPU numpy array for serving.
 
-
-def _normalize_prompts(prompts: list[Any]) -> list[dict[str, Any]]:
-    return [_normalize_prompt_item(raw, i) for i, raw in enumerate(prompts)]
-
-
-_IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png"})
-
-
-def _materialize_media_source(source: str) -> str:
-    """Return a local filesystem path for ``source``.
-
-    Accepts: a local path, a ``data:<mime>;base64,...`` URI (inline payload), or an
-    ``http(s)://`` URL. Anything non-local is fetched into a NamedTemporaryFile and that
-    path is returned; callers don't need to clean the tempfile up (the OS does on exit).
+    Test/CI assert ``isinstance(multimodal_output["audio"], np.ndarray)``; without this,
+    the raw torch tensor flows through ``DiffusionEngine`` unchanged.
     """
-    if source.startswith("data:"):
-        _, _, payload = source.partition(",")
-        raw = base64.b64decode(payload)
-        f = tempfile.NamedTemporaryFile(prefix="audiox_media_", suffix=".bin", delete=False)
-        f.write(raw)
-        f.close()
-        return f.name
-    parsed = urlparse(source)
-    if parsed.scheme in ("http", "https"):
-        with urlopen(source) as resp:
-            data = resp.read()
-        f = tempfile.NamedTemporaryFile(prefix="audiox_media_", suffix=".bin", delete=False)
-        f.write(data)
-        f.close()
-        return f.name
-    return source
 
+    def post_process_func(audio: torch.Tensor) -> Any:
+        if isinstance(audio, torch.Tensor):
+            return audio.detach().cpu().float().numpy()
+        return audio
 
-def _load_video_path_torchvision(
-    path: str,
-    *,
-    target_fps: int,
-    duration: float,
-    seek_time: float,
-) -> torch.Tensor:
-    path = _materialize_media_source(path)
-    end_pts = float(seek_time) + float(duration) if duration > 0 else None
-    video, _, info = read_video(path, start_pts=float(seek_time), end_pts=end_pts, pts_unit="sec", output_format="TCHW")
-    if video.shape[0] == 0:
-        raise ValueError(f"No frames in range seek_time={seek_time!r}, duration={duration!r} for {path!r}")
-    src_fps = float(info.get("video_fps") or target_fps)
-    n_target = max(1, int(round(video.shape[0] * float(target_fps) / src_fps)))
-    if n_target >= video.shape[0]:
-        return video
-    indices = torch.linspace(0, video.shape[0] - 1, n_target).round().long()
-    return video[indices]
-
-
-def load_video_source(
-    source: Any,
-    *,
-    target_fps: int,
-    duration: float,
-    seek_time: float = 0.0,
-) -> torch.Tensor:
-    if isinstance(source, str):
-        ext = os.path.splitext(source)[1].lower()
-        if ext in _IMAGE_EXTS:
-            return read_image(_materialize_media_source(source)).unsqueeze(0)
-        return _load_video_path_torchvision(
-            source,
-            target_fps=target_fps,
-            duration=duration,
-            seek_time=seek_time,
-        )
-
-    if isinstance(source, torch.Tensor):
-        return source
-    if isinstance(source, np.ndarray):
-        return torch.from_numpy(source)
-    raise TypeError(f"Unsupported video source type: {type(source)!r}")
-
-
-def normalize_video_tensor(frames: torch.Tensor, size: int = 224) -> torch.Tensor:
-    if frames.dim() != 4:
-        raise ValueError(f"Expected [T, C, H, W], got {tuple(frames.shape)}")
-
-    frames = frames.float()
-    if frames.max() > 1.5:
-        frames = frames / 255.0
-
-    if frames.shape[-2:] != (size, size):
-        frames = F.interpolate(frames, size=(size, size), mode="bicubic", align_corners=False)
-    return frames
-
-
-def adjust_video_duration(frames: torch.Tensor, duration: float, target_fps: int) -> torch.Tensor:
-    target_t = int(duration * target_fps)
-    cur_t = frames.shape[0]
-
-    if cur_t > target_t:
-        return frames[:target_t]
-    if cur_t < target_t:
-        last = frames[-1:].repeat(target_t - cur_t, 1, 1, 1)
-        return torch.cat([frames, last], dim=0)
-    return frames
-
-
-def prepare_video_reference(
-    source: Any,
-    *,
-    duration: float,
-    target_fps: int,
-    seek_time: float = 0.0,
-) -> torch.Tensor:
-    frames = load_video_source(
-        source,
-        target_fps=target_fps,
-        duration=duration,
-        seek_time=seek_time,
-    )
-
-    if frames.dim() == 4 and frames.shape[-1] == 3:
-        frames = rearrange(frames, "t h w c -> t c h w")
-
-    frames = normalize_video_tensor(frames, size=224)
-    if duration > 0:
-        frames = adjust_video_duration(frames, duration, target_fps)
-    return frames
-
-
-def prepare_audio_reference(
-    source: Any,
-    *,
-    model_sample_rate: int,
-    seconds_start: float,
-    seconds_total: float,
-    device: torch.device,
-) -> torch.Tensor:
-    target_len = int(model_sample_rate * seconds_total)
-    start = int(model_sample_rate * seconds_start)
-    if isinstance(source, str):
-        data, sr = soundfile.read(_materialize_media_source(source), dtype="float32", always_2d=True)
-        # soundfile returns channels-last (T, C); project convention is (C, T).
-        wav = torch.from_numpy(data).transpose(0, 1).contiguous()
-        if sr != model_sample_rate:
-            wav = taF.resample(wav, sr, model_sample_rate)
-    elif isinstance(source, torch.Tensor):
-        wav = source.float()
-    elif isinstance(source, np.ndarray):
-        wav = torch.from_numpy(source).float()
-    else:
-        raise TypeError(f"Unsupported audio source type: {type(source)!r}")
-    if wav.dim() == 1:
-        wav = wav.unsqueeze(0)
-    if wav.shape[0] == 1:
-        wav = wav.repeat(2, 1)
-    elif wav.shape[0] > 2:
-        wav = wav[:2]
-    wav = wav[:, start : start + target_len]
-    if wav.shape[1] < target_len:
-        wav = F.pad(wav, (target_len - wav.shape[1], 0))
-    return wav.to(device=device, dtype=torch.float32)
+    return post_process_func
 
 
 class SA_PreNorm(nn.Module):
@@ -1032,6 +874,9 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
         seconds_start = float(extra_args.get("seconds_start", 0.0))
         seconds_model = self._sample_size / self._sample_rate
+        # Upstream AudioX always denoises a fixed-size latent (sample_size / sample_rate seconds);
+        # ``seconds_total`` is honored by trimming the decoded audio to the requested duration.
+        seconds_total = float(extra_args.get("seconds_total", seconds_model))
         sigma_min = float(extra_args.get("sigma_min", _DEFAULT_UPSTREAM_SIGMA_MIN))
         sigma_max = float(extra_args.get("sigma_max", _DEFAULT_UPSTREAM_SIGMA_MAX))
         cfg_rescale = float(extra_args.get("cfg_rescale", 0.0))
@@ -1101,6 +946,11 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
             generator=generator,
             cfg_rescale=cfg_rescale,
         )
+
+        # Trim decoded audio to the requested duration (matches upstream AudioX sample script).
+        if 0.0 < seconds_total < seconds_model:
+            target_samples = int(seconds_total * self._sample_rate)
+            audio = audio[..., :target_samples]
 
         return DiffusionOutput(
             output=audio,
