@@ -54,9 +54,12 @@ class AudioXCrossAttention(nn.Module):
         local_h = self.nheads // tp
         d = self.head_dim
 
-        q_flat, _ = self.to_q(x)
+        # ROCm's ``wvSplitK`` GEMM bypasses autocast and rejects mismatched dtypes,
+        # so pre-match the input to the linear's weight dtype.
+        weight_dtype = self.to_q.weight.dtype
+        q_flat, _ = self.to_q(x.to(weight_dtype))
         q = rearrange(q_flat, "b n (h d) -> b n h d", h=local_h, d=d)
-        kv_flat, _ = self.to_kv(context)
+        kv_flat, _ = self.to_kv(context.to(weight_dtype))
         v_flat, k_flat = kv_flat.chunk(2, dim=-1)
         # Upstream `CrossAttention.forward` unpacks `pre_attention()` as `q, v, k = ...` (K/V
         # swapped), AND only normalizes the first chunk of to_kv via k_norm. Trained weights
@@ -189,7 +192,8 @@ class AudioXMMDiTSelfAttention(nn.Module):
         return out
 
     def pre_attention(self, x: torch.Tensor, rot: tuple[torch.Tensor, torch.Tensor] | None = None):
-        qkv, _ = self.qkv(x)
+        # ROCm GEMM dtype cast — see AudioXCrossAttention.forward.
+        qkv, _ = self.qkv(x.to(self.qkv.weight.dtype))
         local_h = self.qkv.num_heads
         d = self.head_dim
         q_size = local_h * d
