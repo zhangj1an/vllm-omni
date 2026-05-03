@@ -1,0 +1,426 @@
+# HV-1.5 real shape (480x832 33f, 14296 tokens) — sm_120 with FlashInfer enabled
+========================================================================
+GPU           : NVIDIA RTX PRO 6000 Blackwell Server Edition
+SM capability : sm_120
+torch         : 2.11.0+cu130
+cuDNN version : 91900
+flashinfer    : 0.6.8.post1
+========================================================================
+dtype         : bf16
+
+========================================================================================
+Preset: hv15  |  batch=1 heads=16 seq=14296 head_dim=128
+========================================================================================
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory efficient kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:986.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory Efficient attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:552.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:988.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash Attention does not support non-null attn_mask. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:262.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:990.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:706.)
+  return torch.nn.functional.scaled_dot_product_attention(
+
+[hv15] No attention mask
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   4.717           1.00x    ok
+FLASH_ATTENTION                   4.806           0.98x    ok
+EFFICIENT_ATTENTION              13.213           0.36x    ok
+MATH                             90.953           0.05x    ok
+CUDNN_ATTN_CHAIN                  4.805           0.98x    ok
+FLASHINFER (default)              4.417           1.07x    ok
+FLASHINFER (fa2)                  4.415           1.07x    ok
+FLASHINFER (fa3)                    n/a               —    FAILED (RuntimeError: Check failed: (status == cudaSuccess) is false: single_prefi)
+FLASHINFER (cutlass)                n/a               —    FAILED (ValueError: Invalid backend: cutlass)
+FLASHINFER (auto)                 4.681           1.01x    ok
+FLASHINFER (cudnn-batch)            n/a               —    FAILED (TypeError: cudnn_batch_prefill_with_kv_cache() got an unexpected keywor)
+FA4 (direct)                        n/a               —    FAILED (import-ModuleNotFoundError)
+
+[hv15] With attention mask (pad 256 tokens)
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   6.205           1.00x    ok
+FLASH_ATTENTION                     n/a               —    FAILED (RuntimeError: No available kernel. Aborting execution.)
+EFFICIENT_ATTENTION              16.626           0.37x    ok
+MATH                            112.774           0.06x    ok
+CUDNN_ATTN_CHAIN                112.689           0.06x    ok
+FLASHINFER (dense)               11.406           0.54x    ok
+FA4 (direct)                        n/a               —    FAILED (mask-not-supported)
+
+Notes:
+  * Ratios are relative to CUDNN_ATTENTION. >1.0x means faster than cuDNN.
+  * Mask-path winner inherits CUDNN_ATTN's fallback in the PR's backends.
+  * `trtllm-gen` and FA4 4.0.0b10 are known-broken on sm_120 as of Apr 2026.
+  * For e2e timings run benchmarks/diffusion/bench_e2e_attention.sh.
+
+# Wan 2.2 self-attn (14040 tokens, H=40)
+========================================================================
+GPU           : NVIDIA RTX PRO 6000 Blackwell Server Edition
+SM capability : sm_120
+torch         : 2.11.0+cu130
+cuDNN version : 91900
+flashinfer    : 0.6.8.post1
+========================================================================
+dtype         : bf16
+
+========================================================================================
+Preset: hv15  |  batch=1 heads=40 seq=14040 head_dim=128
+========================================================================================
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory efficient kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:986.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory Efficient attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:552.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:988.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash Attention does not support non-null attn_mask. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:262.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:990.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:706.)
+  return torch.nn.functional.scaled_dot_product_attention(
+
+[hv15] No attention mask
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                  10.531           1.00x    ok
+FLASH_ATTENTION                  11.287           0.93x    ok
+EFFICIENT_ATTENTION              29.904           0.35x    ok
+MATH                            219.943           0.05x    ok
+CUDNN_ATTN_CHAIN                 11.281           0.93x    ok
+FLASHINFER (default)             10.314           1.02x    ok
+FLASHINFER (fa2)                 10.798           0.98x    ok
+FLASHINFER (fa3)                    n/a               —    FAILED (RuntimeError: Check failed: (status == cudaSuccess) is false: single_prefi)
+FLASHINFER (cutlass)                n/a               —    FAILED (ValueError: Invalid backend: cutlass)
+FLASHINFER (auto)                10.359           1.02x    ok
+FLASHINFER (cudnn-batch)            n/a               —    FAILED (TypeError: cudnn_batch_prefill_with_kv_cache() got an unexpected keywor)
+FA4 (direct)                        n/a               —    FAILED (import-ModuleNotFoundError)
+
+[hv15] With attention mask (pad 256 tokens)
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                  15.294           1.00x    ok
+FLASH_ATTENTION                     n/a               —    FAILED (RuntimeError: No available kernel. Aborting execution.)
+EFFICIENT_ATTENTION              38.401           0.40x    ok
+MATH                            271.884           0.06x    ok
+CUDNN_ATTN_CHAIN                271.937           0.06x    ok
+FLASHINFER (dense)               25.361           0.60x    ok
+FA4 (direct)                        n/a               —    FAILED (mask-not-supported)
+
+Notes:
+  * Ratios are relative to CUDNN_ATTENTION. >1.0x means faster than cuDNN.
+  * Mask-path winner inherits CUDNN_ATTN's fallback in the PR's backends.
+  * `trtllm-gen` and FA4 4.0.0b10 are known-broken on sm_120 as of Apr 2026.
+  * For e2e timings run benchmarks/diffusion/bench_e2e_attention.sh.
+
+# FLUX.2 single-stream full H=48 (4608 tokens)
+========================================================================
+GPU           : NVIDIA RTX PRO 6000 Blackwell Server Edition
+SM capability : sm_120
+torch         : 2.11.0+cu130
+cuDNN version : 91900
+flashinfer    : 0.6.8.post1
+========================================================================
+dtype         : bf16
+
+========================================================================================
+Preset: hv15  |  batch=1 heads=48 seq=4608 head_dim=128
+========================================================================================
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory efficient kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:986.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory Efficient attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:552.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:988.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash Attention does not support non-null attn_mask. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:262.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:990.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:706.)
+  return torch.nn.functional.scaled_dot_product_attention(
+
+[hv15] No attention mask
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   1.463           1.00x    ok
+FLASH_ATTENTION                   1.648           0.89x    ok
+EFFICIENT_ATTENTION               4.019           0.36x    ok
+MATH                             29.900           0.05x    ok
+CUDNN_ATTN_CHAIN                  1.650           0.89x    ok
+FLASHINFER (default)              1.470           1.00x    ok
+FLASHINFER (fa2)                  1.474           0.99x    ok
+FLASHINFER (fa3)                    n/a               —    FAILED (RuntimeError: Check failed: (status == cudaSuccess) is false: single_prefi)
+FLASHINFER (cutlass)                n/a               —    FAILED (ValueError: Invalid backend: cutlass)
+FLASHINFER (auto)                 1.569           0.93x    ok
+FLASHINFER (cudnn-batch)            n/a               —    FAILED (TypeError: cudnn_batch_prefill_with_kv_cache() got an unexpected keywor)
+FA4 (direct)                        n/a               —    FAILED (import-ModuleNotFoundError)
+
+[hv15] With attention mask (pad 256 tokens)
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   1.908           1.00x    ok
+FLASH_ATTENTION                     n/a               —    FAILED (RuntimeError: No available kernel. Aborting execution.)
+EFFICIENT_ATTENTION               5.196           0.37x    ok
+MATH                             36.293           0.05x    ok
+CUDNN_ATTN_CHAIN                 36.324           0.05x    ok
+FLASHINFER (dense)                3.259           0.59x    ok
+FA4 (direct)                        n/a               —    FAILED (mask-not-supported)
+
+Notes:
+  * Ratios are relative to CUDNN_ATTENTION. >1.0x means faster than cuDNN.
+  * Mask-path winner inherits CUDNN_ATTN's fallback in the PR's backends.
+  * `trtllm-gen` and FA4 4.0.0b10 are known-broken on sm_120 as of Apr 2026.
+  * For e2e timings run benchmarks/diffusion/bench_e2e_attention.sh.
+
+# FLUX.2 TP=2 effective per-rank H=24 (4608 tokens)
+========================================================================
+GPU           : NVIDIA RTX PRO 6000 Blackwell Server Edition
+SM capability : sm_120
+torch         : 2.11.0+cu130
+cuDNN version : 91900
+flashinfer    : 0.6.8.post1
+========================================================================
+dtype         : bf16
+
+========================================================================================
+Preset: hv15  |  batch=1 heads=24 seq=4608 head_dim=128
+========================================================================================
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory efficient kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:986.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory Efficient attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:552.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:988.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash Attention does not support non-null attn_mask. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:262.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:990.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:706.)
+  return torch.nn.functional.scaled_dot_product_attention(
+
+[hv15] No attention mask
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   0.785           1.00x    ok
+FLASH_ATTENTION                   0.850           0.92x    ok
+EFFICIENT_ATTENTION               2.095           0.37x    ok
+MATH                             14.956           0.05x    ok
+CUDNN_ATTN_CHAIN                  0.835           0.94x    ok
+FLASHINFER (default)              0.756           1.04x    ok
+FLASHINFER (fa2)                  0.752           1.04x    ok
+FLASHINFER (fa3)                    n/a               —    FAILED (RuntimeError: Check failed: (status == cudaSuccess) is false: single_prefi)
+FLASHINFER (cutlass)                n/a               —    FAILED (ValueError: Invalid backend: cutlass)
+FLASHINFER (auto)                 0.802           0.98x    ok
+FLASHINFER (cudnn-batch)            n/a               —    FAILED (TypeError: cudnn_batch_prefill_with_kv_cache() got an unexpected keywor)
+FA4 (direct)                        n/a               —    FAILED (import-ModuleNotFoundError)
+
+[hv15] With attention mask (pad 256 tokens)
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   0.927           1.00x    ok
+FLASH_ATTENTION                     n/a               —    FAILED (RuntimeError: No available kernel. Aborting execution.)
+EFFICIENT_ATTENTION               2.736           0.34x    ok
+MATH                             18.151           0.05x    ok
+CUDNN_ATTN_CHAIN                 18.144           0.05x    ok
+FLASHINFER (dense)                1.908           0.49x    ok
+FA4 (direct)                        n/a               —    FAILED (mask-not-supported)
+
+Notes:
+  * Ratios are relative to CUDNN_ATTENTION. >1.0x means faster than cuDNN.
+  * Mask-path winner inherits CUDNN_ATTN's fallback in the PR's backends.
+  * `trtllm-gen` and FA4 4.0.0b10 are known-broken on sm_120 as of Apr 2026.
+  * For e2e timings run benchmarks/diffusion/bench_e2e_attention.sh.
+
+# Z-Image-Turbo (4352 tokens, H=30)
+========================================================================
+GPU           : NVIDIA RTX PRO 6000 Blackwell Server Edition
+SM capability : sm_120
+torch         : 2.11.0+cu130
+cuDNN version : 91900
+flashinfer    : 0.6.8.post1
+========================================================================
+dtype         : bf16
+
+========================================================================================
+Preset: hv15  |  batch=1 heads=30 seq=4352 head_dim=128
+========================================================================================
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory efficient kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:986.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory Efficient attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:552.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:988.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash Attention does not support non-null attn_mask. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:262.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:990.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:706.)
+  return torch.nn.functional.scaled_dot_product_attention(
+
+[hv15] No attention mask
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   0.887           1.00x    ok
+FLASH_ATTENTION                   0.945           0.94x    ok
+EFFICIENT_ATTENTION               2.185           0.41x    ok
+MATH                             17.030           0.05x    ok
+CUDNN_ATTN_CHAIN                  0.946           0.94x    ok
+FLASHINFER (default)              0.848           1.05x    ok
+FLASHINFER (fa2)                  0.844           1.05x    ok
+FLASHINFER (fa3)                    n/a               —    FAILED (RuntimeError: Check failed: (status == cudaSuccess) is false: single_prefi)
+FLASHINFER (cutlass)                n/a               —    FAILED (ValueError: Invalid backend: cutlass)
+FLASHINFER (auto)                 0.899           0.99x    ok
+FLASHINFER (cudnn-batch)            n/a               —    FAILED (TypeError: cudnn_batch_prefill_with_kv_cache() got an unexpected keywor)
+FA4 (direct)                        n/a               —    FAILED (import-ModuleNotFoundError)
+
+[hv15] With attention mask (pad 256 tokens)
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   1.093           1.00x    ok
+FLASH_ATTENTION                     n/a               —    FAILED (RuntimeError: No available kernel. Aborting execution.)
+EFFICIENT_ATTENTION               2.868           0.38x    ok
+MATH                             20.402           0.05x    ok
+CUDNN_ATTN_CHAIN                 20.402           0.05x    ok
+FLASHINFER (dense)                1.886           0.58x    ok
+FA4 (direct)                        n/a               —    FAILED (mask-not-supported)
+
+Notes:
+  * Ratios are relative to CUDNN_ATTENTION. >1.0x means faster than cuDNN.
+  * Mask-path winner inherits CUDNN_ATTN's fallback in the PR's backends.
+  * `trtllm-gen` and FA4 4.0.0b10 are known-broken on sm_120 as of Apr 2026.
+  * For e2e timings run benchmarks/diffusion/bench_e2e_attention.sh.
+
+# LTX-2 video self-attn (5070 tokens, H=32, D=128)
+========================================================================
+GPU           : NVIDIA RTX PRO 6000 Blackwell Server Edition
+SM capability : sm_120
+torch         : 2.11.0+cu130
+cuDNN version : 91900
+flashinfer    : 0.6.8.post1
+========================================================================
+dtype         : bf16
+
+========================================================================================
+Preset: hv15  |  batch=1 heads=32 seq=5070 head_dim=128
+========================================================================================
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory efficient kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:986.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory Efficient attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:552.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:988.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash Attention does not support non-null attn_mask. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:262.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:990.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:706.)
+  return torch.nn.functional.scaled_dot_product_attention(
+
+[hv15] No attention mask
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   1.236           1.00x    ok
+FLASH_ATTENTION                   1.277           0.97x    ok
+EFFICIENT_ATTENTION               3.261           0.38x    ok
+MATH                             24.301           0.05x    ok
+CUDNN_ATTN_CHAIN                  1.249           0.99x    ok
+FLASHINFER (default)              1.164           1.06x    ok
+FLASHINFER (fa2)                  1.161           1.06x    ok
+FLASHINFER (fa3)                    n/a               —    FAILED (RuntimeError: Check failed: (status == cudaSuccess) is false: single_prefi)
+FLASHINFER (cutlass)                n/a               —    FAILED (ValueError: Invalid backend: cutlass)
+FLASHINFER (auto)                 1.173           1.05x    ok
+FLASHINFER (cudnn-batch)            n/a               —    FAILED (TypeError: cudnn_batch_prefill_with_kv_cache() got an unexpected keywor)
+FA4 (direct)                        n/a               —    FAILED (import-ModuleNotFoundError)
+
+[hv15] With attention mask (pad 256 tokens)
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   1.441           1.00x    ok
+FLASH_ATTENTION                     n/a               —    FAILED (RuntimeError: No available kernel. Aborting execution.)
+EFFICIENT_ATTENTION               4.290           0.34x    ok
+MATH                             29.849           0.05x    ok
+CUDNN_ATTN_CHAIN                 29.850           0.05x    ok
+FLASHINFER (dense)                3.070           0.47x    ok
+FA4 (direct)                        n/a               —    FAILED (mask-not-supported)
+
+Notes:
+  * Ratios are relative to CUDNN_ATTENTION. >1.0x means faster than cuDNN.
+  * Mask-path winner inherits CUDNN_ATTN's fallback in the PR's backends.
+  * `trtllm-gen` and FA4 4.0.0b10 are known-broken on sm_120 as of Apr 2026.
+  * For e2e timings run benchmarks/diffusion/bench_e2e_attention.sh.
+
+# LTX-2 audio self-attn (100 tokens, H=32, D=64)
+========================================================================
+GPU           : NVIDIA RTX PRO 6000 Blackwell Server Edition
+SM capability : sm_120
+torch         : 2.11.0+cu130
+cuDNN version : 91900
+flashinfer    : 0.6.8.post1
+========================================================================
+dtype         : bf16
+
+========================================================================================
+Preset: hv15  |  batch=1 heads=32 seq=100 head_dim=64
+========================================================================================
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory efficient kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:986.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Memory Efficient attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:552.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:988.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: Flash Attention does not support non-null attn_mask. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:262.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention kernel not used because: (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:990.)
+  return torch.nn.functional.scaled_dot_product_attention(
+/root/vllm-omni/benchmarks/diffusion/bench_attention_backends.py:125: UserWarning: cuDNN attention has been runtime disabled. (Triggered internally at /pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:706.)
+  return torch.nn.functional.scaled_dot_product_attention(
+
+[hv15] No attention mask
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   0.026           1.00x    ok
+FLASH_ATTENTION                   0.023           1.16x    ok
+EFFICIENT_ATTENTION               0.022           1.18x    ok
+MATH                              0.083           0.32x    ok
+CUDNN_ATTN_CHAIN                  0.024           1.09x    ok
+FLASHINFER (default)              0.024           1.10x    ok
+FLASHINFER (fa2)                  0.023           1.17x    ok
+FLASHINFER (fa3)                    n/a               —    FAILED (RuntimeError: Check failed: (status == cudaSuccess) is false: single_prefi)
+FLASHINFER (cutlass)                n/a               —    FAILED (ValueError: Invalid backend: cutlass)
+FLASHINFER (auto)                 0.024           1.09x    ok
+FLASHINFER (cudnn-batch)            n/a               —    FAILED (TypeError: cudnn_batch_prefill_with_kv_cache() got an unexpected keywor)
+FA4 (direct)                        n/a               —    FAILED (import-ModuleNotFoundError)
+
+[hv15] With attention mask (pad 256 tokens)
+----------------------------------------------------------------------------------------
+backend                     median (ms)     vs baseline    status
+----------------------------------------------------------------------------------------
+CUDNN_ATTENTION                   0.033           1.00x    ok
+FLASH_ATTENTION                     n/a               —    FAILED (RuntimeError: No available kernel. Aborting execution.)
+EFFICIENT_ATTENTION               0.034           0.97x    ok
+MATH                              0.085           0.39x    ok
+CUDNN_ATTN_CHAIN                  0.085           0.39x    ok
+FLASHINFER (dense)                0.036           0.92x    ok
+FA4 (direct)                        n/a               —    FAILED (mask-not-supported)
+
+Notes:
+  * Ratios are relative to CUDNN_ATTENTION. >1.0x means faster than cuDNN.
+  * Mask-path winner inherits CUDNN_ATTN's fallback in the PR's backends.
+  * `trtllm-gen` and FA4 4.0.0b10 are known-broken on sm_120 as of Apr 2026.
+  * For e2e timings run benchmarks/diffusion/bench_e2e_attention.sh.

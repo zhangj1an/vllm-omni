@@ -1,0 +1,110 @@
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1578+g145f0706d
+ --> vLLM version 0.20.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+INFO 05-03 15:13:43 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+WARNING 05-03 15:13:43 [nixl_utils.py:34] NIXL is not available
+WARNING 05-03 15:13:43 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-03 15:13:44 [envs.py:99] No Flash Attention backend found, using pytorch SDPA implementation
+INFO 05-03 15:13:44 [weight_utils.py:50] Using model weights format ['*']
+INFO 05-03 15:13:44 [omni_base.py:149] [Omni] Initializing with model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v
+INFO 05-03 15:13:44 [async_omni_engine.py:280] [AsyncOmniEngine] Initializing with model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v
+INFO 05-03 15:13:45 [async_omni_engine.py:340] [AsyncOmniEngine] Launching Orchestrator thread with 1 stages
+INFO 05-03 15:13:45 [stage_init_utils.py:371] [stage_init] Set VLLM_WORKER_MULTIPROC_METHOD=spawn
+INFO 05-03 15:13:45 [async_omni_engine.py:744] [AsyncOmniEngine] Initializing stage 0
+INFO 05-03 15:13:45 [stage_utils.py:120] Stage 0 logical-to-physical device mapping: 0->0
+INFO 05-03 15:13:45 [stage_init_utils.py:386] [stage_init] Stage-0 set runtime devices: 0
+INFO 05-03 15:13:45 [multiproc_executor.py:138] Starting server...
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1578+g145f0706d
+ --> vLLM version 0.20.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+WARNING 05-03 15:13:50 [nixl_utils.py:34] NIXL is not available
+WARNING 05-03 15:13:50 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-03 15:13:50 [envs.py:99] No Flash Attention backend found, using pytorch SDPA implementation
+INFO 05-03 15:13:51 [diffusion_worker.py:527] Worker 0 created result MessageQueue
+INFO 05-03 15:13:51 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=2048.
+INFO 05-03 15:13:51 [vllm.py:840] Asynchronous scheduling is enabled.
+INFO 05-03 15:13:51 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'])
+INFO 05-03 15:13:51 [diffusion_worker.py:131] Worker 0: Initialized device and distributed environment.
+INFO 05-03 15:13:51 [parallel_state.py:588] Building SP subgroups from explicit sp_group_ranks (sp_size=1, ulysses=1, ring=1, use_ulysses_low=True).
+INFO 05-03 15:13:51 [parallel_state.py:630] SP group details for rank 0: sp_group=[0], ulysses_group=[0], ring_group=[0]
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:  33%|███▎      | 1/3 [00:00<00:00,  2.45it/s]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00,  2.43it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:01<00:00,  3.05it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:01<00:00,  2.86it/s]
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 46863.73it/s]
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 2/2 [00:00<00:00, 176.00it/s]
+INFO 05-03 15:13:54 [platform.py:112] Using diffusion attention backend 'CUDNN_ATTN'
+WARNING 05-03 15:13:54 [diffusion_pipeline_profiler.py:68] [DiffusionPipelineProfiler] Method path tokenizer.forward not found
+Multi-thread loading shards:   0% Completed | 0/7 [00:00<?, ?it/s]
+Multi-thread loading shards:  14% Completed | 1/7 [00:01<00:08,  1.47s/it]
+Multi-thread loading shards:  29% Completed | 2/7 [00:03<00:07,  1.54s/it]
+Multi-thread loading shards:  43% Completed | 3/7 [00:04<00:06,  1.52s/it]
+Multi-thread loading shards:  57% Completed | 4/7 [00:06<00:04,  1.55s/it]
+Multi-thread loading shards:  71% Completed | 5/7 [00:07<00:02,  1.39s/it]
+Multi-thread loading shards:  86% Completed | 6/7 [00:08<00:01,  1.46s/it]
+Multi-thread loading shards: 100% Completed | 7/7 [00:10<00:00,  1.51s/it]
+Multi-thread loading shards: 100% Completed | 7/7 [00:10<00:00,  1.49s/it]
+
+INFO 05-03 15:14:05 [weight_utils.py:659] No text_encoder_2/diffusion_pytorch_model.safetensors.index.json found in remote.
+Multi-thread loading shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Multi-thread loading shards: 100% Completed | 1/1 [00:00<00:00, 16.41it/s]
+
+INFO 05-03 15:14:05 [diffusers_loader.py:338] Loading weights took 10.67 seconds
+INFO 05-03 15:14:06 [diffusion_model_runner.py:142] Model loading took 33.8067 GiB and 15.182966 seconds
+INFO 05-03 15:14:06 [diffusion_model_runner.py:147] Model runner: Model loaded successfully.
+INFO 05-03 15:14:06 [diffusion_model_runner.py:86] Model runner: transformer compiled with torch.compile.
+INFO 05-03 15:14:06 [diffusion_model_runner.py:188] Model runner: Initialization complete.
+INFO 05-03 15:14:06 [diffusion_worker.py:183] Worker 0: Process-scoped GPU memory after model loading: 34.69 GiB.
+INFO 05-03 15:14:06 [manager.py:96] Initializing DiffusionLoRAManager: device=cuda:0, dtype=torch.bfloat16, max_cached_adapters=1, static_lora_path=None
+INFO 05-03 15:14:06 [diffusion_worker.py:95] Worker 0: Initialization complete.
+INFO 05-03 15:14:06 [diffusion_worker.py:687] Worker 0: Scheduler loop started.
+INFO 05-03 15:14:06 [diffusion_worker.py:597] Worker 0 ready to receive requests via shared memory
+INFO 05-03 15:14:06 [diffusion_engine.py:456] dummy run to warm up the model
+WARNING 05-03 15:14:06 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-03 15:14:07 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.text_encoder.forward took 0.226786s
+INFO 05-03 15:14:07 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.text_encoder.forward took 0.059429s
+  0%|          | 0/1 [00:00<?, ?it/s]WARNING 05-03 15:14:09 [op.py:241] Priority not set for op rms_norm, using native implementation.
+100%|██████████| 1/1 [00:04<00:00,  4.54s/it]100%|██████████| 1/1 [00:04<00:00,  4.54s/it]
+INFO 05-03 15:14:11 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.vae.decode took 0.124086s
+INFO 05-03 15:14:11 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.forward took 4.960463s
+INFO 05-03 15:14:11 [diffusion_model_runner.py:213] Peak GPU memory (this request): 35.60 GB reserved, 35.09 GB allocated, 0.51 GB pool overhead (1.4%)
+INFO 05-03 15:14:11 [inline_stage_diffusion_client.py:63] [InlineStageDiffusionClient] Stage-0 initialized inline (batch_size=1)
+INFO 05-03 15:14:11 [async_omni_engine.py:800] [AsyncOmniEngine] Stage 0 initialized (diffusion, batch_size=1)
+INFO 05-03 15:14:11 [orchestrator.py:189] [Orchestrator] Starting event loop
+INFO 05-03 15:14:11 [async_omni_engine.py:367] [AsyncOmniEngine] Orchestrator ready with 1 stages
+INFO 05-03 15:14:11 [omni_base.py:162] [Omni] AsyncOmniEngine initialized in 27.68 seconds
+INFO 05-03 15:14:11 [omni_base.py:181] [Omni] Initialized with 1 stages for model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v
+
+============================================================
+Generation Configuration:
+  Model: hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v
+  Inference steps: 50
+  Frames: 33
+  Parallel configuration: ulysses_degree=1, ring_degree=1, cfg_parallel_size=1, tensor_parallel_size=1, vae_patch_parallel_size=1, enable_expert_parallel=False
+  Video size: 832x480
+============================================================
+
+INFO 05-03 15:14:11 [orchestrator.py:889] [Orchestrator] _handle_add_request: stage=0 req=0_8ffb785c-d1c4-4624-bf7d-57c53d5c1e42 prompt_type=dict original_prompt_type=dict final_stage=0 num_sampling_params=1
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s]WARNING 05-03 15:14:11 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-03 15:14:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.text_encoder.forward took 0.060499s
+INFO 05-03 15:14:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.text_encoder.forward took 0.059550s
+  0%|          | 0/50 [00:00<?, ?it/s]  2%|▏         | 1/50 [00:01<01:12,  1.49s/it]  4%|▍         | 2/50 [00:02<01:10,  1.47s/it]  6%|▌         | 3/50 [00:04<01:08,  1.46s/it]  8%|▊         | 4/50 [00:05<01:07,  1.46s/it] 10%|█         | 5/50 [00:07<01:05,  1.46s/it] 12%|█▏        | 6/50 [00:08<01:04,  1.46s/it] 14%|█▍        | 7/50 [00:10<01:02,  1.46s/it] 16%|█▌        | 8/50 [00:11<01:01,  1.46s/it] 18%|█▊        | 9/50 [00:13<00:59,  1.46s/it] 20%|██        | 10/50 [00:14<00:58,  1.46s/it] 22%|██▏       | 11/50 [00:16<00:56,  1.46s/it] 24%|██▍       | 12/50 [00:17<00:55,  1.46s/it] 26%|██▌       | 13/50 [00:18<00:54,  1.46s/it] 28%|██▊       | 14/50 [00:20<00:52,  1.46s/it] 30%|███       | 15/50 [00:21<00:51,  1.46s/it] 32%|███▏      | 16/50 [00:23<00:49,  1.46s/it] 34%|███▍      | 17/50 [00:24<00:48,  1.46s/it] 36%|███▌      | 18/50 [00:26<00:46,  1.46s/it] 38%|███▊      | 19/50 [00:27<00:45,  1.46s/it] 40%|████      | 20/50 [00:29<00:43,  1.47s/it] 42%|████▏     | 21/50 [00:30<00:42,  1.47s/it] 44%|████▍     | 22/50 [00:32<00:41,  1.47s/it] 46%|████▌     | 23/50 [00:33<00:39,  1.47s/it] 48%|████▊     | 24/50 [00:35<00:38,  1.47s/it] 50%|█████     | 25/50 [00:36<00:36,  1.47s/it] 52%|█████▏    | 26/50 [00:38<00:35,  1.47s/it] 54%|█████▍    | 27/50 [00:39<00:33,  1.47s/it] 56%|█████▌    | 28/50 [00:41<00:32,  1.47s/it] 58%|█████▊    | 29/50 [00:42<00:30,  1.47s/it] 60%|██████    | 30/50 [00:43<00:29,  1.47s/it] 62%|██████▏   | 31/50 [00:45<00:28,  1.47s/it] 64%|██████▍   | 32/50 [00:46<00:26,  1.48s/it] 66%|██████▌   | 33/50 [00:48<00:25,  1.47s/it] 68%|██████▊   | 34/50 [00:49<00:23,  1.47s/it] 70%|███████   | 35/50 [00:51<00:22,  1.47s/it] 72%|███████▏  | 36/50 [00:52<00:20,  1.47s/it] 74%|███████▍  | 37/50 [00:54<00:19,  1.48s/it] 76%|███████▌  | 38/50 [00:55<00:17,  1.48s/it] 78%|███████▊  | 39/50 [00:57<00:16,  1.48s/it] 80%|████████  | 40/50 [00:58<00:14,  1.48s/it] 82%|████████▏ | 41/50 [01:00<00:13,  1.48s/it] 84%|████████▍ | 42/50 [01:01<00:11,  1.48s/it] 86%|████████▌ | 43/50 [01:03<00:10,  1.48s/it] 88%|████████▊ | 44/50 [01:04<00:08,  1.48s/it] 90%|█████████ | 45/50 [01:06<00:07,  1.48s/it] 92%|█████████▏| 46/50 [01:07<00:05,  1.48s/it] 94%|█████████▍| 47/50 [01:09<00:04,  1.48s/it] 96%|█████████▌| 48/50 [01:10<00:02,  1.48s/it] 98%|█████████▊| 49/50 [01:12<00:01,  1.48s/it]100%|██████████| 50/50 [01:13<00:00,  1.48s/it]100%|██████████| 50/50 [01:13<00:00,  1.47s/it]
+INFO 05-03 15:15:28 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.vae.decode took 2.935567s
+INFO 05-03 15:15:28 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.forward took 76.559646s
+INFO 05-03 15:15:28 [diffusion_model_runner.py:213] Peak GPU memory (this request): 89.61 GB reserved, 72.40 GB allocated, 17.21 GB pool overhead (19.2%)
+INFO 05-03 15:15:28 [diffusion_engine.py:127] Generation completed successfully.
+INFO 05-03 15:15:28 [diffusion_engine.py:174] Post-processing completed in 0.2373 seconds
+INFO 05-03 15:15:28 [diffusion_engine.py:177] DiffusionEngine.step breakdown: preprocess=0.00 ms, add_req_and_wait=76698.11 ms, postprocess=237.31 ms, total=76935.74 ms
+Processed prompts: 100%|██████████| 1/1 [01:16<00:00, 76.94s/it]INFO 05-03 15:15:28 [omni_base.py:254] [Summary] {}
+Processed prompts: 100%|██████████| 1/1 [01:16<00:00, 76.94s/it]
+Total generation time: 76.9462 seconds (76946.15 ms)
+Saved generated video to bench_out/hv15_e2e/CUDNN_ATTN.mp4
+INFO 05-03 15:15:29 [async_omni_engine.py:1739] [AsyncOmniEngine] Shutting down Orchestrator
+INFO 05-03 15:15:29 [orchestrator.py:249] [Orchestrator] Received shutdown signal
+INFO 05-03 15:15:29 [orchestrator.py:1195] [Orchestrator] Shutting down all stages
+INFO 05-03 15:15:29 [diffusion_worker.py:637] Worker 0: Received shutdown message
+INFO 05-03 15:15:29 [diffusion_worker.py:658] event loop terminated.
+INFO 05-03 15:15:29 [diffusion_worker.py:695] Worker 0: Shutdown complete.
+INFO 05-03 15:15:31 [orchestrator.py:1199] [Orchestrator] Stage 0 shut down

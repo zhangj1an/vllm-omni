@@ -1,0 +1,23 @@
+Total GPU kernel time: 25.484 s
+
+  attention   :   6.079 s ( 23.9%)
+  gemm        :  15.469 s ( 60.7%)
+  elem        :   1.689 s (  6.6%)
+  norm        :   0.000 s (  0.0%)
+  conv        :   0.411 s (  1.6%)
+  reshape     :   1.516 s (  5.9%)
+  other       :   0.321 s (  1.3%)
+
+Top 5 attention kernels:
+    5669.2 ms  void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<(int)128, (int)128, (int)64, (int)4
+     340.2 ms  triton_poi_fused__scaled_dot_product_flash_attention_add_mul_permute_stack_sub_unbind_view_0
+      52.1 ms  triton_red_fused__scaled_dot_product_flash_attention__to_copy_mean_mul_permute_pow_rsqrt_view_1
+       8.0 ms  triton_red_fused__scaled_dot_product_flash_attention__to_copy_mean_mul_permute_pow_rsqrt_view_2
+       7.0 ms  fmha_cutlassF_bf16_aligned_32x128_gmem_sm80(PyTorchMemEffAttention::AttentionKernel<cutlass::bfl
+
+Top 5 'other' kernels (sanity check that we're not mis-bucketing):
+     171.3 ms  triton_red_fused__to_copy_add_mul_native_layer_norm_0
+      95.7 ms  triton_red_fused__to_copy_add_mul_native_layer_norm_split_1
+      23.4 ms  void at::native::<unnamed>::upsample_nearest2d_out_frame<float, &at::native::nearest_neighbor_ex
+      13.9 ms  void at::native::vectorized_gather_kernel<(int)16, long>(char *, char *, T2 *, int, long, long, 
+       8.7 ms  void at::native::<unnamed>::vectorized_layer_norm_kernel<float, float, (bool)0>(int, T2, const T

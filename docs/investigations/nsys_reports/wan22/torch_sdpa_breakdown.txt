@@ -1,0 +1,14 @@
+Total GPU kernel time: 25.484 s
+  attention   : 0.407 s (  1.6%)
+  gemm/matmul : 15.469 s ( 60.7%)
+  elementwise : 1.689 s (  6.6%)
+  norm        : 0.000 s (  0.0%)
+  conv/vae    : 0.411 s (  1.6%)
+  reshape     : 1.516 s (  5.9%)
+  other       : 5.992 s ( 23.5%)
+
+Top 5 attention kernels (what default SDPA picked):
+    340.2 ms  triton_poi_fused__scaled_dot_product_flash_attention_add_mul_permute_stack_sub_unbind_view
+     52.1 ms  triton_red_fused__scaled_dot_product_flash_attention__to_copy_mean_mul_permute_pow_rsqrt_v
+      8.0 ms  triton_red_fused__scaled_dot_product_flash_attention__to_copy_mean_mul_permute_pow_rsqrt_v
+      7.0 ms  fmha_cutlassF_bf16_aligned_32x128_gmem_sm80(PyTorchMemEffAttention::AttentionKernel<cutlas

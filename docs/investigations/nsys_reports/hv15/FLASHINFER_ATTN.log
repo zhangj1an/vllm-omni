@@ -1,0 +1,139 @@
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1578+g145f0706d
+ --> vLLM version 0.20.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+INFO 05-03 15:15:38 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+WARNING 05-03 15:15:38 [nixl_utils.py:34] NIXL is not available
+WARNING 05-03 15:15:38 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-03 15:15:39 [envs.py:99] No Flash Attention backend found, using pytorch SDPA implementation
+INFO 05-03 15:15:39 [weight_utils.py:50] Using model weights format ['*']
+INFO 05-03 15:15:39 [omni_base.py:149] [Omni] Initializing with model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v
+INFO 05-03 15:15:39 [async_omni_engine.py:280] [AsyncOmniEngine] Initializing with model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v
+INFO 05-03 15:15:40 [async_omni_engine.py:340] [AsyncOmniEngine] Launching Orchestrator thread with 1 stages
+INFO 05-03 15:15:40 [stage_init_utils.py:371] [stage_init] Set VLLM_WORKER_MULTIPROC_METHOD=spawn
+INFO 05-03 15:15:40 [async_omni_engine.py:744] [AsyncOmniEngine] Initializing stage 0
+INFO 05-03 15:15:40 [stage_utils.py:120] Stage 0 logical-to-physical device mapping: 0->0
+INFO 05-03 15:15:40 [stage_init_utils.py:386] [stage_init] Stage-0 set runtime devices: 0
+INFO 05-03 15:15:40 [multiproc_executor.py:138] Starting server...
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1578+g145f0706d
+ --> vLLM version 0.20.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+WARNING 05-03 15:15:45 [nixl_utils.py:34] NIXL is not available
+WARNING 05-03 15:15:45 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-03 15:15:45 [envs.py:99] No Flash Attention backend found, using pytorch SDPA implementation
+INFO 05-03 15:15:46 [diffusion_worker.py:527] Worker 0 created result MessageQueue
+INFO 05-03 15:15:46 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=2048.
+INFO 05-03 15:15:46 [vllm.py:840] Asynchronous scheduling is enabled.
+INFO 05-03 15:15:46 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'])
+INFO 05-03 15:15:46 [diffusion_worker.py:131] Worker 0: Initialized device and distributed environment.
+INFO 05-03 15:15:46 [parallel_state.py:588] Building SP subgroups from explicit sp_group_ranks (sp_size=1, ulysses=1, ring=1, use_ulysses_low=True).
+INFO 05-03 15:15:46 [parallel_state.py:630] SP group details for rank 0: sp_group=[0], ulysses_group=[0], ring_group=[0]
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:  33%|███▎      | 1/3 [00:00<00:00,  2.49it/s]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00,  2.46it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:01<00:00,  3.11it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:01<00:00,  2.91it/s]
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files: 100%|██████████| 2/2 [00:00<00:00, 46863.73it/s]
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 2/2 [00:00<00:00, 182.98it/s]
+INFO 05-03 15:15:49 [platform.py:112] Using diffusion attention backend 'FLASHINFER_ATTN'
+WARNING 05-03 15:15:49 [diffusion_pipeline_profiler.py:68] [DiffusionPipelineProfiler] Method path tokenizer.forward not found
+Multi-thread loading shards:   0% Completed | 0/7 [00:00<?, ?it/s]
+Multi-thread loading shards:  14% Completed | 1/7 [00:01<00:09,  1.53s/it]
+Multi-thread loading shards:  29% Completed | 2/7 [00:03<00:07,  1.52s/it]
+Multi-thread loading shards:  43% Completed | 3/7 [00:04<00:05,  1.46s/it]
+Multi-thread loading shards:  57% Completed | 4/7 [00:05<00:04,  1.47s/it]
+Multi-thread loading shards:  71% Completed | 5/7 [00:07<00:02,  1.49s/it]
+Multi-thread loading shards:  86% Completed | 6/7 [00:08<00:01,  1.35s/it]
+Multi-thread loading shards: 100% Completed | 7/7 [00:10<00:00,  1.40s/it]
+Multi-thread loading shards: 100% Completed | 7/7 [00:10<00:00,  1.43s/it]
+
+INFO 05-03 15:15:59 [weight_utils.py:659] No text_encoder_2/diffusion_pytorch_model.safetensors.index.json found in remote.
+Multi-thread loading shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Multi-thread loading shards: 100% Completed | 1/1 [00:00<00:00, 12.94it/s]
+
+INFO 05-03 15:16:00 [diffusers_loader.py:338] Loading weights took 10.33 seconds
+INFO 05-03 15:16:00 [diffusion_model_runner.py:142] Model loading took 33.8067 GiB and 14.600736 seconds
+INFO 05-03 15:16:00 [diffusion_model_runner.py:147] Model runner: Model loaded successfully.
+INFO 05-03 15:16:00 [diffusion_model_runner.py:86] Model runner: transformer compiled with torch.compile.
+INFO 05-03 15:16:00 [diffusion_model_runner.py:188] Model runner: Initialization complete.
+INFO 05-03 15:16:01 [diffusion_worker.py:183] Worker 0: Process-scoped GPU memory after model loading: 34.69 GiB.
+INFO 05-03 15:16:01 [manager.py:96] Initializing DiffusionLoRAManager: device=cuda:0, dtype=torch.bfloat16, max_cached_adapters=1, static_lora_path=None
+INFO 05-03 15:16:01 [diffusion_worker.py:95] Worker 0: Initialization complete.
+INFO 05-03 15:16:01 [diffusion_worker.py:687] Worker 0: Scheduler loop started.
+INFO 05-03 15:16:01 [diffusion_worker.py:597] Worker 0 ready to receive requests via shared memory
+INFO 05-03 15:16:01 [diffusion_engine.py:456] dummy run to warm up the model
+WARNING 05-03 15:16:01 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-03 15:16:01 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.text_encoder.forward took 0.231026s
+INFO 05-03 15:16:01 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.text_encoder.forward took 0.059675s
+  0%|          | 0/1 [00:00<?, ?it/s]WARNING 05-03 15:16:03 [op.py:241] Priority not set for op rms_norm, using native implementation.
+/usr/local/lib/python3.11/dist-packages/torch/_dynamo/variables/functions.py:2202: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'packbits.py:37'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/usr/local/lib/python3.11/dist-packages/flashinfer/quantization/packbits.py", line 37, in _packbits
+    get_quantization_module().packbits(x, bitorder, y)
+
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.11/dist-packages/torch/_dynamo/variables/functions.py:2082: UserWarning: Dynamo does not know how to trace the builtin `<unknown module>.datetime.now.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+/usr/local/lib/python3.11/dist-packages/torch/_dynamo/variables/functions.py:2202: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'utils.py:544'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/usr/local/lib/python3.11/dist-packages/flashinfer/utils.py", line 544, in is_sm90a_supported
+    major, _ = get_compute_capability(device)
+
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.11/dist-packages/torch/_dynamo/variables/functions.py:2202: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'prefill.py:1304'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/usr/local/lib/python3.11/dist-packages/flashinfer/prefill.py", line 1304, in torch_dynamo_resume_in_single_prefill_with_kv_cache_at_1259
+    module = get_single_prefill_module(
+
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.11/dist-packages/torch/_dynamo/variables/functions.py:2082: UserWarning: Dynamo does not know how to trace the builtin `posix.stat.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+100%|██████████| 1/1 [00:12<00:00, 12.54s/it]100%|██████████| 1/1 [00:12<00:00, 12.54s/it]
+INFO 05-03 15:16:14 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.vae.decode took 0.124950s
+INFO 05-03 15:16:14 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.forward took 12.968716s
+INFO 05-03 15:16:14 [diffusion_model_runner.py:213] Peak GPU memory (this request): 35.67 GB reserved, 35.20 GB allocated, 0.47 GB pool overhead (1.3%)
+INFO 05-03 15:16:14 [inline_stage_diffusion_client.py:63] [InlineStageDiffusionClient] Stage-0 initialized inline (batch_size=1)
+INFO 05-03 15:16:14 [async_omni_engine.py:800] [AsyncOmniEngine] Stage 0 initialized (diffusion, batch_size=1)
+INFO 05-03 15:16:14 [orchestrator.py:189] [Orchestrator] Starting event loop
+INFO 05-03 15:16:14 [async_omni_engine.py:367] [AsyncOmniEngine] Orchestrator ready with 1 stages
+INFO 05-03 15:16:14 [omni_base.py:162] [Omni] AsyncOmniEngine initialized in 35.14 seconds
+INFO 05-03 15:16:14 [omni_base.py:181] [Omni] Initialized with 1 stages for model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v
+
+============================================================
+Generation Configuration:
+  Model: hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v
+  Inference steps: 50
+  Frames: 33
+  Parallel configuration: ulysses_degree=1, ring_degree=1, cfg_parallel_size=1, tensor_parallel_size=1, vae_patch_parallel_size=1, enable_expert_parallel=False
+  Video size: 832x480
+============================================================
+
+INFO 05-03 15:16:14 [orchestrator.py:889] [Orchestrator] _handle_add_request: stage=0 req=0_001791d0-3218-4b5a-a69f-b6832164faf7 prompt_type=dict original_prompt_type=dict final_stage=0 num_sampling_params=1
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s]WARNING 05-03 15:16:14 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-03 15:16:14 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.text_encoder.forward took 0.060218s
+INFO 05-03 15:16:14 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.text_encoder.forward took 0.059356s
+  0%|          | 0/50 [00:00<?, ?it/s]  2%|▏         | 1/50 [00:02<01:55,  2.35s/it]  4%|▍         | 2/50 [00:04<01:52,  2.33s/it]  6%|▌         | 3/50 [00:07<01:49,  2.34s/it]  8%|▊         | 4/50 [00:09<01:47,  2.34s/it] 10%|█         | 5/50 [00:11<01:45,  2.34s/it] 12%|█▏        | 6/50 [00:14<01:43,  2.34s/it] 14%|█▍        | 7/50 [00:16<01:40,  2.34s/it] 16%|█▌        | 8/50 [00:18<01:38,  2.34s/it] 18%|█▊        | 9/50 [00:21<01:36,  2.34s/it] 20%|██        | 10/50 [00:23<01:33,  2.34s/it] 22%|██▏       | 11/50 [00:25<01:31,  2.34s/it] 24%|██▍       | 12/50 [00:28<01:29,  2.35s/it] 26%|██▌       | 13/50 [00:30<01:26,  2.35s/it] 28%|██▊       | 14/50 [00:32<01:24,  2.35s/it] 30%|███       | 15/50 [00:35<01:22,  2.35s/it] 32%|███▏      | 16/50 [00:37<01:19,  2.35s/it] 34%|███▍      | 17/50 [00:39<01:17,  2.35s/it] 36%|███▌      | 18/50 [00:42<01:15,  2.35s/it] 38%|███▊      | 19/50 [00:44<01:12,  2.35s/it] 40%|████      | 20/50 [00:46<01:10,  2.35s/it] 42%|████▏     | 21/50 [00:49<01:08,  2.35s/it] 44%|████▍     | 22/50 [00:51<01:05,  2.35s/it] 46%|████▌     | 23/50 [00:53<01:03,  2.34s/it] 48%|████▊     | 24/50 [00:56<01:00,  2.35s/it] 50%|█████     | 25/50 [00:58<00:58,  2.35s/it] 52%|█████▏    | 26/50 [01:00<00:56,  2.35s/it] 54%|█████▍    | 27/50 [01:03<00:53,  2.34s/it] 56%|█████▌    | 28/50 [01:05<00:51,  2.34s/it] 58%|█████▊    | 29/50 [01:07<00:49,  2.34s/it] 60%|██████    | 30/50 [01:10<00:46,  2.34s/it] 62%|██████▏   | 31/50 [01:12<00:44,  2.34s/it] 64%|██████▍   | 32/50 [01:15<00:42,  2.34s/it] 66%|██████▌   | 33/50 [01:17<00:39,  2.35s/it] 68%|██████▊   | 34/50 [01:19<00:37,  2.35s/it] 70%|███████   | 35/50 [01:22<00:35,  2.34s/it] 72%|███████▏  | 36/50 [01:24<00:32,  2.34s/it] 74%|███████▍  | 37/50 [01:26<00:30,  2.34s/it] 76%|███████▌  | 38/50 [01:29<00:28,  2.34s/it] 78%|███████▊  | 39/50 [01:31<00:25,  2.34s/it] 80%|████████  | 40/50 [01:33<00:23,  2.34s/it] 82%|████████▏ | 41/50 [01:36<00:21,  2.34s/it] 84%|████████▍ | 42/50 [01:38<00:18,  2.34s/it] 86%|████████▌ | 43/50 [01:40<00:16,  2.34s/it] 88%|████████▊ | 44/50 [01:43<00:14,  2.34s/it] 90%|█████████ | 45/50 [01:45<00:11,  2.34s/it] 92%|█████████▏| 46/50 [01:47<00:09,  2.34s/it] 94%|█████████▍| 47/50 [01:50<00:07,  2.34s/it] 96%|█████████▌| 48/50 [01:52<00:04,  2.34s/it] 98%|█████████▊| 49/50 [01:54<00:02,  2.35s/it]100%|██████████| 50/50 [01:57<00:00,  2.35s/it]100%|██████████| 50/50 [01:57<00:00,  2.34s/it]
+INFO 05-03 15:18:14 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.vae.decode took 2.936037s
+INFO 05-03 15:18:14 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] HunyuanVideo15Pipeline.forward took 120.311089s
+INFO 05-03 15:18:14 [diffusion_model_runner.py:213] Peak GPU memory (this request): 89.74 GB reserved, 72.53 GB allocated, 17.21 GB pool overhead (19.2%)
+INFO 05-03 15:18:14 [diffusion_engine.py:127] Generation completed successfully.
+INFO 05-03 15:18:15 [diffusion_engine.py:174] Post-processing completed in 0.2254 seconds
+INFO 05-03 15:18:15 [diffusion_engine.py:177] DiffusionEngine.step breakdown: preprocess=0.00 ms, add_req_and_wait=120457.03 ms, postprocess=225.36 ms, total=120682.80 ms
+Processed prompts: 100%|██████████| 1/1 [02:00<00:00, 120.69s/it]INFO 05-03 15:18:15 [omni_base.py:254] [Summary] {}
+Processed prompts: 100%|██████████| 1/1 [02:00<00:00, 120.69s/it]
+Total generation time: 120.6937 seconds (120693.74 ms)
+Saved generated video to bench_out/hv15_e2e/FLASHINFER_ATTN.mp4
+INFO 05-03 15:18:15 [async_omni_engine.py:1739] [AsyncOmniEngine] Shutting down Orchestrator
+INFO 05-03 15:18:15 [orchestrator.py:249] [Orchestrator] Received shutdown signal
+INFO 05-03 15:18:15 [orchestrator.py:1195] [Orchestrator] Shutting down all stages
+INFO 05-03 15:18:15 [diffusion_worker.py:637] Worker 0: Received shutdown message
+INFO 05-03 15:18:15 [diffusion_worker.py:658] event loop terminated.
+INFO 05-03 15:18:15 [diffusion_worker.py:695] Worker 0: Shutdown complete.
+INFO 05-03 15:18:17 [orchestrator.py:1199] [Orchestrator] Stage 0 shut down

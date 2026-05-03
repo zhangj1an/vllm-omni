@@ -1,0 +1,10 @@
+{"i": 1, "q_shape": [1, 1, 1024, 1024], "k_shape": [1, 1, 1024, 1024], "v_shape": [1, 1, 1024, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}
+{"i": 2, "q_shape": [1, 1, 3520, 1024], "k_shape": [1, 1, 3520, 1024], "v_shape": [1, 1, 3520, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}
+{"i": 3, "q_shape": [1, 1, 3520, 1024], "k_shape": [1, 1, 3520, 1024], "v_shape": [1, 1, 3520, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}
+{"i": 4, "q_shape": [1, 1, 3520, 1024], "k_shape": [1, 1, 3520, 1024], "v_shape": [1, 1, 3520, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}
+{"i": 5, "q_shape": [1, 1, 3520, 1024], "k_shape": [1, 1, 3520, 1024], "v_shape": [1, 1, 3520, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}
+{"i": 6, "q_shape": [1, 1, 3520, 1024], "k_shape": [1, 1, 3520, 1024], "v_shape": [1, 1, 3520, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}
+{"i": 7, "q_shape": [1, 1, 3520, 1024], "k_shape": [1, 1, 3520, 1024], "v_shape": [1, 1, 3520, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}
+{"i": 8, "q_shape": [1, 1, 3520, 1024], "k_shape": [1, 1, 3520, 1024], "v_shape": [1, 1, 3520, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}
+{"i": 9, "q_shape": [1, 1, 3520, 1024], "k_shape": [1, 1, 3520, 1024], "v_shape": [1, 1, 3520, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}
+{"i": 10, "q_shape": [1, 1, 3520, 1024], "k_shape": [1, 1, 3520, 1024], "v_shape": [1, 1, 3520, 1024], "mask_shape": null, "mask_dtype": null, "is_causal": false, "scale": null, "dtype": "torch.bfloat16"}

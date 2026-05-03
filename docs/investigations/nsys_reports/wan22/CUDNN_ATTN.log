@@ -1,0 +1,114 @@
+[sdpa_shape_logger] installed; logging to bench_out/wan22_e2e/CUDNN_ATTN.shapes.jsonl
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1578+g145f0706d
+ --> vLLM version 0.20.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+INFO 05-03 15:45:43 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+WARNING 05-03 15:45:43 [nixl_utils.py:34] NIXL is not available
+WARNING 05-03 15:45:43 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-03 15:45:43 [envs.py:99] No Flash Attention backend found, using pytorch SDPA implementation
+INFO 05-03 15:45:43 [weight_utils.py:50] Using model weights format ['*']
+INFO 05-03 15:45:44 [omni_base.py:149] [Omni] Initializing with model Wan-AI/Wan2.2-TI2V-5B-Diffusers
+INFO 05-03 15:45:44 [async_omni_engine.py:280] [AsyncOmniEngine] Initializing with model Wan-AI/Wan2.2-TI2V-5B-Diffusers
+INFO 05-03 15:45:45 [async_omni_engine.py:340] [AsyncOmniEngine] Launching Orchestrator thread with 1 stages
+INFO 05-03 15:45:45 [stage_init_utils.py:371] [stage_init] Set VLLM_WORKER_MULTIPROC_METHOD=spawn
+INFO 05-03 15:45:45 [async_omni_engine.py:744] [AsyncOmniEngine] Initializing stage 0
+INFO 05-03 15:45:45 [stage_utils.py:120] Stage 0 logical-to-physical device mapping: 0->0
+INFO 05-03 15:45:45 [stage_init_utils.py:386] [stage_init] Stage-0 set runtime devices: 0
+INFO 05-03 15:45:45 [multiproc_executor.py:138] Starting server...
+[sdpa_shape_logger] installed; logging to bench_out/wan22_e2e/CUDNN_ATTN.shapes.jsonl
+[sdpa_shape_logger] installed; logging to bench_out/wan22_e2e/CUDNN_ATTN.shapes.jsonl
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1578+g145f0706d
+ --> vLLM version 0.20.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+WARNING 05-03 15:45:49 [nixl_utils.py:34] NIXL is not available
+WARNING 05-03 15:45:49 [nixl_utils.py:44] NIXL agent config is not available
+WARNING 05-03 15:45:50 [envs.py:99] No Flash Attention backend found, using pytorch SDPA implementation
+INFO 05-03 15:45:50 [diffusion_worker.py:527] Worker 0 created result MessageQueue
+INFO 05-03 15:45:50 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=2048.
+INFO 05-03 15:45:50 [vllm.py:840] Asynchronous scheduling is enabled.
+INFO 05-03 15:45:50 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'])
+INFO 05-03 15:45:50 [diffusion_worker.py:131] Worker 0: Initialized device and distributed environment.
+INFO 05-03 15:45:50 [parallel_state.py:588] Building SP subgroups from explicit sp_group_ranks (sp_size=1, ulysses=1, ring=1, use_ulysses_low=True).
+INFO 05-03 15:45:50 [parallel_state.py:630] SP group details for rank 0: sp_group=[0], ulysses_group=[0], ring_group=[0]
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:  33%|███▎      | 1/3 [00:00<00:00,  2.70it/s]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00,  3.01it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00,  4.00it/s]
+The config attributes {'clip_output': False} were passed to DistributedAutoencoderKLWan, but are not expected and will be ignored. Please verify your config.json configuration file.
+INFO 05-03 15:45:53 [platform.py:112] Using diffusion attention backend 'CUDNN_ATTN'
+WARNING 05-03 15:45:53 [diffusion_pipeline_profiler.py:68] [DiffusionPipelineProfiler] Method path tokenizer.forward not found
+Multi-thread loading shards:   0% Completed | 0/5 [00:00<?, ?it/s]
+Multi-thread loading shards:  20% Completed | 1/5 [00:00<00:03,  1.17it/s]
+Multi-thread loading shards:  40% Completed | 2/5 [00:00<00:01,  2.40it/s]
+Multi-thread loading shards:  60% Completed | 3/5 [00:01<00:01,  1.48it/s]
+Multi-thread loading shards:  80% Completed | 4/5 [00:02<00:00,  1.25it/s]
+Multi-thread loading shards: 100% Completed | 5/5 [00:03<00:00,  1.23it/s]
+Multi-thread loading shards: 100% Completed | 5/5 [00:03<00:00,  1.33it/s]
+
+INFO 05-03 15:45:57 [diffusers_loader.py:338] Loading weights took 3.79 seconds
+INFO 05-03 15:45:58 [diffusion_model_runner.py:142] Model loading took 21.2220 GiB and 7.495977 seconds
+INFO 05-03 15:45:58 [diffusion_model_runner.py:147] Model runner: Model loaded successfully.
+INFO 05-03 15:45:58 [diffusion_model_runner.py:86] Model runner: transformer compiled with torch.compile.
+INFO 05-03 15:45:58 [diffusion_model_runner.py:188] Model runner: Initialization complete.
+INFO 05-03 15:45:58 [diffusion_worker.py:183] Worker 0: Process-scoped GPU memory after model loading: 21.86 GiB.
+INFO 05-03 15:45:58 [manager.py:96] Initializing DiffusionLoRAManager: device=cuda:0, dtype=torch.bfloat16, max_cached_adapters=1, static_lora_path=None
+INFO 05-03 15:45:58 [diffusion_worker.py:95] Worker 0: Initialization complete.
+INFO 05-03 15:45:58 [diffusion_worker.py:687] Worker 0: Scheduler loop started.
+INFO 05-03 15:45:58 [diffusion_worker.py:597] Worker 0 ready to receive requests via shared memory
+INFO 05-03 15:45:58 [diffusion_engine.py:456] dummy run to warm up the model
+WARNING 05-03 15:45:58 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+WARNING 05-03 15:45:58 [pipeline_wan2_2.py:545] boundary_ratio is required for T2V generation. using default value 0.875
+INFO 05-03 15:45:58 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.text_encoder.forward took 0.158577s
+INFO 05-03 15:45:58 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.text_encoder.forward took 0.032775s
+  0%|          | 0/1 [00:00<?, ?it/s]/usr/local/lib/python3.11/dist-packages/torch/_dynamo/variables/functions.py:2082: UserWarning: Dynamo does not know how to trace the builtin `<unknown module>.Encoder.__new__.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+100%|██████████| 1/1 [00:05<00:00,  5.24s/it]100%|██████████| 1/1 [00:05<00:00,  5.24s/it]
+INFO 05-03 15:46:03 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.diffuse took 5.236804s
+INFO 05-03 15:46:04 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.vae.decode took 0.147664s
+INFO 05-03 15:46:04 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.forward took 5.581074s
+INFO 05-03 15:46:04 [diffusion_model_runner.py:213] Peak GPU memory (this request): 22.98 GB reserved, 22.83 GB allocated, 0.15 GB pool overhead (0.7%)
+INFO 05-03 15:46:04 [inline_stage_diffusion_client.py:63] [InlineStageDiffusionClient] Stage-0 initialized inline (batch_size=1)
+INFO 05-03 15:46:04 [async_omni_engine.py:800] [AsyncOmniEngine] Stage 0 initialized (diffusion, batch_size=1)
+INFO 05-03 15:46:04 [orchestrator.py:189] [Orchestrator] Starting event loop
+INFO 05-03 15:46:04 [async_omni_engine.py:367] [AsyncOmniEngine] Orchestrator ready with 1 stages
+INFO 05-03 15:46:04 [omni_base.py:162] [Omni] AsyncOmniEngine initialized in 20.05 seconds
+INFO 05-03 15:46:04 [omni_base.py:181] [Omni] Initialized with 1 stages for model Wan-AI/Wan2.2-TI2V-5B-Diffusers
+
+============================================================
+Generation Configuration:
+  Model: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+  Inference steps: 40
+  Frames: 33
+  Parallel configuration: ulysses_degree=1, ring_degree=1, cfg_parallel_size=1, tensor_parallel_size=1, vae_patch_parallel_size=1, enable_expert_parallel=False
+  Video size: 1280x704
+============================================================
+
+INFO 05-03 15:46:04 [orchestrator.py:889] [Orchestrator] _handle_add_request: stage=0 req=0_31d8cc65-77a0-4749-acfd-c1e4c5a88087 prompt_type=dict original_prompt_type=dict final_stage=0 num_sampling_params=1
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s]INFO 05-03 15:46:04 [diffusion_engine.py:117] Pre-processing completed in 0.0000 seconds
+WARNING 05-03 15:46:04 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+WARNING 05-03 15:46:04 [pipeline_wan2_2.py:545] boundary_ratio is required for T2V generation. using default value 0.875
+INFO 05-03 15:46:04 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.text_encoder.forward took 0.034048s
+INFO 05-03 15:46:04 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.text_encoder.forward took 0.032549s
+  0%|          | 0/40 [00:00<?, ?it/s]  2%|▎         | 1/40 [00:00<00:21,  1.78it/s]  5%|▌         | 2/40 [00:01<00:20,  1.83it/s]  8%|▊         | 3/40 [00:01<00:20,  1.82it/s] 10%|█         | 4/40 [00:02<00:19,  1.85it/s] 12%|█▎        | 5/40 [00:02<00:18,  1.86it/s] 15%|█▌        | 6/40 [00:03<00:18,  1.86it/s] 18%|█▊        | 7/40 [00:03<00:17,  1.86it/s] 20%|██        | 8/40 [00:04<00:17,  1.86it/s] 22%|██▎       | 9/40 [00:04<00:16,  1.87it/s] 25%|██▌       | 10/40 [00:05<00:16,  1.87it/s] 28%|██▊       | 11/40 [00:05<00:15,  1.87it/s] 30%|███       | 12/40 [00:06<00:14,  1.87it/s] 32%|███▎      | 13/40 [00:06<00:14,  1.87it/s] 35%|███▌      | 14/40 [00:07<00:13,  1.87it/s] 38%|███▊      | 15/40 [00:08<00:13,  1.87it/s] 40%|████      | 16/40 [00:08<00:12,  1.87it/s] 42%|████▎     | 17/40 [00:09<00:12,  1.86it/s] 45%|████▌     | 18/40 [00:09<00:11,  1.87it/s] 48%|████▊     | 19/40 [00:10<00:11,  1.87it/s] 50%|█████     | 20/40 [00:10<00:10,  1.86it/s] 52%|█████▎    | 21/40 [00:11<00:10,  1.86it/s] 55%|█████▌    | 22/40 [00:11<00:09,  1.86it/s] 57%|█████▊    | 23/40 [00:12<00:09,  1.86it/s] 60%|██████    | 24/40 [00:12<00:08,  1.86it/s] 62%|██████▎   | 25/40 [00:13<00:08,  1.86it/s] 65%|██████▌   | 26/40 [00:13<00:07,  1.86it/s] 68%|██████▊   | 27/40 [00:14<00:06,  1.86it/s] 70%|███████   | 28/40 [00:15<00:06,  1.86it/s] 72%|███████▎  | 29/40 [00:15<00:05,  1.86it/s] 75%|███████▌  | 30/40 [00:16<00:05,  1.86it/s] 78%|███████▊  | 31/40 [00:16<00:04,  1.86it/s] 80%|████████  | 32/40 [00:17<00:04,  1.86it/s] 82%|████████▎ | 33/40 [00:17<00:03,  1.86it/s] 85%|████████▌ | 34/40 [00:18<00:03,  1.86it/s] 88%|████████▊ | 35/40 [00:18<00:02,  1.86it/s] 90%|█████████ | 36/40 [00:19<00:02,  1.86it/s] 92%|█████████▎| 37/40 [00:19<00:01,  1.86it/s] 95%|█████████▌| 38/40 [00:20<00:01,  1.86it/s] 98%|█████████▊| 39/40 [00:20<00:00,  1.86it/s]100%|██████████| 40/40 [00:21<00:00,  1.86it/s]100%|██████████| 40/40 [00:21<00:00,  1.86it/s]
+INFO 05-03 15:46:25 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.diffuse took 21.509211s
+INFO 05-03 15:46:28 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.vae.decode took 3.094895s
+INFO 05-03 15:46:28 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Wan22Pipeline.forward took 24.679209s
+INFO 05-03 15:46:28 [diffusion_model_runner.py:213] Peak GPU memory (this request): 43.70 GB reserved, 38.15 GB allocated, 5.55 GB pool overhead (12.7%)
+INFO 05-03 15:46:29 [diffusion_engine.py:127] Generation completed successfully.
+INFO 05-03 15:46:29 [diffusion_engine.py:174] Post-processing completed in 0.2966 seconds
+INFO 05-03 15:46:29 [diffusion_engine.py:177] DiffusionEngine.step breakdown: preprocess=0.01 ms, add_req_and_wait=25096.38 ms, postprocess=296.57 ms, total=25393.50 ms
+Processed prompts: 100%|██████████| 1/1 [00:25<00:00, 25.41s/it]INFO 05-03 15:46:29 [omni_base.py:254] [Summary] {}
+Processed prompts: 100%|██████████| 1/1 [00:25<00:00, 25.41s/it]
+Total generation time: 25.4089 seconds (25408.90 ms)
+Saved generated video to bench_out/wan22_e2e/CUDNN_ATTN.mp4
+INFO 05-03 15:46:29 [async_omni_engine.py:1739] [AsyncOmniEngine] Shutting down Orchestrator
+INFO 05-03 15:46:29 [orchestrator.py:249] [Orchestrator] Received shutdown signal
+INFO 05-03 15:46:29 [orchestrator.py:1195] [Orchestrator] Shutting down all stages
+INFO 05-03 15:46:29 [diffusion_worker.py:637] Worker 0: Received shutdown message
+INFO 05-03 15:46:29 [diffusion_worker.py:658] event loop terminated.
+INFO 05-03 15:46:29 [diffusion_worker.py:695] Worker 0: Shutdown complete.
+INFO 05-03 15:46:32 [orchestrator.py:1199] [Orchestrator] Stage 0 shut down

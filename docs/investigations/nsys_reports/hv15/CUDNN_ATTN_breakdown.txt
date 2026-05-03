@@ -1,0 +1,22 @@
+Total GPU kernel time: 76.850 s
+
+  attention   :  35.805 s ( 46.6%)
+  gemm        :  25.934 s ( 33.7%)
+  elem        :   8.490 s ( 11.0%)
+  norm        :   0.000 s (  0.0%)
+  conv        :   0.149 s (  0.2%)
+  reshape     :   2.874 s (  3.7%)
+  other       :   3.599 s (  4.7%)
+
+Top 5 attention kernels:
+   35732.8 ms  cudnn_generated_fort_native_sdpa_sm120_flash_fprop_f16_knob_3_64x64x128_4x1x1_cga1x1x1_kernel0_0
+      46.9 ms  fmha_cutlassF_bf16_aligned_64x128_rf_sm80(PyTorchMemEffAttention::AttentionKernel<cutlass::bfloa
+      21.0 ms  fmha_cutlassF_f32_aligned_32x128_gmem_sm80(PyTorchMemEffAttention::AttentionKernel<float, cutlas
+       4.4 ms  triton_poi_fused__scaled_dot_product_cudnn_attention_permute_scalar_tensor_where_0
+
+Top 5 'other' kernels (sanity check that we're not mis-bucketing):
+     848.6 ms  triton_poi_fused_cat_3
+     787.1 ms  rotary_kernel
+     541.4 ms  triton_poi_fused_add_mul_native_layer_norm_unsqueeze_3
+     487.0 ms  triton_red_fused_add_mul_native_layer_norm_unsqueeze_0
+     302.3 ms  triton_red_fused_native_layer_norm_1
