@@ -57,11 +57,7 @@ def _audio_conditioning_input_samples(model_config: dict[str, Any]) -> int:
 
 
 def get_audiox_post_process_func(od_config: OmniDiffusionConfig):
-    """Convert the pipeline's float audio tensor to a CPU numpy array for serving.
-
-    Test/CI assert ``isinstance(multimodal_output["audio"], np.ndarray)``; without this,
-    the raw torch tensor flows through ``DiffusionEngine`` unchanged.
-    """
+    """Convert the pipeline's float audio tensor to a CPU numpy array for serving."""
 
     def post_process_func(audio: torch.Tensor) -> Any:
         if isinstance(audio, torch.Tensor):
@@ -346,31 +342,20 @@ class _BrownianTreeNoiseSampler:
 
     Returns a scaled Brownian increment between two sigma levels; the tree is indexed by
     transformed ``sigma`` (here linear, same as k-diffusion's default), so re-querying
-    identical (sigma, sigma_next) pairs returns the same noise.
+    identical (sigma, sigma_next) pairs returns the same noise. Entropy must come from
+    the user's seed — otherwise the unseeded global RNG would make sampling non-deterministic.
     """
 
-    def __init__(
-        self,
-        x: torch.Tensor,
-        sigma_min: torch.Tensor,
-        sigma_max: torch.Tensor,
-        entropy: int | None = None,
-    ):
-        t0, t1 = torch.as_tensor(sigma_min), torch.as_tensor(sigma_max)
-        if t0 > t1:
-            t0, t1 = t1, t0
-        # ``entropy`` must be derived from the user's seed for deterministic sampling; without it
-        # ``torch.randint`` consumes the (unseeded) global RNG and the Brownian tree varies run-to-run.
-        if entropy is None:
-            entropy = int(torch.randint(0, 2**63 - 1, (1,), device="cpu").item())
+    def __init__(self, x: torch.Tensor, sigma_min: torch.Tensor, sigma_max: torch.Tensor, entropy: int):
+        t0 = torch.as_tensor(sigma_min)
+        t1 = torch.as_tensor(sigma_max)
         self._tree = torchsde.BrownianTree(t0, torch.zeros_like(x), t1, entropy=entropy)
 
     def __call__(self, sigma: torch.Tensor, sigma_next: torch.Tensor) -> torch.Tensor:
-        t0, t1 = torch.as_tensor(sigma), torch.as_tensor(sigma_next)
-        sign = 1.0 if t0 < t1 else -1.0
-        if sign == -1.0:
-            t0, t1 = t1, t0
-        return self._tree(t0, t1) * sign / (t1 - t0).abs().sqrt()
+        # AudioX denoises from sigma_max → 0, so sigma > sigma_next throughout the loop.
+        t0 = torch.as_tensor(sigma_next)
+        t1 = torch.as_tensor(sigma)
+        return -self._tree(t0, t1) / (t1 - t0).sqrt()
 
 
 class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMixin):
@@ -404,22 +389,21 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
         self.model = MMDiffusionTransformer(**dict(diffusion_config["config"]))
 
-        cond_configs = {c["id"]: c.get("config", {}) for c in model_config["conditioning"]["configs"]}
+        cond_configs = {c["id"]: c["config"] for c in model_config["conditioning"]["configs"]}
         self.audio_vae_adapter = AudioVaePromptAdapter(
             cond_dim=int(model_config["conditioning"]["cond_dim"]),
             latent_seq_len=int(cond_configs["audio_prompt"]["latent_seq_len"]),
         )
 
-        t5_name = cond_configs.get("text_prompt", {}).get("t5_model_name", "t5-base")
-        self._t5_max_length = int(cond_configs.get("text_prompt", {}).get("max_length", 128))
+        t5_name = cond_configs["text_prompt"]["t5_model_name"]
+        self._t5_max_length = int(cond_configs["text_prompt"]["max_length"])
         self.tokenizer = T5TokenizerFast.from_pretrained(t5_name)
         t5_config = AutoConfig.from_pretrained(t5_name)
         self.text_encoder = T5EncoderModel(t5_config).train(False).requires_grad_(False).to(torch.float16)
 
-        clip_name = cond_configs.get("video_prompt", {}).get("clip_model_name", "openai/clip-vit-base-patch32")
+        clip_name = cond_configs["video_prompt"]["clip_model_name"]
         clip_config = AutoConfig.from_pretrained(clip_name)
-        vision_config = getattr(clip_config, "vision_config", clip_config)
-        self.clip_encoder = CLIPVisionModelWithProjection(vision_config)
+        self.clip_encoder = CLIPVisionModelWithProjection(clip_config.vision_config)
         _CLIP_PATCH_TOKENS, _VIDEO_FPS, _DURATION_SEC, _DIM = 50, 5, 10, 768
         _in_features = _CLIP_PATCH_TOKENS * _VIDEO_FPS * _DURATION_SEC
         self._clip_in_features = _in_features
@@ -441,17 +425,13 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         self.io_channels = model_config["io_channels"]
         self.diffusion_objective = "v"
 
-        gate = bool(diffusion_config.get("gate", False))
-        gate_type_config = diffusion_config.get("gate_type_config") or {}
-        self.maf_block: MAF_Block | None = None
-        if gate and diffusion_config.get("gate_type") == "MAF":
-            self.maf_block = MAF_Block(
-                dim=768,
-                num_experts_per_modality=int(gate_type_config.get("num_experts_per_modality", 64)),
-                num_heads=int(gate_type_config.get("num_heads", 24)),
-                num_fusion_layers=int(gate_type_config.get("num_fusion_layers", 8)),
-                mlp_ratio=float(gate_type_config.get("mlp_ratio", 4.0)),
-            )
+        gate_type_config = diffusion_config["gate_type_config"]
+        self.maf_block = MAF_Block(
+            dim=768,
+            num_experts_per_modality=int(gate_type_config["num_experts_per_modality"]),
+            num_heads=int(gate_type_config["num_heads"]),
+            num_fusion_layers=int(gate_type_config["num_fusion_layers"]),
+        )
 
         logger.debug("AudioX model built from %s", self._model_root)
 
@@ -604,36 +584,17 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
         return tensors
 
     def get_conditioning_inputs(self, conditioning_tensors: dict[str, Any], negative: bool = False) -> dict[str, Any]:
-        cross_attention_input: list[torch.Tensor] = []
-        cross_attention_masks: list[torch.Tensor] = []
+        video_feature, video_mask = conditioning_tensors["video_prompt"]
+        text_feature, text_mask = conditioning_tensors["text_prompt"]
+        audio_feature, audio_mask = conditioning_tensors["audio_prompt"]
 
-        for key in ("video_prompt", "text_prompt", "audio_prompt"):
-            cross_attn_in, cross_attn_mask = conditioning_tensors[key]
-            if len(cross_attn_in.shape) == 2:
-                cross_attn_in = cross_attn_in.unsqueeze(1)
-                cross_attn_mask = cross_attn_mask.unsqueeze(1)
-            cross_attention_input.append(cross_attn_in)
-            cross_attention_masks.append(cross_attn_mask)
-
-        video_feature, text_feature, audio_feature = cross_attention_input
-        if self.maf_block is not None:
-            refined = self.maf_block(text_feature, video_feature, audio_feature)
-            fused = torch.cat(list(refined.values()), dim=1)
-        else:
-            fused = torch.cat([video_feature, text_feature, audio_feature], dim=1)
-        masks = torch.cat(cross_attention_masks, dim=1)
+        refined = self.maf_block(text_feature, video_feature, audio_feature)
+        fused = torch.cat(list(refined.values()), dim=1)
+        masks = torch.cat([video_mask, text_mask, audio_mask], dim=1)
 
         if negative:
-            return {
-                "negative_cross_attn_cond": fused,
-                "negative_cross_attn_mask": masks,
-                "negative_global_embed": None,
-            }
-        return {
-            "cross_attn_cond": fused,
-            "cross_attn_cond_mask": masks,
-            "global_embed": None,
-        }
+            return {"negative_cross_attn_cond": fused, "negative_cross_attn_mask": masks}
+        return {"cross_attn_cond": fused}
 
     def diffuse(
         self,
@@ -687,11 +648,8 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
                 x_in * c_in,
                 t_cond,
                 cross_attn_cond=cond["cross_attn_cond"],
-                cross_attn_cond_mask=cond["cross_attn_cond_mask"],
-                global_embed=None,
                 negative_cross_attn_cond=neg.get("negative_cross_attn_cond"),
                 negative_cross_attn_mask=neg.get("negative_cross_attn_mask"),
-                negative_global_embed=None,
                 cfg_scale=guidance_scale,
                 scale_phi=cfg_rescale,
             )
@@ -874,8 +832,6 @@ class AudioXPipeline(nn.Module, SupportAudioOutput, DiffusionPipelineProfilerMix
 
         seconds_start = float(extra_args.get("seconds_start", 0.0))
         seconds_model = self._sample_size / self._sample_rate
-        # Upstream AudioX always denoises a fixed-size latent (sample_size / sample_rate seconds);
-        # ``seconds_total`` is honored by trimming the decoded audio to the requested duration.
         seconds_total = float(extra_args.get("seconds_total", seconds_model))
         sigma_min = float(extra_args.get("sigma_min", _DEFAULT_UPSTREAM_SIGMA_MIN))
         sigma_max = float(extra_args.get("sigma_max", _DEFAULT_UPSTREAM_SIGMA_MAX))

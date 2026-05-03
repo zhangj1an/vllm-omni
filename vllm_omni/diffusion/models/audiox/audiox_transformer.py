@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import typing as tp
 from collections.abc import Iterable
 from typing import Any
 
@@ -267,40 +266,32 @@ class AudioXMMDiTBlock(nn.Module):
 
 
 class MMDiffusionTransformer(nn.Module):
+    """AudioX MMDiT, specialized for the published bundle (`zhangj1an/AudioX`).
+
+    The bundle fixes patch_size=1, transformer_type="continuous_transformer",
+    cond_token_dim=768 (>0, project_cond_tokens=False), and never sets
+    prepend_cond_dim or input_concat_dim, so those code paths are removed.
+    """
+
     def __init__(
         self,
-        io_channels=32,
-        patch_size=1,
-        embed_dim=768,
-        cond_token_dim=0,
-        project_cond_tokens=True,
-        global_cond_dim=0,
-        project_global_cond=True,
-        input_concat_dim=0,
-        prepend_cond_dim=0,
-        depth=12,
-        num_heads=8,
-        transformer_type: tp.Literal["continuous_transformer"] = "continuous_transformer",
-        global_cond_type: tp.Literal["prepend", "adaLN"] = "prepend",
+        io_channels: int,
+        embed_dim: int,
+        cond_token_dim: int,
+        global_cond_dim: int,
+        depth: int,
+        num_heads: int,
+        project_cond_tokens: bool = False,
+        project_global_cond: bool = True,
         **kwargs,
     ):
         super().__init__()
         if kwargs:
             logger.debug("MMDiffusionTransformer ignoring unused config keys: %s", sorted(kwargs.keys()))
+        if project_cond_tokens:
+            raise ValueError("AudioX bundle requires project_cond_tokens=False to match official checkpoints.")
 
         self.cond_token_dim = cond_token_dim
-        if patch_size != 1:
-            raise ValueError("AudioX inference-only MMDiT requires patch_size=1.")
-        if transformer_type != "continuous_transformer":
-            raise ValueError("AudioX inference-only MMDiT requires transformer_type='continuous_transformer'.")
-        if global_cond_type != "prepend":
-            raise ValueError("AudioX inference-only MMDiT requires global_cond_type='prepend'.")
-        if not cond_token_dim > 0:
-            raise ValueError("AudioX inference-only MMDiT requires cond_token_dim > 0.")
-        if project_cond_tokens:
-            raise ValueError(
-                "AudioX inference-only MMDiT requires project_cond_tokens=False to match official checkpoints."
-            )
 
         timestep_features_dim = 256
         self.timestep_features = GaussianFourierProjection(
@@ -315,45 +306,31 @@ class MMDiffusionTransformer(nn.Module):
             nn.Linear(embed_dim, embed_dim, bias=True),
         )
 
-        if cond_token_dim > 0:
-            cond_embed_dim = cond_token_dim if not project_cond_tokens else embed_dim
-            self.to_cond_embed = nn.Sequential(
-                nn.Linear(cond_token_dim, cond_embed_dim, bias=False),
-                nn.SiLU(),
-                nn.Linear(cond_embed_dim, cond_embed_dim, bias=False),
-            )
-        else:
-            cond_embed_dim = 0
+        cond_embed_dim = cond_token_dim if not project_cond_tokens else embed_dim
+        self.to_cond_embed = nn.Sequential(
+            nn.Linear(cond_token_dim, cond_embed_dim, bias=False),
+            nn.SiLU(),
+            nn.Linear(cond_embed_dim, cond_embed_dim, bias=False),
+        )
 
-        if global_cond_dim > 0:
-            global_embed_dim = global_cond_dim if not project_global_cond else embed_dim
-            self.to_global_embed = nn.Sequential(
-                nn.Linear(global_cond_dim, global_embed_dim, bias=False),
-                nn.SiLU(),
-                nn.Linear(global_embed_dim, global_embed_dim, bias=False),
-            )
-
-        if prepend_cond_dim > 0:
-            self.to_prepend_embed = nn.Sequential(
-                nn.Linear(prepend_cond_dim, embed_dim, bias=False),
-                nn.SiLU(),
-                nn.Linear(embed_dim, embed_dim, bias=False),
-            )
-
-        self.input_concat_dim = input_concat_dim
-        dim_in = io_channels + self.input_concat_dim
-        self.patch_size = patch_size
-        self.global_cond_type = global_cond_type
+        # ``to_global_embed`` weights live in the bundle but global conditioning is always None
+        # at inference; kept so AutoWeightsLoader has a slot to load them into.
+        global_embed_dim = global_cond_dim if not project_global_cond else embed_dim
+        self.to_global_embed = nn.Sequential(
+            nn.Linear(global_cond_dim, global_embed_dim, bias=False),
+            nn.SiLU(),
+            nn.Linear(global_embed_dim, global_embed_dim, bias=False),
+        )
 
         self.transformer = ContinuousMMDiTTransformer(
             dim=embed_dim,
             depth=depth,
             dim_heads=embed_dim // num_heads,
-            dim_in=dim_in * patch_size,
-            dim_out=io_channels * patch_size,
+            dim_in=io_channels,
+            dim_out=io_channels,
         )
 
-        self.preprocess_conv = nn.Conv1d(dim_in, dim_in, 1, bias=False)
+        self.preprocess_conv = nn.Conv1d(io_channels, io_channels, 1, bias=False)
         nn.init.zeros_(self.preprocess_conv.weight)
         self.postprocess_conv = nn.Conv1d(io_channels, io_channels, 1, bias=False)
         nn.init.zeros_(self.postprocess_conv.weight)
@@ -361,141 +338,60 @@ class MMDiffusionTransformer(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-
         for name, loaded_weight in weights:
-            if name in params_dict:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name)
-            else:
-                logger.debug("Skipping weight %s - not found in model", name)
-
+            if name not in params_dict:
+                continue
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
         return loaded_params
 
-    def _forward(
-        self,
-        x,
-        t,
-        cross_attn_cond=None,
-        input_concat_cond=None,
-        global_embed=None,
-        prepend_cond=None,
-    ):
-        if global_embed is not None:
-            global_embed = self.to_global_embed(global_embed)
-
-        prepend_inputs = None
-        prepend_length = 0
-        if prepend_cond is not None:
-            prepend_cond = self.to_prepend_embed(prepend_cond)
-            prepend_inputs = prepend_cond
-
-        if input_concat_cond is not None:
-            if input_concat_cond.shape[2] != x.shape[2]:
-                input_concat_cond = F.interpolate(input_concat_cond, (x.shape[2],), mode="nearest")
-            x = torch.cat([x, input_concat_cond], dim=1)
-
+    def _forward(self, x, t, cross_attn_cond):
         timestep_embed = self.to_timestep_embed(self.timestep_features(t[:, None]))
-        global_embed = global_embed + timestep_embed.unsqueeze(1) if global_embed is not None else timestep_embed
-
-        if self.global_cond_type == "prepend":
-            if prepend_inputs is None:
-                prepend_inputs = global_embed.unsqueeze(1)
-            else:
-                prepend_inputs = torch.cat([prepend_inputs, global_embed.unsqueeze(1)], dim=1)
-            prepend_length = prepend_inputs.shape[1]
+        prepend_inputs = timestep_embed.unsqueeze(1)
+        prepend_length = prepend_inputs.shape[1]
 
         x = self.preprocess_conv(x) + x
         x = rearrange(x, "b c n -> b n c")
-
-        if self.patch_size > 1:
-            x = rearrange(x, "b (t p) c -> b t (c p)", p=self.patch_size)
-        output = self.transformer(
-            x,
-            prepend_embeds=prepend_inputs,
-            context=cross_attn_cond,
-        )
-
+        output = self.transformer(x, prepend_embeds=prepend_inputs, context=cross_attn_cond)
         output = rearrange(output, "b n c -> b c n")[:, :, prepend_length:]
-        if self.patch_size > 1:
-            output = rearrange(output, "b (t p) c -> b t (c p)", p=self.patch_size)
-        output = self.postprocess_conv(output) + output
-
-        return output
+        return self.postprocess_conv(output) + output
 
     def forward(
         self,
         x,
         t,
-        cross_attn_cond=None,
+        cross_attn_cond,
         negative_cross_attn_cond=None,
         negative_cross_attn_mask=None,
-        input_concat_cond=None,
-        global_embed=None,
-        prepend_cond=None,
-        cfg_scale=1.0,
-        causal=False,
-        scale_phi=0.0,
+        cfg_scale: float = 1.0,
+        scale_phi: float = 0.0,
         **kwargs,
     ):
-        assert not causal, "Causal mode is not supported for DiffusionTransformer"
+        if cfg_scale == 1.0:
+            return self._forward(x, t, cross_attn_cond)
 
-        if cfg_scale != 1.0 and (cross_attn_cond is not None or prepend_cond is not None):
-            batch_inputs = torch.cat([x, x], dim=0)
-            batch_timestep = torch.cat([t, t], dim=0)
-            batch_global_cond = torch.cat([global_embed, global_embed], dim=0) if global_embed is not None else None
-            batch_input_concat_cond = (
-                torch.cat([input_concat_cond, input_concat_cond], dim=0) if input_concat_cond is not None else None
-            )
+        # Classifier-free guidance: batch the conditional + unconditional pass.
+        null_embed = torch.zeros_like(cross_attn_cond)
+        if negative_cross_attn_cond is not None and negative_cross_attn_mask is not None:
+            mask = negative_cross_attn_mask.to(torch.bool).unsqueeze(2)
+            negative_cross_attn_cond = torch.where(mask, negative_cross_attn_cond, null_embed)
+        uncond = negative_cross_attn_cond if negative_cross_attn_cond is not None else null_embed
 
-            batch_cond = None
-            if cross_attn_cond is not None:
-                null_embed = torch.zeros_like(cross_attn_cond, device=cross_attn_cond.device)
-                if negative_cross_attn_cond is not None:
-                    if negative_cross_attn_mask is not None:
-                        negative_cross_attn_mask = negative_cross_attn_mask.to(torch.bool).unsqueeze(2)
-                        negative_cross_attn_cond = torch.where(
-                            negative_cross_attn_mask, negative_cross_attn_cond, null_embed
-                        )
-                    batch_cond = torch.cat([cross_attn_cond, negative_cross_attn_cond], dim=0)
-                else:
-                    batch_cond = torch.cat([cross_attn_cond, null_embed], dim=0)
-
-            batch_prepend_cond = None
-            if prepend_cond is not None:
-                null_embed = torch.zeros_like(prepend_cond, device=prepend_cond.device)
-                batch_prepend_cond = torch.cat([prepend_cond, null_embed], dim=0)
-
-            batch_output = self._forward(
-                batch_inputs,
-                batch_timestep,
-                cross_attn_cond=batch_cond,
-                input_concat_cond=batch_input_concat_cond,
-                global_embed=batch_global_cond,
-                prepend_cond=batch_prepend_cond,
-            )
-
-            cond_output, uncond_output = torch.chunk(batch_output, 2, dim=0)
-            cfg_output = uncond_output + (cond_output - uncond_output) * cfg_scale
-
-            if scale_phi != 0.0:
-                cond_out_std = cond_output.std(dim=1, keepdim=True)
-                out_cfg_std = cfg_output.std(dim=1, keepdim=True)
-                output = scale_phi * (cfg_output * (cond_out_std / out_cfg_std)) + (1 - scale_phi) * cfg_output
-            else:
-                output = cfg_output
-
-            return output
-
-        return self._forward(
-            x,
-            t,
-            cross_attn_cond=cross_attn_cond,
-            input_concat_cond=input_concat_cond,
-            global_embed=global_embed,
-            prepend_cond=prepend_cond,
+        batch_output = self._forward(
+            torch.cat([x, x], dim=0),
+            torch.cat([t, t], dim=0),
+            torch.cat([cross_attn_cond, uncond], dim=0),
         )
+        cond_output, uncond_output = torch.chunk(batch_output, 2, dim=0)
+        cfg_output = uncond_output + (cond_output - uncond_output) * cfg_scale
+
+        if scale_phi == 0.0:
+            return cfg_output
+        cond_std = cond_output.std(dim=1, keepdim=True)
+        cfg_std = cfg_output.std(dim=1, keepdim=True)
+        return scale_phi * (cfg_output * (cond_std / cfg_std)) + (1 - scale_phi) * cfg_output
 
 
 class ContinuousMMDiTTransformer(nn.Module):

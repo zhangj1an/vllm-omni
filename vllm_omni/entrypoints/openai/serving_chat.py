@@ -2770,7 +2770,8 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         messages: list[Any],
     ) -> tuple[str, list[str]]:
         """Normalize mixed message types and extract prompt + reference images once."""
-        return self._extract_diffusion_prompt_and_images(self._messages_to_dicts(messages))
+        prompt, images, _videos, _audios = self._extract_diffusion_prompt_and_media(self._messages_to_dicts(messages))
+        return prompt, images
 
     @staticmethod
     def _messages_to_dicts(messages: list[Any]) -> list[dict[str, Any]]:

@@ -36,6 +36,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 
 from vllm_omni.config.stage_config import strip_parent_engine_args
 from vllm_omni.diffusion.data import DiffusionParallelConfig
+from vllm_omni.diffusion.diffusion_engine import supports_audio_output
 from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
 from vllm_omni.diffusion.stage_diffusion_proc import (
     complete_diffusion_handshake,
@@ -1325,7 +1326,7 @@ class AsyncOmniEngine:
         num_devices = max(1, int(parallel_config.world_size))
         devices = ",".join(str(i) for i in range(num_devices))
         model_class_name = kwargs.get("model_class_name", None)
-        final_output_type = "audio" if model_class_name == "AudioXPipeline" else "image"
+        final_output_type = "audio" if model_class_name and supports_audio_output(model_class_name) else "image"
 
         stage_engine_args = {
             "max_num_seqs": 1,

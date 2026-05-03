@@ -56,9 +56,6 @@ def test_audiox_model(model_name: str):
 
     assert outputs is not None
     first_output = outputs[0]
-    # AudioXPipeline is special-cased in async_omni_engine._create_default_diffusion_stage_cfg
-    # so the outer stage metadata final_output_type is "audio" (unlike StableAudio which falls
-    # through to the "image" default).
     assert first_output.final_output_type == "audio"
     assert hasattr(first_output, "request_output") and first_output.request_output
 
