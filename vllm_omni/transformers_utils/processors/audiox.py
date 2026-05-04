@@ -74,21 +74,47 @@ def materialize_media_source(source: str) -> str:
     return source
 
 
-def _load_video_path_torchvision(
+def _load_video_path_pyav(
     path: str,
     *,
     target_fps: int,
     duration: float,
     seek_time: float,
 ) -> torch.Tensor:
-    from torchvision.io import read_video
+    # PyAV instead of torchvision.io.read_video: the latter was removed in
+    # torchvision 0.26 (ships with torch 2.11). PyAV is already a required
+    # dependency (requirements/common.txt: av>=14.0.0).
+    import av
 
     path = materialize_media_source(path)
-    end_pts = float(seek_time) + float(duration) if duration > 0 else None
-    video, _, info = read_video(path, start_pts=float(seek_time), end_pts=end_pts, pts_unit="sec", output_format="TCHW")
-    if video.shape[0] == 0:
-        raise ValueError(f"No frames in range seek_time={seek_time!r}, duration={duration!r} for {path!r}")
-    src_fps = float(info.get("video_fps") or target_fps)
+    seek_time = float(seek_time)
+    duration = float(duration)
+    end_time = seek_time + duration if duration > 0 else None
+
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        time_base = float(stream.time_base)
+        src_fps = float(stream.average_rate or target_fps)
+
+        if seek_time > 0:
+            container.seek(int(seek_time / time_base), stream=stream)
+
+        frames: list[np.ndarray] = []
+        for frame in container.decode(stream):
+            t = float(frame.pts) * time_base
+            if t < seek_time:
+                continue
+            if end_time is not None and t >= end_time:
+                break
+            frames.append(frame.to_ndarray(format="rgb24"))
+
+    if not frames:
+        raise ValueError(
+            f"No frames in range seek_time={seek_time!r}, duration={duration!r} for {path!r}"
+        )
+
+    # PyAV gives [H, W, C] uint8 RGB per frame; AudioX expects [T, C, H, W].
+    video = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).contiguous()
     n_target = max(1, int(round(video.shape[0] * float(target_fps) / src_fps)))
     if n_target >= video.shape[0]:
         return video
@@ -109,7 +135,7 @@ def load_video_source(
         ext = os.path.splitext(source)[1].lower()
         if ext in _IMAGE_EXTS:
             return read_image(materialize_media_source(source)).unsqueeze(0)
-        return _load_video_path_torchvision(
+        return _load_video_path_pyav(
             source,
             target_fps=target_fps,
             duration=duration,
