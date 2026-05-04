@@ -18,12 +18,14 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+import av
 import numpy as np
 import soundfile
 import torch
 import torch.nn.functional as F
 import torchaudio.functional as taF
 from einops import rearrange
+from torchvision.io import read_image
 
 # AudioX task taxonomy. Tasks beginning with "v" require a video input; tasks containing
 # "t" carry a text prompt. tv2*/v2* share the same conditioning pathways.
@@ -81,11 +83,6 @@ def _load_video_path_pyav(
     duration: float,
     seek_time: float,
 ) -> torch.Tensor:
-    # PyAV instead of torchvision.io.read_video: the latter was removed in
-    # torchvision 0.26 (ships with torch 2.11). PyAV is already a required
-    # dependency (requirements/common.txt: av>=14.0.0).
-    import av
-
     path = materialize_media_source(path)
     seek_time = float(seek_time)
     duration = float(duration)
@@ -109,9 +106,7 @@ def _load_video_path_pyav(
             frames.append(frame.to_ndarray(format="rgb24"))
 
     if not frames:
-        raise ValueError(
-            f"No frames in range seek_time={seek_time!r}, duration={duration!r} for {path!r}"
-        )
+        raise ValueError(f"No frames in range seek_time={seek_time!r}, duration={duration!r} for {path!r}")
 
     # PyAV gives [H, W, C] uint8 RGB per frame; AudioX expects [T, C, H, W].
     video = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).contiguous()
@@ -130,8 +125,6 @@ def load_video_source(
     seek_time: float = 0.0,
 ) -> torch.Tensor:
     if isinstance(source, str):
-        from torchvision.io import read_image
-
         ext = os.path.splitext(source)[1].lower()
         if ext in _IMAGE_EXTS:
             return read_image(materialize_media_source(source)).unsqueeze(0)
