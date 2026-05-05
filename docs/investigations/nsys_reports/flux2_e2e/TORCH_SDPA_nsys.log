@@ -1,0 +1,152 @@
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1440+g7c2c2a01e.d20260505
+ --> vLLM version 0.19.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+INFO 05-05 07:56:43 [omni_base.py:149] [Omni] Initializing with model /workspace/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots/26afe3a78bb242c0a8bb181dcc8937bb16e5c66c
+INFO 05-05 07:56:43 [async_omni_engine.py:280] [AsyncOmniEngine] Initializing with model /workspace/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots/26afe3a78bb242c0a8bb181dcc8937bb16e5c66c
+INFO 05-05 07:56:45 [async_omni_engine.py:340] [AsyncOmniEngine] Launching Orchestrator thread with 1 stages
+INFO 05-05 07:56:45 [stage_init_utils.py:371] [stage_init] Set VLLM_WORKER_MULTIPROC_METHOD=spawn
+INFO 05-05 07:56:45 [async_omni_engine.py:744] [AsyncOmniEngine] Initializing stage 0
+INFO 05-05 07:56:45 [stage_utils.py:120] Stage 0 logical-to-physical device mapping: 0->0, 1->1
+INFO 05-05 07:56:45 [stage_init_utils.py:386] [stage_init] Stage-0 set runtime devices: 0,1
+INFO 05-05 07:56:45 [multiproc_executor.py:138] Starting server...
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1440+g7c2c2a01e.d20260505
+ --> vLLM version 0.19.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1440+g7c2c2a01e.d20260505
+ --> vLLM version 0.19.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+INFO 05-05 07:56:52 [diffusion_worker.py:527] Worker 0 created result MessageQueue
+INFO 05-05 07:56:52 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=2048.
+INFO 05-05 07:56:52 [vllm.py:790] Asynchronous scheduling is enabled.
+INFO 05-05 07:56:52 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=2048.
+INFO 05-05 07:56:52 [vllm.py:790] Asynchronous scheduling is enabled.
+[Gloo] Rank 1 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 0 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+INFO 05-05 07:56:52 [diffusion_worker.py:131] Worker 0: Initialized device and distributed environment.
+INFO 05-05 07:56:52 [diffusion_worker.py:131] Worker 1: Initialized device and distributed environment.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0[Gloo] Rank  is connected to 00 peer ranks. Expected number of connected peer ranks is :  is connected to 00 peer ranks. Expected number of connected peer ranks is : 
+0
+[Gloo] Rank 0 is connected to 0 peer ranks. [Gloo] Rank Expected number of connected peer ranks is : 00 is connected to 
+0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 05-05 07:56:52 [parallel_state.py:588] Building SP subgroups from explicit sp_group_ranks (sp_size=1, ulysses=1, ring=1, use_ulysses_low=True).
+INFO 05-05 07:56:52 [parallel_state.py:588] Building SP subgroups from explicit sp_group_ranks (sp_size=1, ulysses=1, ring=1, use_ulysses_low=True).
+INFO 05-05 07:56:52 [parallel_state.py:630] SP group details for rank 0: sp_group=[0], ulysses_group=[0], ring_group=[0]
+INFO 05-05 07:56:52 [parallel_state.py:630] SP group details for rank 1: sp_group=[1], ulysses_group=[1], ring_group=[1]
+[Gloo] Rank [Gloo] Rank 00 is connected to 0 peer ranks. Expected number of connected peer ranks is :  is connected to 00
+ peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 1 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 0[Gloo] Rank 0 is connected to 0 is connected to  peer ranks. Expected number of connected peer ranks is : 0
+0 peer ranks. Expected number of connected peer ranks is : 0
+Loading checkpoint shards:   0%|          | 0/10 [00:00<?, ?it/s]Loading checkpoint shards:   0%|          | 0/10 [00:00<?, ?it/s]Loading checkpoint shards:  10%|█         | 1/10 [00:17<02:36, 17.38s/it]Loading checkpoint shards:  10%|█         | 1/10 [00:17<02:37, 17.49s/it]Loading checkpoint shards:  20%|██        | 2/10 [00:36<02:26, 18.34s/it]Loading checkpoint shards:  20%|██        | 2/10 [00:36<02:26, 18.35s/it]Loading checkpoint shards:  30%|███       | 3/10 [00:55<02:11, 18.75s/it]Loading checkpoint shards:  30%|███       | 3/10 [00:55<02:11, 18.79s/it]Loading checkpoint shards:  40%|████      | 4/10 [01:16<01:56, 19.47s/it]Loading checkpoint shards:  40%|████      | 4/10 [01:16<01:56, 19.48s/it]Loading checkpoint shards:  50%|█████     | 5/10 [01:34<01:34, 18.93s/it]Loading checkpoint shards:  50%|█████     | 5/10 [01:34<01:34, 18.94s/it]Loading checkpoint shards:  60%|██████    | 6/10 [01:53<01:15, 18.98s/it]Loading checkpoint shards:  60%|██████    | 6/10 [01:53<01:15, 18.99s/it]Loading checkpoint shards:  70%|███████   | 7/10 [02:10<00:54, 18.30s/it]Loading checkpoint shards:  70%|███████   | 7/10 [02:10<00:54, 18.33s/it]Loading checkpoint shards:  80%|████████  | 8/10 [02:26<00:35, 17.78s/it]Loading checkpoint shards:  80%|████████  | 8/10 [02:26<00:35, 17.79s/it]Loading checkpoint shards:  90%|█████████ | 9/10 [02:44<00:17, 17.72s/it]Loading checkpoint shards:  90%|█████████ | 9/10 [02:44<00:17, 17.72s/it]Loading checkpoint shards: 100%|██████████| 10/10 [03:00<00:00, 17.22s/it]Loading checkpoint shards: 100%|██████████| 10/10 [03:00<00:00, 18.05s/it]
+Loading checkpoint shards: 100%|██████████| 10/10 [03:00<00:00, 17.23s/it]Loading checkpoint shards: 100%|██████████| 10/10 [03:00<00:00, 18.06s/it]
+INFO 05-05 07:59:56 [platform.py:112] Using diffusion attention backend 'TORCH_SDPA'
+INFO 05-05 07:59:56 [platform.py:112] Using diffusion attention backend 'TORCH_SDPA'
+WARNING 05-05 07:59:56 [diffusion_pipeline_profiler.py:68] [DiffusionPipelineProfiler] Method path tokenizer.forward not found
+WARNING 05-05 07:59:56 [diffusion_pipeline_profiler.py:68] [DiffusionPipelineProfiler] Method path tokenizer.forward not found
+Multi-thread loading shards:   0% Completed | 0/7 [00:00<?, ?it/s]
+Multi-thread loading shards:  14% Completed | 1/7 [00:18<01:52, 18.83s/it]
+Multi-thread loading shards:  29% Completed | 2/7 [00:35<01:27, 17.54s/it]
+Multi-thread loading shards:  43% Completed | 3/7 [00:50<01:05, 16.33s/it]
+Multi-thread loading shards:  57% Completed | 4/7 [01:08<00:51, 17.18s/it]
+Multi-thread loading shards:  71% Completed | 5/7 [01:18<00:28, 14.32s/it]
+Multi-thread loading shards:  86% Completed | 6/7 [01:33<00:14, 14.85s/it]
+INFO 05-05 08:01:42 [diffusion_model_runner.py:142] Model loading took 75.6612 GiB and 289.464411 seconds
+INFO 05-05 08:01:42 [diffusion_model_runner.py:147] Model runner: Model loaded successfully.
+INFO 05-05 08:01:42 [diffusion_model_runner.py:86] Model runner: transformer compiled with torch.compile.
+INFO 05-05 08:01:42 [diffusion_model_runner.py:188] Model runner: Initialization complete.
+INFO 05-05 08:01:42 [diffusion_worker.py:183] Worker 1: Process-scoped GPU memory after model loading: 76.32 GiB.
+INFO 05-05 08:01:42 [manager.py:96] Initializing DiffusionLoRAManager: device=cuda:1, dtype=torch.bfloat16, max_cached_adapters=1, static_lora_path=None
+INFO 05-05 08:01:42 [diffusion_worker.py:95] Worker 1: Initialization complete.
+INFO 05-05 08:01:42 [diffusion_worker.py:687] Worker 1: Scheduler loop started.
+INFO 05-05 08:01:42 [diffusion_worker.py:597] Worker 1 ready to receive requests via shared memory
+Multi-thread loading shards: 100% Completed | 7/7 [01:50<00:00, 15.30s/it]
+Multi-thread loading shards: 100% Completed | 7/7 [01:50<00:00, 15.74s/it]
+
+INFO 05-05 08:01:47 [diffusers_loader.py:338] Loading weights took 110.28 seconds
+INFO 05-05 08:01:47 [diffusion_model_runner.py:142] Model loading took 75.6612 GiB and 295.280460 seconds
+INFO 05-05 08:01:47 [diffusion_model_runner.py:147] Model runner: Model loaded successfully.
+INFO 05-05 08:01:47 [diffusion_model_runner.py:86] Model runner: transformer compiled with torch.compile.
+INFO 05-05 08:01:47 [diffusion_model_runner.py:188] Model runner: Initialization complete.
+INFO 05-05 08:01:48 [diffusion_worker.py:183] Worker 0: Process-scoped GPU memory after model loading: 76.32 GiB.
+INFO 05-05 08:01:48 [manager.py:96] Initializing DiffusionLoRAManager: device=cuda:0, dtype=torch.bfloat16, max_cached_adapters=1, static_lora_path=None
+INFO 05-05 08:01:48 [diffusion_worker.py:95] Worker 0: Initialization complete.
+INFO 05-05 08:01:48 [diffusion_worker.py:687] Worker 0: Scheduler loop started.
+INFO 05-05 08:01:48 [diffusion_worker.py:597] Worker 0 ready to receive requests via shared memory
+INFO 05-05 08:01:48 [diffusion_engine.py:456] dummy run to warm up the model
+INFO 05-05 08:01:48 [kv_transfer_manager.py:1268] Rank-aware KV receive: rank 0 independently receiving (from_tp=2, to_tp=2)
+WARNING 05-05 08:01:48 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-05 08:01:48 [kv_transfer_manager.py:1268] Rank-aware KV receive: rank 1 independently receiving (from_tp=2, to_tp=2)
+WARNING 05-05 08:01:48 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-05 08:01:48 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.text_encoder.forward took 0.303466s
+INFO 05-05 08:01:48 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.text_encoder.forward took 0.304616s
+INFO 05-05 08:01:48 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.encode took 0.170106s
+  0%|          | 0/1 [00:00<?, ?it/s]INFO 05-05 08:01:48 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.encode took 0.168930s
+100%|██████████| 1/1 [00:03<00:00,  3.74s/it]100%|██████████| 1/1 [00:03<00:00,  3.74s/it]
+INFO 05-05 08:01:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.decode took 0.089743s
+INFO 05-05 08:01:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.decode took 0.089901s
+INFO 05-05 08:01:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.forward took 4.336435s
+INFO 05-05 08:01:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.forward took 4.336613s
+INFO 05-05 08:01:52 [diffusion_model_runner.py:213] Peak GPU memory (this request): 76.84 GB reserved, 76.28 GB allocated, 0.56 GB pool overhead (0.7%)
+INFO 05-05 08:01:52 [inline_stage_diffusion_client.py:63] [InlineStageDiffusionClient] Stage-0 initialized inline (batch_size=1)
+INFO 05-05 08:01:52 [async_omni_engine.py:800] [AsyncOmniEngine] Stage 0 initialized (diffusion, batch_size=1)
+INFO 05-05 08:01:52 [orchestrator.py:189] [Orchestrator] Starting event loop
+INFO 05-05 08:01:52 [async_omni_engine.py:367] [AsyncOmniEngine] Orchestrator ready with 1 stages
+INFO 05-05 08:01:52 [omni_base.py:162] [Omni] AsyncOmniEngine initialized in 308.87 seconds
+INFO 05-05 08:01:52 [omni_base.py:181] [Omni] Initialized with 1 stages for model /workspace/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots/26afe3a78bb242c0a8bb181dcc8937bb16e5c66c
+
+============================================================
+Generation Configuration:
+  Model: /workspace/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots/26afe3a78bb242c0a8bb181dcc8937bb16e5c66c
+  Inference steps: 50
+  Cache backend: None (no acceleration)
+  Quantization: None (BF16)
+  Parallel configuration: tensor_parallel_size=2, ulysses_degree=1, ulysses_mode=strict, ring_degree=1, cfg_parallel_size=1, vae_patch_parallel_size=1, enable_expert_parallel=False.
+  CPU offload: False; CPU Layerwise Offload: False
+  Image size: 1024x1024
+============================================================
+
+INFO 05-05 08:01:52 [orchestrator.py:889] [Orchestrator] _handle_add_request: stage=0 req=0_7ca98e6e-6069-4f05-8680-aeed4404cfda prompt_type=dict original_prompt_type=dict final_stage=0 num_sampling_params=1
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s]INFO 05-05 08:01:52 [kv_transfer_manager.py:1268] Rank-aware KV receive: rank 0 independently receiving (from_tp=2, to_tp=2)
+WARNING 05-05 08:01:52 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-05 08:01:52 [kv_transfer_manager.py:1268] Rank-aware KV receive: rank 1 independently receiving (from_tp=2, to_tp=2)
+WARNING 05-05 08:01:52 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-05 08:01:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.text_encoder.forward took 0.085546s
+INFO 05-05 08:01:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.text_encoder.forward took 0.085563s
+  0%|          | 0/50 [00:00<?, ?it/s]  4%|▍         | 2/50 [00:01<00:28,  1.66it/s]  6%|▌         | 3/50 [00:02<00:39,  1.18it/s]  8%|▊         | 4/50 [00:03<00:45,  1.02it/s] 10%|█         | 5/50 [00:04<00:47,  1.05s/it] 12%|█▏        | 6/50 [00:05<00:48,  1.10s/it] 14%|█▍        | 7/50 [00:07<00:48,  1.13s/it] 16%|█▌        | 8/50 [00:08<00:48,  1.15s/it] 18%|█▊        | 9/50 [00:09<00:47,  1.16s/it] 20%|██        | 10/50 [00:10<00:46,  1.16s/it] 22%|██▏       | 11/50 [00:11<00:45,  1.17s/it] 24%|██▍       | 12/50 [00:13<00:44,  1.17s/it] 26%|██▌       | 13/50 [00:14<00:43,  1.18s/it] 28%|██▊       | 14/50 [00:15<00:42,  1.18s/it] 30%|███       | 15/50 [00:16<00:41,  1.18s/it] 32%|███▏      | 16/50 [00:17<00:40,  1.18s/it] 34%|███▍      | 17/50 [00:18<00:38,  1.18s/it] 36%|███▌      | 18/50 [00:20<00:37,  1.18s/it] 38%|███▊      | 19/50 [00:21<00:36,  1.18s/it] 40%|████      | 20/50 [00:22<00:35,  1.18s/it] 42%|████▏     | 21/50 [00:23<00:34,  1.18s/it] 44%|████▍     | 22/50 [00:24<00:33,  1.18s/it] 46%|████▌     | 23/50 [00:26<00:31,  1.18s/it] 48%|████▊     | 24/50 [00:27<00:30,  1.18s/it] 50%|█████     | 25/50 [00:28<00:29,  1.18s/it] 52%|█████▏    | 26/50 [00:29<00:28,  1.18s/it] 54%|█████▍    | 27/50 [00:30<00:27,  1.18s/it] 56%|█████▌    | 28/50 [00:31<00:25,  1.18s/it] 58%|█████▊    | 29/50 [00:33<00:24,  1.18s/it] 60%|██████    | 30/50 [00:34<00:23,  1.18s/it] 62%|██████▏   | 31/50 [00:35<00:22,  1.18s/it] 64%|██████▍   | 32/50 [00:36<00:21,  1.18s/it] 66%|██████▌   | 33/50 [00:37<00:20,  1.18s/it] 68%|██████▊   | 34/50 [00:39<00:18,  1.18s/it] 70%|███████   | 35/50 [00:40<00:17,  1.18s/it] 72%|███████▏  | 36/50 [00:41<00:16,  1.18s/it] 74%|███████▍  | 37/50 [00:42<00:15,  1.18s/it] 76%|███████▌  | 38/50 [00:43<00:14,  1.18s/it] 78%|███████▊  | 39/50 [00:44<00:12,  1.18s/it] 80%|████████  | 40/50 [00:46<00:11,  1.18s/it] 82%|████████▏ | 41/50 [00:47<00:10,  1.18s/it] 84%|████████▍ | 42/50 [00:48<00:09,  1.18s/it] 86%|████████▌ | 43/50 [00:49<00:08,  1.18s/it] 88%|████████▊ | 44/50 [00:50<00:07,  1.18s/it] 90%|█████████ | 45/50 [00:52<00:05,  1.18s/it] 92%|█████████▏| 46/50 [00:53<00:04,  1.18s/it] 94%|█████████▍| 47/50 [00:54<00:03,  1.18s/it] 96%|█████████▌| 48/50 [00:55<00:02,  1.18s/it] 98%|█████████▊| 49/50 [00:56<00:01,  1.18s/it]100%|██████████| 50/50 [00:57<00:00,  1.18s/it]100%|██████████| 50/50 [00:57<00:00,  1.16s/it]
+INFO 05-05 08:02:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.decode took 0.128006s
+INFO 05-05 08:02:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.forward took 59.355039s
+INFO 05-05 08:02:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.decode took 0.128062s
+INFO 05-05 08:02:52 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.forward took 59.355502s
+INFO 05-05 08:02:52 [diffusion_model_runner.py:213] Peak GPU memory (this request): 80.46 GB reserved, 78.07 GB allocated, 2.39 GB pool overhead (3.0%)
+INFO 05-05 08:02:52 [diffusion_engine.py:127] Generation completed successfully.
+INFO 05-05 08:02:52 [diffusion_engine.py:174] Post-processing completed in 0.0185 seconds
+INFO 05-05 08:02:52 [diffusion_engine.py:177] DiffusionEngine.step breakdown: preprocess=0.00 ms, add_req_and_wait=59376.85 ms, postprocess=18.47 ms, total=59395.62 ms
+Processed prompts: 100%|██████████| 1/1 [00:59<00:00, 59.40s/it]INFO 05-05 08:02:52 [omni_base.py:254] [Summary] {}
+Processed prompts: 100%|██████████| 1/1 [00:59<00:00, 59.40s/it]
+Total generation time: 59.4010 seconds (59401.04 ms)
+INFO 05-05 08:02:52 [text_to_image.py:503] Outputs: [OmniRequestOutput(request_id='0_7ca98e6e-6069-4f05-8680-aeed4404cfda', finished=True, stage_id=0, final_output_type='image', request_output=OmniRequestOutput(request_id='0_7ca98e6e-6069-4f05-8680-aeed4404cfda', finished=True, stage_id=None, final_output_type='image', request_output=None, images=[1 PIL Images], prompt={'prompt': 'A warm morning kitchen close-up of a woman and a man in their 30s standing across from each other at the counter, both holding mugs, cinematic, deadpan, golden morning light, shallow depth of field.', 'negative_prompt': None}, latents=None, metrics={'preprocess_time_ms': 0.0, 'diffusion_engine_exec_time_ms': 59395.65838966519, 'diffusion_engine_total_time_ms': 59376.8543060869, 'image_num': 1, 'resolution': 640, 'postprocess_time_ms': 18.474035896360874}, multimodal_output={}, custom_output={}, stage_durations={}, peak_memory_mb=82386.0), images=[1 PIL Images], prompt=None, latents=None, metrics={}, multimodal_output={}, custom_output={}, stage_durations={}, peak_memory_mb=82386.0)]
+Saved generated image to bench_out/flux2_e2e/TORCH_SDPA_nsys.png
+INFO 05-05 08:02:52 [async_omni_engine.py:1739] [AsyncOmniEngine] Shutting down Orchestrator
+INFO 05-05 08:02:52 [orchestrator.py:249] [Orchestrator] Received shutdown signal
+INFO 05-05 08:02:52 [orchestrator.py:1195] [Orchestrator] Shutting down all stages
+INFO 05-05 08:02:52 [diffusion_worker.py:637] Worker 0: Received shutdown message
+INFO 05-05 08:02:52 [diffusion_worker.py:658] event loop terminated.
+INFO 05-05 08:02:52 [diffusion_worker.py:637] Worker 1: Received shutdown message
+INFO 05-05 08:02:52 [diffusion_worker.py:658] event loop terminated.
+INFO 05-05 08:02:52 [diffusion_worker.py:695] Worker 0: Shutdown complete.
+INFO 05-05 08:02:52 [diffusion_worker.py:695] Worker 1: Shutdown complete.
+INFO 05-05 08:02:55 [orchestrator.py:1199] [Orchestrator] Stage 0 shut down
+Collecting data...
+Generating '/tmp/nsys-report-3bcb.qdstrm'
+[1/1] [0%                          ] TORCH_SDPA.nsys-rep[1/1] [0%                          ] TORCH_SDPA.nsys-rep[1/1] [0%                          ] TORCH_SDPA.nsys-rep[1/1] [5%                          ] TORCH_SDPA.nsys-rep[1/1] [6%                          ] TORCH_SDPA.nsys-rep[1/1] [7%                          ] TORCH_SDPA.nsys-rep[1/1] [8%                          ] TORCH_SDPA.nsys-rep[1/1] [9%                          ] TORCH_SDPA.nsys-rep[1/1] [10%                         ] TORCH_SDPA.nsys-rep[1/1] [11%                         ] TORCH_SDPA.nsys-rep[1/1] [12%                         ] TORCH_SDPA.nsys-rep[1/1] [13%                         ] TORCH_SDPA.nsys-rep[1/1] [14%                         ] TORCH_SDPA.nsys-rep[1/1] [=15%                        ] TORCH_SDPA.nsys-rep[1/1] [=16%                        ] TORCH_SDPA.nsys-rep[1/1] [=17%                        ] TORCH_SDPA.nsys-rep[1/1] [==18%                       ] TORCH_SDPA.nsys-rep[1/1] [==19%                       ] TORCH_SDPA.nsys-rep[1/1] [==20%                       ] TORCH_SDPA.nsys-rep[1/1] [==21%                       ] TORCH_SDPA.nsys-rep[1/1] [===22%                      ] TORCH_SDPA.nsys-rep[1/1] [===23%                      ] TORCH_SDPA.nsys-rep[1/1] [===24%                      ] TORCH_SDPA.nsys-rep[1/1] [====25%                     ] TORCH_SDPA.nsys-rep[1/1] [====26%                     ] TORCH_SDPA.nsys-rep[1/1] [====27%                     ] TORCH_SDPA.nsys-rep[1/1] [====28%                     ] TORCH_SDPA.nsys-rep[1/1] [=====29%                    ] TORCH_SDPA.nsys-rep[1/1] [=====30%                    ] TORCH_SDPA.nsys-rep[1/1] [=====31%                    ] TORCH_SDPA.nsys-rep[1/1] [=====32%                    ] TORCH_SDPA.nsys-rep[1/1] [======33%                   ] TORCH_SDPA.nsys-rep[1/1] [======34%                   ] TORCH_SDPA.nsys-rep[1/1] [======35%                   ] TORCH_SDPA.nsys-rep[1/1] [=======36%                  ] TORCH_SDPA.nsys-rep[1/1] [=======37%                  ] TORCH_SDPA.nsys-rep[1/1] [=======38%                  ] TORCH_SDPA.nsys-rep[1/1] [=======39%                  ] TORCH_SDPA.nsys-rep[1/1] [========40%                 ] TORCH_SDPA.nsys-rep[1/1] [========41%                 ] TORCH_SDPA.nsys-rep[1/1] [========42%                 ] TORCH_SDPA.nsys-rep[1/1] [=========43%                ] TORCH_SDPA.nsys-rep[1/1] [=========44%                ] TORCH_SDPA.nsys-rep[1/1] [=========45%                ] TORCH_SDPA.nsys-rep[1/1] [=========46%                ] TORCH_SDPA.nsys-rep[1/1] [==========47%               ] TORCH_SDPA.nsys-rep[1/1] [==========48%               ] TORCH_SDPA.nsys-rep[1/1] [==========49%               ] TORCH_SDPA.nsys-rep[1/1] [===========50%              ] TORCH_SDPA.nsys-rep[1/1] [===========51%              ] TORCH_SDPA.nsys-rep[1/1] [===========52%              ] TORCH_SDPA.nsys-rep[1/1] [===========53%              ] TORCH_SDPA.nsys-rep[1/1] [============54%             ] TORCH_SDPA.nsys-rep[1/1] [============55%             ] TORCH_SDPA.nsys-rep[1/1] [============56%             ] TORCH_SDPA.nsys-rep[1/1] [============57%             ] TORCH_SDPA.nsys-rep[1/1] [=============58%            ] TORCH_SDPA.nsys-rep[1/1] [=============59%            ] TORCH_SDPA.nsys-rep[1/1] [=============60%            ] TORCH_SDPA.nsys-rep[1/1] [==============61%           ] TORCH_SDPA.nsys-rep[1/1] [==============62%           ] TORCH_SDPA.nsys-rep[1/1] [==============63%           ] TORCH_SDPA.nsys-rep[1/1] [==============64%           ] TORCH_SDPA.nsys-rep[1/1] [========================100%] TORCH_SDPA.nsys-rep[1/1] [========================100%] TORCH_SDPA.nsys-rep
+Generated:
+    /root/vllm-omni/docs/investigations/bench_out/flux2_e2e/TORCH_SDPA.nsys-rep

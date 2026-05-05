@@ -1,0 +1,71 @@
+============================================
+=== CUDNN_ATTN ===
+============================================
+Total GPU kernel time: 519.283 s
+
+  attention   :  96.978 s ( 18.7%)
+  gemm        : 375.300 s ( 72.3%)
+  elem        :   0.808 s (  0.2%)
+  norm        :  19.413 s (  3.7%)
+  conv        :   0.069 s (  0.0%)
+  reshape     :  20.302 s (  3.9%)
+  other       :   6.412 s (  1.2%)
+
+Top 10 attention kernels:
+   54594.5 ms  cudnn_generated_fort_native_sdpa_sm120_flash_fprop_f16_knob_3_64x64x128_4x1x1_cga1x1x1_kernel0_0
+   13860.3 ms  cudnn_generated_fort_native_sdpa_sm80_flash_fprop_wmma_f16_knob_3_64x64x128_4x1x1_cga1x1x1_kerne
+   12330.2 ms  cudnn_generated_fort_native_sdpa_sm80_flash_fprop_wmma_f16_knob_6_128x64x64_4x1x1_cga1x1x1_kerne
+   10761.8 ms  triton_poi_fused__fused_rms_norm__scaled_dot_product_cudnn_attention__to_copy_addcmul_permute_sl
+    5098.5 ms  triton_poi_fused__fused_rms_norm__scaled_dot_product_cudnn_attention__to_copy_addcmul_addmm_perm
+     153.8 ms  triton_poi_fused__fused_rms_norm__scaled_dot_product_cudnn_attention__to_copy_addcmul_addmm_perm
+      89.8 ms  triton_poi_fused__fused_rms_norm__scaled_dot_product_cudnn_attention__to_copy_addcmul_permute_sl
+      83.5 ms  fmha_cutlassF_bf16_aligned_32x128_gmem_sm80(PyTorchMemEffAttention::AttentionKernel<cutlass::bfl
+       5.8 ms  fmha_cutlassF_bf16_aligned_64x128_rf_sm80(PyTorchMemEffAttention::AttentionKernel<cutlass::bfloa
+
+Top 10 'other' kernels (sanity check that we're not mis-bucketing):
+    4052.3 ms  triton_poi_fused_add_1
+    1090.7 ms  ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)
+     388.9 ms  triton_red_fused_all_ne_0
+     298.0 ms  void at::native::<unnamed>::CatArrayBatchedCopy_alignedK_contig<at::native::<unnamed>::OpaqueTyp
+     129.1 ms  triton_poi_fused_clone_expand_unsqueeze_2
+     109.3 ms  triton_per_fused_all_ne_1
+     109.2 ms  triton_red_fused__to_copy_mean_mul_pow_rsqrt_0
+      94.4 ms  void at::native::<unnamed>::CatArrayBatchedCopy_alignedK_contig<at::native::<unnamed>::OpaqueTyp
+      58.9 ms  void at::native::<unnamed>::reflection_pad3d_out_kernel<c10::BFloat16>(torch::headeronly::detail
+      47.9 ms  void at::native::<unnamed>::vectorized_layer_norm_kernel<c10::BFloat16, float, (bool)0>(int, T2,
+============================================
+=== TORCH_SDPA ===
+============================================
+Total GPU kernel time: 562.467 s
+
+  attention   : 140.624 s ( 25.0%)
+  gemm        : 374.386 s ( 66.6%)
+  elem        :   0.808 s (  0.1%)
+  norm        :  19.403 s (  3.4%)
+  conv        :   0.069 s (  0.0%)
+  reshape     :  20.527 s (  3.6%)
+  other       :   6.650 s (  1.2%)
+
+Top 10 attention kernels:
+   60669.5 ms  void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<(int)128, (int)128, (int)64, (int)4
+   39724.1 ms  fmha_cutlassF_bf16_aligned_64x128_rf_sm80(PyTorchMemEffAttention::AttentionKernel<cutlass::bfloa
+   17863.3 ms  triton_poi_fused__scaled_dot_product_efficient_attention_constant_pad_nd_expand_permute_slice_0
+   10765.2 ms  triton_poi_fused__fused_rms_norm__scaled_dot_product_flash_attention__to_copy_addcmul_permute_sl
+    4999.2 ms  triton_poi_fused__fused_rms_norm__scaled_dot_product_flash_attention__to_copy_addcmul_addmm_perm
+    2599.3 ms  fmha_cutlassF_bf16_aligned_64x64_rf_sm80(PyTorchMemEffAttention::AttentionKernel<cutlass::bfloat
+    1802.8 ms  void pytorch_flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<(int)64, (int)64, (int)256,
+    1697.2 ms  void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<(int)64, (int)128, (int)128, (int)4
+     179.8 ms  void pytorch_flash::flash_fwd_splitkv_combine_kernel<Flash_fwd_kernel_traits<(int)64, (int)64, (
+     147.3 ms  triton_poi_fused__fused_rms_norm__scaled_dot_product_flash_attention__to_copy_addcmul_addmm_perm
+
+Top 10 'other' kernels (sanity check that we're not mis-bucketing):
+    3984.6 ms  triton_poi_fused_add_1
+    1401.9 ms  ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)
+     388.6 ms  triton_red_fused_all_ne_0
+     295.3 ms  void at::native::<unnamed>::CatArrayBatchedCopy_alignedK_contig<at::native::<unnamed>::OpaqueTyp
+     128.6 ms  triton_poi_fused_clone_expand_unsqueeze_2
+     108.3 ms  triton_per_fused_all_ne_1
+     107.2 ms  triton_red_fused__to_copy_mean_mul_pow_rsqrt_0
+      94.5 ms  void at::native::<unnamed>::CatArrayBatchedCopy_alignedK_contig<at::native::<unnamed>::OpaqueTyp
+      58.9 ms  void at::native::<unnamed>::reflection_pad3d_out_kernel<c10::BFloat16>(torch::headeronly::detail
+      47.8 ms  void at::native::<unnamed>::vectorized_layer_norm_kernel<c10::BFloat16, float, (bool)0>(int, T2,

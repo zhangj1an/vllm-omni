@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Wraps the Wan 2.2 14B T2V e2e bench:
+# LTX-2.0 (T2V + audio) e2e attention-backend profile to match PR #3079:
 #   Phase 1: e2e timings + pipeline profiler + SDPA shape hook (3 backends)
 #   Phase 2: nsys timeline of CUDNN_ATTN run
 #   Phase 3: nsys timeline of TORCH_SDPA run (so we see what default dispatcher picked)
+# CFG_PARALLEL_SIZE=2 matches the PR's two-GPU CFG-parallel setup. Defaults match
+# benchmarks/diffusion/bench_e2e_ltx2.sh (97 frames, 500 steps); override via env
+# vars if you want to bound profiling time, e.g. FRAMES=33 STEPS=50.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -11,16 +14,16 @@ source bench_out/env.sh
 export HF_TOKEN="${HF_TOKEN:?Set HF_TOKEN env var to your HuggingFace read token}"
 
 MODEL="${MODEL:-Lightricks/LTX-2}"
-PROMPT="${PROMPT:-A cat walks through a sunlit garden, flowers swaying gently in the breeze.}"
+PROMPT="${PROMPT:-A warm morning kitchen. The camera opens on a tight close-up of a woman and a man in their 30s standing across from each other at the counter, mugs in hand. The woman says low and serious: \"We said one. Just one.\" The man exhales, glancing guiltily at the floor, and mutters, \"It got lonely.\" The camera slowly pans right to reveal every surface of the kitchen covered in identical potted houseplants. He is still holding one more behind his back. Tone: deadpan, affectionate, and quietly tragic.}"
 HEIGHT="${HEIGHT:-480}"
 WIDTH="${WIDTH:-832}"
-# LTX-2 PR bench uses 97 frames + 500 steps. That's ~5 min/backend; for the
-# rotation profile we shorten to 33 frames + 50 steps to bound total time
-# while keeping the attention-shape mix the same (video=5070 tokens, audio=100).
-FRAMES="${FRAMES:-33}"
-STEPS="${STEPS:-50}"
-GUIDANCE="${GUIDANCE:-2.0}"
+FRAMES="${FRAMES:-97}"
+STEPS="${STEPS:-500}"
+GUIDANCE="${GUIDANCE:-4.0}"
+FRAME_RATE="${FRAME_RATE:-48}"
+FPS="${FPS:-48}"
 SEED="${SEED:-42}"
+CFG_PARALLEL_SIZE="${CFG_PARALLEL_SIZE:-2}"
 
 OUT_DIR="bench_out/ltx2_e2e"
 mkdir -p "$OUT_DIR"
@@ -35,7 +38,6 @@ run_driver() {
   local nsys_rep="${5:-}"
 
   local prefix=""
-  local cmd_pre=""
   if [[ -n "$nsys_rep" ]]; then
     prefix="nsys profile --output $nsys_rep --force-overwrite=true --trace cuda,nvtx,osrt --sample none --capture-range=none"
   fi
@@ -45,7 +47,7 @@ run_driver() {
     extra_env="SDPA_SHAPE_LOG=$sdpa_log"
   fi
 
-  local script=examples/offline_inference/text_to_video/text_to_video.py
+  local script=/root/vllm-omni/examples/offline_inference/text_to_video/text_to_video.py
   local pyargs=(
     --model "$MODEL"
     --prompt "$PROMPT"
@@ -54,14 +56,19 @@ run_driver() {
     --num-frames "$FRAMES"
     --num-inference-steps "$STEPS"
     --guidance-scale "$GUIDANCE"
+    --frame-rate "$FRAME_RATE"
+    --fps "$FPS"
     --seed "$SEED"
     --tensor-parallel-size 1
+    --cfg-parallel-size "$CFG_PARALLEL_SIZE"
     --enable-diffusion-pipeline-profiler
     --output "$out_video"
   )
 
-  CUDA_VISIBLE_DEVICES=0 DIFFUSION_ATTENTION_BACKEND="$backend" $extra_env \
-    $prefix python bench_out/run_with_hook.py "$script" "${pyargs[@]}" 2>&1 | tee "$log"
+  # `|| true` keeps the sweep going if the example's downstream video-save
+  # logic fails (we only care about the inference-time line in the log).
+  env CUDA_VISIBLE_DEVICES=0,1 DIFFUSION_ATTENTION_BACKEND="$backend" $extra_env \
+    $prefix python bench_out/run_with_hook.py "$script" "${pyargs[@]}" 2>&1 | tee "$log" || true
 }
 
 echo '########################################'

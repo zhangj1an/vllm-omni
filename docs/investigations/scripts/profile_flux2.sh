@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Wraps the Wan 2.2 14B T2V e2e bench:
+# FLUX.2-dev e2e attention-backend profile to match the PR #3079 bench config:
 #   Phase 1: e2e timings + pipeline profiler + SDPA shape hook (3 backends)
 #   Phase 2: nsys timeline of CUDNN_ATTN run
 #   Phase 3: nsys timeline of TORCH_SDPA run (so we see what default dispatcher picked)
+# TP=2 across both GPUs matches benchmarks/diffusion/bench_e2e_flux2.sh; FLUX.2-dev
+# is too big for a single 96 GB card without CPU offload, and offload changes the
+# critical path enough that the kernel ranking would no longer be comparable.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,6 +20,7 @@ WIDTH="${WIDTH:-1024}"
 STEPS="${STEPS:-50}"
 CFG_SCALE="${CFG_SCALE:-4.0}"
 SEED="${SEED:-42}"
+TP="${TP:-2}"
 
 OUT_DIR="bench_out/flux2_e2e"
 mkdir -p "$OUT_DIR"
@@ -40,7 +44,7 @@ run_driver() {
     extra_env="SDPA_SHAPE_LOG=$sdpa_log"
   fi
 
-  local script=examples/offline_inference/text_to_image/text_to_image.py
+  local script=/root/vllm-omni/examples/offline_inference/text_to_image/text_to_image.py
   local pyargs=(
     --model "$MODEL"
     --prompt "$PROMPT"
@@ -49,13 +53,12 @@ run_driver() {
     --num-inference-steps "$STEPS"
     --cfg-scale "$CFG_SCALE"
     --seed "$SEED"
-    --tensor-parallel-size 1
-    --enable-cpu-offload
+    --tensor-parallel-size "$TP"
     --enable-diffusion-pipeline-profiler
     --output "$out_image"
   )
 
-  CUDA_VISIBLE_DEVICES=0 DIFFUSION_ATTENTION_BACKEND="$backend" $extra_env \
+  env CUDA_VISIBLE_DEVICES=0,1 DIFFUSION_ATTENTION_BACKEND="$backend" $extra_env \
     $prefix python bench_out/run_with_hook.py "$script" "${pyargs[@]}" 2>&1 | tee "$log"
 }
 

@@ -1,0 +1,164 @@
+[sdpa_shape_logger] installed; logging to bench_out/flux2_e2e/FLASHINFER_ATTN.shapes.jsonl
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1440+g7c2c2a01e.d20260505
+ --> vLLM version 0.19.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+INFO 05-05 07:19:31 [omni_base.py:149] [Omni] Initializing with model /workspace/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots/26afe3a78bb242c0a8bb181dcc8937bb16e5c66c
+INFO 05-05 07:19:31 [async_omni_engine.py:280] [AsyncOmniEngine] Initializing with model /workspace/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots/26afe3a78bb242c0a8bb181dcc8937bb16e5c66c
+INFO 05-05 07:19:32 [async_omni_engine.py:340] [AsyncOmniEngine] Launching Orchestrator thread with 1 stages
+INFO 05-05 07:19:32 [stage_init_utils.py:371] [stage_init] Set VLLM_WORKER_MULTIPROC_METHOD=spawn
+INFO 05-05 07:19:32 [async_omni_engine.py:744] [AsyncOmniEngine] Initializing stage 0
+INFO 05-05 07:19:32 [stage_utils.py:120] Stage 0 logical-to-physical device mapping: 0->0, 1->1
+INFO 05-05 07:19:32 [stage_init_utils.py:386] [stage_init] Stage-0 set runtime devices: 0,1
+INFO 05-05 07:19:32 [multiproc_executor.py:138] Starting server...
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1440+g7c2c2a01e.d20260505
+ --> vLLM version 0.19.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+/root/vllm-omni/vllm_omni/version.py:55: RuntimeWarning: vLLM and vLLM-Omni appear to have mismatched major/minor versions:
+ --> vLLM-Omni version 0.1.dev1440+g7c2c2a01e.d20260505
+ --> vLLM version 0.19.0
+This will likely cause compatibility issues.
+  warn_if_misaligned_vllm_version()
+INFO 05-05 07:19:38 [diffusion_worker.py:527] Worker 0 created result MessageQueue
+INFO 05-05 07:19:39 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=2048.
+INFO 05-05 07:19:39 [vllm.py:790] Asynchronous scheduling is enabled.
+INFO 05-05 07:19:39 [scheduler.py:238] Chunked prefill is enabled with max_num_batched_tokens=2048.
+INFO 05-05 07:19:39 [vllm.py:790] Asynchronous scheduling is enabled.
+[Gloo] Rank 1 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 0 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+INFO 05-05 07:19:39 [diffusion_worker.py:131] Worker 0: Initialized device and distributed environment.
+INFO 05-05 07:19:39 [diffusion_worker.py:131] Worker 1: Initialized device and distributed environment.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 05-05 07:19:39 [parallel_state.py:588] Building SP subgroups from explicit sp_group_ranks (sp_size=1, ulysses=1, ring=1, use_ulysses_low=True).
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 05-05 07:19:39 [parallel_state.py:630] SP group details for rank 0: sp_group=[0], ulysses_group=[0], ring_group=[0]
+INFO 05-05 07:19:39 [parallel_state.py:588] Building SP subgroups from explicit sp_group_ranks (sp_size=1, ulysses=1, ring=1, use_ulysses_low=True).
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 05-05 07:19:39 [parallel_state.py:630] SP group details for rank 1: sp_group=[1], ulysses_group=[1], ring_group=[1]
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 1 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 0 is connected to [Gloo] Rank 0 peer ranks. Expected number of connected peer ranks is : 00 is connected to 
+0 peer ranks. Expected number of connected peer ranks is : 0
+Loading checkpoint shards:   0%|          | 0/10 [00:00<?, ?it/s]Loading checkpoint shards:   0%|          | 0/10 [00:00<?, ?it/s]Loading checkpoint shards:  10%|█         | 1/10 [00:18<02:50, 18.98s/it]Loading checkpoint shards:  10%|█         | 1/10 [00:19<02:51, 19.05s/it]Loading checkpoint shards:  20%|██        | 2/10 [00:38<02:32, 19.00s/it]Loading checkpoint shards:  20%|██        | 2/10 [00:38<02:32, 19.04s/it]Loading checkpoint shards:  30%|███       | 3/10 [00:57<02:15, 19.35s/it]Loading checkpoint shards:  30%|███       | 3/10 [00:57<02:15, 19.36s/it]Loading checkpoint shards:  40%|████      | 4/10 [01:16<01:54, 19.00s/it]Loading checkpoint shards:  40%|████      | 4/10 [01:16<01:54, 19.05s/it]Loading checkpoint shards:  50%|█████     | 5/10 [01:32<01:30, 18.15s/it]Loading checkpoint shards:  50%|█████     | 5/10 [01:32<01:30, 18.12s/it]Loading checkpoint shards:  60%|██████    | 6/10 [01:51<01:12, 18.13s/it]Loading checkpoint shards:  60%|██████    | 6/10 [01:50<01:12, 18.14s/it]Loading checkpoint shards:  70%|███████   | 7/10 [02:10<00:55, 18.54s/it]Loading checkpoint shards:  70%|███████   | 7/10 [02:10<00:55, 18.55s/it]Loading checkpoint shards:  80%|████████  | 8/10 [02:27<00:36, 18.09s/it]Loading checkpoint shards:  80%|████████  | 8/10 [02:27<00:36, 18.11s/it]Loading checkpoint shards:  90%|█████████ | 9/10 [02:45<00:18, 18.14s/it]Loading checkpoint shards:  90%|█████████ | 9/10 [02:45<00:18, 18.20s/it]Loading checkpoint shards: 100%|██████████| 10/10 [03:01<00:00, 17.50s/it]Loading checkpoint shards: 100%|██████████| 10/10 [03:01<00:00, 18.19s/it]
+Loading checkpoint shards: 100%|██████████| 10/10 [03:02<00:00, 17.55s/it]Loading checkpoint shards: 100%|██████████| 10/10 [03:02<00:00, 18.20s/it]
+INFO 05-05 07:22:44 [platform.py:112] Using diffusion attention backend 'FLASHINFER_ATTN'
+INFO 05-05 07:22:44 [platform.py:112] Using diffusion attention backend 'FLASHINFER_ATTN'
+WARNING 05-05 07:22:44 [diffusion_pipeline_profiler.py:68] [DiffusionPipelineProfiler] Method path tokenizer.forward not found
+WARNING 05-05 07:22:44 [diffusion_pipeline_profiler.py:68] [DiffusionPipelineProfiler] Method path tokenizer.forward not found
+Multi-thread loading shards:   0% Completed | 0/7 [00:00<?, ?it/s]
+Multi-thread loading shards:  14% Completed | 1/7 [00:18<01:52, 18.78s/it]
+Multi-thread loading shards:  29% Completed | 2/7 [00:35<01:28, 17.61s/it]
+Multi-thread loading shards:  43% Completed | 3/7 [00:56<01:15, 18.98s/it]
+Multi-thread loading shards:  57% Completed | 4/7 [01:09<00:50, 16.84s/it]
+Multi-thread loading shards:  71% Completed | 5/7 [01:26<00:33, 16.68s/it]
+Multi-thread loading shards:  86% Completed | 6/7 [01:35<00:14, 14.08s/it]
+INFO 05-05 07:24:35 [diffusion_model_runner.py:142] Model loading took 75.6612 GiB and 296.752719 seconds
+INFO 05-05 07:24:35 [diffusion_model_runner.py:147] Model runner: Model loaded successfully.
+INFO 05-05 07:24:35 [diffusion_model_runner.py:86] Model runner: transformer compiled with torch.compile.
+INFO 05-05 07:24:35 [diffusion_model_runner.py:188] Model runner: Initialization complete.
+INFO 05-05 07:24:36 [diffusion_worker.py:183] Worker 1: Process-scoped GPU memory after model loading: 76.29 GiB.
+INFO 05-05 07:24:36 [manager.py:96] Initializing DiffusionLoRAManager: device=cuda:1, dtype=torch.bfloat16, max_cached_adapters=1, static_lora_path=None
+INFO 05-05 07:24:36 [diffusion_worker.py:95] Worker 1: Initialization complete.
+INFO 05-05 07:24:36 [diffusion_worker.py:687] Worker 1: Scheduler loop started.
+INFO 05-05 07:24:36 [diffusion_worker.py:597] Worker 1 ready to receive requests via shared memory
+Multi-thread loading shards: 100% Completed | 7/7 [01:51<00:00, 14.97s/it]
+Multi-thread loading shards: 100% Completed | 7/7 [01:51<00:00, 16.00s/it]
+
+INFO 05-05 07:24:36 [diffusers_loader.py:338] Loading weights took 112.10 seconds
+INFO 05-05 07:24:37 [diffusion_model_runner.py:142] Model loading took 75.6612 GiB and 298.471319 seconds
+INFO 05-05 07:24:37 [diffusion_model_runner.py:147] Model runner: Model loaded successfully.
+INFO 05-05 07:24:37 [diffusion_model_runner.py:86] Model runner: transformer compiled with torch.compile.
+INFO 05-05 07:24:37 [diffusion_model_runner.py:188] Model runner: Initialization complete.
+INFO 05-05 07:24:38 [diffusion_worker.py:183] Worker 0: Process-scoped GPU memory after model loading: 76.29 GiB.
+INFO 05-05 07:24:38 [manager.py:96] Initializing DiffusionLoRAManager: device=cuda:0, dtype=torch.bfloat16, max_cached_adapters=1, static_lora_path=None
+INFO 05-05 07:24:38 [diffusion_worker.py:95] Worker 0: Initialization complete.
+INFO 05-05 07:24:38 [diffusion_worker.py:687] Worker 0: Scheduler loop started.
+INFO 05-05 07:24:38 [diffusion_worker.py:597] Worker 0 ready to receive requests via shared memory
+INFO 05-05 07:24:38 [diffusion_engine.py:456] dummy run to warm up the model
+INFO 05-05 07:24:38 [kv_transfer_manager.py:1268] Rank-aware KV receive: rank 0 independently receiving (from_tp=2, to_tp=2)
+WARNING 05-05 07:24:38 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-05 07:24:38 [kv_transfer_manager.py:1268] Rank-aware KV receive: rank 1 independently receiving (from_tp=2, to_tp=2)
+WARNING 05-05 07:24:38 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-05 07:24:38 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.text_encoder.forward took 0.284473s
+INFO 05-05 07:24:38 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.text_encoder.forward took 0.326872s
+INFO 05-05 07:24:38 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.encode took 0.092919s
+  0%|          | 0/1 [00:00<?, ?it/s]INFO 05-05 07:24:38 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.encode took 0.087885s
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2056: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS="+dynamo" for a DEBUG stack trace.
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2056: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS="+dynamo" for a DEBUG stack trace.
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:1946: UserWarning: Dynamo does not know how to trace the builtin `posix.stat.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:1946: UserWarning: Dynamo does not know how to trace the builtin `_thread.allocate_lock.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:1946: UserWarning: Dynamo does not know how to trace the builtin `posix.stat.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+100%|██████████| 1/1 [00:33<00:00, 33.76s/it]100%|██████████| 1/1 [00:33<00:00, 33.76s/it]
+INFO 05-05 07:25:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.decode took 0.054275s
+INFO 05-05 07:25:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.forward took 34.225314s
+INFO 05-05 07:25:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.decode took 0.054787s
+INFO 05-05 07:25:12 [diffusion_model_runner.py:213] Peak GPU memory (this request): 77.10 GB reserved, 76.44 GB allocated, 0.66 GB pool overhead (0.9%)
+INFO 05-05 07:25:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.forward took 34.224481s
+INFO 05-05 07:25:12 [inline_stage_diffusion_client.py:63] [InlineStageDiffusionClient] Stage-0 initialized inline (batch_size=1)
+INFO 05-05 07:25:12 [async_omni_engine.py:800] [AsyncOmniEngine] Stage 0 initialized (diffusion, batch_size=1)
+INFO 05-05 07:25:12 [orchestrator.py:189] [Orchestrator] Starting event loop
+INFO 05-05 07:25:12 [async_omni_engine.py:367] [AsyncOmniEngine] Orchestrator ready with 1 stages
+INFO 05-05 07:25:12 [omni_base.py:162] [Omni] AsyncOmniEngine initialized in 341.07 seconds
+INFO 05-05 07:25:12 [omni_base.py:181] [Omni] Initialized with 1 stages for model /workspace/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots/26afe3a78bb242c0a8bb181dcc8937bb16e5c66c
+
+============================================================
+Generation Configuration:
+  Model: /workspace/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots/26afe3a78bb242c0a8bb181dcc8937bb16e5c66c
+  Inference steps: 50
+  Cache backend: None (no acceleration)
+  Quantization: None (BF16)
+  Parallel configuration: tensor_parallel_size=2, ulysses_degree=1, ulysses_mode=strict, ring_degree=1, cfg_parallel_size=1, vae_patch_parallel_size=1, enable_expert_parallel=False.
+  CPU offload: False; CPU Layerwise Offload: False
+  Image size: 1024x1024
+============================================================
+
+INFO 05-05 07:25:12 [orchestrator.py:889] [Orchestrator] _handle_add_request: stage=0 req=0_806367d3-6c69-4809-b501-6d37feaf2023 prompt_type=dict original_prompt_type=dict final_stage=0 num_sampling_params=1
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s]INFO 05-05 07:25:12 [kv_transfer_manager.py:1268] Rank-aware KV receive: rank 0 independently receiving (from_tp=2, to_tp=2)
+WARNING 05-05 07:25:12 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-05 07:25:12 [kv_transfer_manager.py:1268] Rank-aware KV receive: rank 1 independently receiving (from_tp=2, to_tp=2)
+WARNING 05-05 07:25:12 [kv_transfer_manager.py:985] No connector available for receiving KV cache
+INFO 05-05 07:25:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.text_encoder.forward took 0.083871s
+  0%|          | 0/50 [00:00<?, ?it/s]INFO 05-05 07:25:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.text_encoder.forward took 0.084412s
+  4%|▍         | 2/50 [00:01<00:29,  1.64it/s]  6%|▌         | 3/50 [00:02<00:40,  1.16it/s]  8%|▊         | 4/50 [00:03<00:45,  1.01it/s] 10%|█         | 5/50 [00:04<00:48,  1.07s/it] 12%|█▏        | 6/50 [00:06<00:49,  1.11s/it] 14%|█▍        | 7/50 [00:07<00:49,  1.14s/it] 16%|█▌        | 8/50 [00:08<00:48,  1.16s/it] 18%|█▊        | 9/50 [00:09<00:48,  1.17s/it] 20%|██        | 10/50 [00:10<00:47,  1.18s/it] 22%|██▏       | 11/50 [00:12<00:46,  1.19s/it] 24%|██▍       | 12/50 [00:13<00:45,  1.19s/it] 26%|██▌       | 13/50 [00:14<00:44,  1.19s/it] 28%|██▊       | 14/50 [00:15<00:43,  1.20s/it] 30%|███       | 15/50 [00:16<00:41,  1.20s/it] 32%|███▏      | 16/50 [00:18<00:40,  1.20s/it] 34%|███▍      | 17/50 [00:19<00:39,  1.20s/it] 36%|███▌      | 18/50 [00:20<00:38,  1.20s/it] 38%|███▊      | 19/50 [00:21<00:37,  1.20s/it] 40%|████      | 20/50 [00:22<00:35,  1.20s/it] 42%|████▏     | 21/50 [00:24<00:34,  1.20s/it] 44%|████▍     | 22/50 [00:25<00:33,  1.20s/it] 46%|████▌     | 23/50 [00:26<00:32,  1.20s/it] 48%|████▊     | 24/50 [00:27<00:31,  1.20s/it] 50%|█████     | 25/50 [00:28<00:29,  1.20s/it] 52%|█████▏    | 26/50 [00:30<00:28,  1.20s/it] 54%|█████▍    | 27/50 [00:31<00:27,  1.20s/it] 56%|█████▌    | 28/50 [00:32<00:26,  1.20s/it] 58%|█████▊    | 29/50 [00:33<00:25,  1.20s/it] 60%|██████    | 30/50 [00:34<00:23,  1.20s/it] 62%|██████▏   | 31/50 [00:36<00:22,  1.20s/it] 64%|██████▍   | 32/50 [00:37<00:21,  1.20s/it] 66%|██████▌   | 33/50 [00:38<00:20,  1.20s/it] 68%|██████▊   | 34/50 [00:39<00:19,  1.20s/it] 70%|███████   | 35/50 [00:40<00:17,  1.20s/it] 72%|███████▏  | 36/50 [00:42<00:16,  1.20s/it] 74%|███████▍  | 37/50 [00:43<00:15,  1.20s/it] 76%|███████▌  | 38/50 [00:44<00:14,  1.20s/it] 78%|███████▊  | 39/50 [00:45<00:13,  1.20s/it] 80%|████████  | 40/50 [00:46<00:11,  1.20s/it] 82%|████████▏ | 41/50 [00:48<00:10,  1.20s/it] 84%|████████▍ | 42/50 [00:49<00:09,  1.20s/it] 86%|████████▌ | 43/50 [00:50<00:08,  1.20s/it] 88%|████████▊ | 44/50 [00:51<00:07,  1.20s/it] 90%|█████████ | 45/50 [00:52<00:06,  1.20s/it] 92%|█████████▏| 46/50 [00:54<00:04,  1.20s/it] 94%|█████████▍| 47/50 [00:55<00:03,  1.20s/it] 96%|█████████▌| 48/50 [00:56<00:02,  1.20s/it] 98%|█████████▊| 49/50 [00:57<00:01,  1.20s/it]100%|██████████| 50/50 [00:58<00:00,  1.20s/it]100%|██████████| 50/50 [00:58<00:00,  1.18s/it]
+INFO 05-05 07:26:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.decode took 0.128802s
+INFO 05-05 07:26:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.vae.decode took 0.128736s
+INFO 05-05 07:26:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.forward took 60.264912s
+INFO 05-05 07:26:12 [diffusion_pipeline_profiler.py:31] [DiffusionPipelineProfiler] Flux2Pipeline.forward took 60.265423s
+INFO 05-05 07:26:12 [diffusion_model_runner.py:213] Peak GPU memory (this request): 80.81 GB reserved, 78.10 GB allocated, 2.72 GB pool overhead (3.4%)
+INFO 05-05 07:26:12 [diffusion_engine.py:127] Generation completed successfully.
+INFO 05-05 07:26:12 [diffusion_engine.py:174] Post-processing completed in 0.0201 seconds
+INFO 05-05 07:26:12 [diffusion_engine.py:177] DiffusionEngine.step breakdown: preprocess=0.00 ms, add_req_and_wait=60286.47 ms, postprocess=20.15 ms, total=60306.88 ms
+Processed prompts: 100%|██████████| 1/1 [01:00<00:00, 60.31s/it]INFO 05-05 07:26:12 [omni_base.py:254] [Summary] {}
+Processed prompts: 100%|██████████| 1/1 [01:00<00:00, 60.31s/it]
+Total generation time: 60.3120 seconds (60311.96 ms)
+INFO 05-05 07:26:12 [text_to_image.py:503] Outputs: [OmniRequestOutput(request_id='0_806367d3-6c69-4809-b501-6d37feaf2023', finished=True, stage_id=0, final_output_type='image', request_output=OmniRequestOutput(request_id='0_806367d3-6c69-4809-b501-6d37feaf2023', finished=True, stage_id=None, final_output_type='image', request_output=None, images=[1 PIL Images], prompt={'prompt': 'A warm morning kitchen close-up of a woman and a man in their 30s standing across from each other at the counter, both holding mugs, cinematic, deadpan, golden morning light, shallow depth of field.', 'negative_prompt': None}, latents=None, metrics={'preprocess_time_ms': 0.0, 'diffusion_engine_exec_time_ms': 60306.89680296928, 'diffusion_engine_total_time_ms': 60286.47125978023, 'image_num': 1, 'resolution': 640, 'postprocess_time_ms': 20.14507632702589}, multimodal_output={}, custom_output={}, stage_durations={}, peak_memory_mb=82754.0), images=[1 PIL Images], prompt=None, latents=None, metrics={}, multimodal_output={}, custom_output={}, stage_durations={}, peak_memory_mb=82754.0)]
+Saved generated image to bench_out/flux2_e2e/FLASHINFER_ATTN.png
+INFO 05-05 07:26:12 [async_omni_engine.py:1739] [AsyncOmniEngine] Shutting down Orchestrator
+INFO 05-05 07:26:12 [orchestrator.py:249] [Orchestrator] Received shutdown signal
+INFO 05-05 07:26:12 [orchestrator.py:1195] [Orchestrator] Shutting down all stages
+INFO 05-05 07:26:12 [diffusion_worker.py:637] Worker 0: Received shutdown message
+INFO 05-05 07:26:12 [diffusion_worker.py:658] event loop terminated.
+INFO 05-05 07:26:12 [diffusion_worker.py:637] Worker 1: Received shutdown message
+INFO 05-05 07:26:12 [diffusion_worker.py:658] event loop terminated.
+INFO 05-05 07:26:13 [diffusion_worker.py:695] Worker 0: Shutdown complete.
+INFO 05-05 07:26:13 [diffusion_worker.py:695] Worker 1: Shutdown complete.
+INFO 05-05 07:26:15 [orchestrator.py:1199] [Orchestrator] Stage 0 shut down
