@@ -12,18 +12,18 @@ import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM, Qwen3Model
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.v1.outputs import SamplerOutput
+from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_omni.model_executor.models.moss_tts.configuration_moss_tts import (
     MossTTSDelayConfig,
     MossTTSRealtimeConfig,
 )
-from vllm_omni.outputs import OmniOutput
+from vllm_omni.model_executor.models.output_templates import OmniOutput
 
 _AUDIO_PAD_ID = 0  # padding id used before delay slot fires
 
@@ -89,8 +89,14 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         self.n_vq: int = self.config.n_vq
         self.audio_vocab_size: int = self.config.audio_vocab_size
         self.audio_pad_code: int = self.config.audio_pad_code
-        self.delay_slot_id: int = self.config.audio_assistant_delay_slot_token_id
-        self.audio_end_id: int = self.config.audio_end_token_id
+
+        # Token IDs (mirrors upstream MossTTSDelayConfig defaults).
+        self.audio_start_token_id: int = self.config.audio_start_token_id
+        self.audio_end_token_id: int = self.config.audio_end_token_id
+        self.audio_assistant_gen_slot_token_id: int = self.config.audio_assistant_gen_slot_token_id
+        self.audio_assistant_delay_slot_token_id: int = self.config.audio_assistant_delay_slot_token_id
+        self.pad_token_id: int = getattr(self.config, "pad_token_id", 151643)
+        self.im_end_token_id: int = getattr(self.config, "im_end_token_id", 151645)
 
         # Qwen3 backbone — weights live under ``language_model.*``
         self.model = Qwen3Model(
@@ -127,15 +133,32 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         # GPU-resident per-request buffer keys (avoid CPU round-trips)
         self.gpu_resident_buffer_keys: set[tuple[str, str]] = {
             ("audio_codes", "current"),   # last step's audio codes
-            ("hidden_states", "last"),    # last hidden for next step embed
+            ("audio_codes", "accumulated"),
+            ("hidden_states", "last"),
         }
+
+        # Static text-logit masks (lazy, built on first use to know device).
+        self._pre_exclude_text_ids = (
+            self.pad_token_id,
+            self.audio_assistant_gen_slot_token_id,
+            self.audio_assistant_delay_slot_token_id,
+            self.audio_end_token_id,
+        )
+        self._audio_keep_text_ids = (
+            self.audio_assistant_gen_slot_token_id,
+            self.audio_assistant_delay_slot_token_id,
+        )
+
+        # Per-step state stash for `compute_logits` (populated by
+        # `make_omni_output`, which runs immediately before the sampler).
+        self._batch_state: list[dict[str, Any]] | None = None
 
     # ------------------------------------------------------------------
     # vLLM-Omni hooks
     # ------------------------------------------------------------------
 
     def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
-        return self.model.get_input_embeddings()(input_ids)
+        return self.model.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -157,12 +180,158 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         hidden_states: torch.Tensor | OmniOutput,
         sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor | None:
-        """Return text-head logits for the AR scheduler."""
+        """Return text-head logits with delay-pattern constraints applied.
+
+        The mask follows upstream MOSS-TTS' generate loop:
+          * Forced tokens override the sampler when delayed_lengths is in the
+            audio-emit window (delay_slot for [0, n_vq), audio_end at n_vq).
+          * Outside that window, mask audio control tokens unless the model
+            is currently emitting audio (is_audio).
+          * Mask delay_slot at step 0 and im_end during the first n_vq steps,
+            matching upstream's anti-collapse heuristics.
+        """
         if isinstance(hidden_states, OmniOutput):
             hidden_states = hidden_states.text_hidden_states
         if hidden_states is None:
             return None
-        return self.logits_processor(self.text_lm_head, hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.text_lm_head, hidden_states, sampling_metadata)
+        if logits is None or self._batch_state is None:
+            return logits
+
+        states = self._batch_state
+        if not states:
+            return logits
+
+        n_vq = self.n_vq
+        device = logits.device
+        vocab_size = logits.shape[-1]
+        rows_per_state = max(1, logits.shape[0] // max(1, len(states)))
+
+        for i, state in enumerate(states):
+            if not isinstance(state, dict):
+                continue
+            row_start = i * rows_per_state
+            row_end = min(row_start + rows_per_state, logits.shape[0])
+            if row_start >= row_end:
+                continue
+            row = logits[row_start:row_end]
+
+            delayed_lengths = int(state.get("delayed_lengths", -1))
+            is_audio = bool(state.get("is_audio", False))
+            step = int(state.get("step", 0))
+
+            # ---- Forced tokens (delay-slot run / audio-end) ----
+            forced: int | None = None
+            if 0 <= delayed_lengths < n_vq:
+                forced = self.audio_assistant_delay_slot_token_id
+            elif delayed_lengths == n_vq:
+                forced = self.audio_end_token_id
+            if forced is not None and 0 <= forced < vocab_size:
+                neg_inf = torch.full_like(row, float("-inf"))
+                neg_inf[..., forced] = 0.0
+                row = neg_inf
+                logits[row_start:row_end] = row
+                continue
+
+            # ---- Pre-exclusion masks (delayed_lengths == -1 sentinel) ----
+            if is_audio:
+                # Only delay_slot or gen_slot are valid in audio mode.
+                mask = torch.ones(vocab_size, dtype=torch.bool, device=device)
+                for tok in self._audio_keep_text_ids:
+                    if 0 <= tok < vocab_size:
+                        mask[tok] = False
+                row = row.masked_fill(mask, float("-inf"))
+            else:
+                # Mask audio control tokens during text generation.
+                for tok in self._pre_exclude_text_ids:
+                    if 0 <= tok < vocab_size:
+                        row[..., tok] = float("-inf")
+
+            # ---- Step-conditional masks ----
+            if step == 0:
+                tok = self.audio_assistant_delay_slot_token_id
+                if 0 <= tok < vocab_size:
+                    row[..., tok] = float("-inf")
+            if step <= n_vq:
+                tok = self.im_end_token_id
+                if 0 <= tok < vocab_size:
+                    row[..., tok] = float("-inf")
+
+            logits[row_start:row_end] = row
+
+        return logits
+
+    def _initial_state(self, prompt_ids: torch.Tensor) -> dict[str, Any]:
+        """Initialise the AR generation state machine from a prompt.
+
+        Mirrors upstream's ``generate`` head:
+          * is_audio = True iff the last prompt token is audio_start or gen_slot
+            and the prompt contains a prior audio_start.
+          * audio_lengths counts tokens since the last audio_start in that case.
+          * delayed_lengths starts at the int64-max sentinel (-1 here).
+        """
+        if prompt_ids.numel() == 0:
+            return {
+                "audio_lengths": 0,
+                "delayed_lengths": -1,
+                "is_audio": False,
+                "step": 0,
+            }
+        prompt_cpu = prompt_ids.detach().to("cpu", dtype=torch.long).reshape(-1)
+        seq_len = int(prompt_cpu.shape[0])
+        last_id = int(prompt_cpu[-1])
+        is_continuation = last_id in (
+            self.audio_start_token_id,
+            self.audio_assistant_gen_slot_token_id,
+        )
+        last_audio_start = -1
+        if is_continuation:
+            matches = (prompt_cpu == self.audio_start_token_id).nonzero(as_tuple=True)[0]
+            if matches.numel() > 0:
+                last_audio_start = int(matches[-1])
+        is_audio = is_continuation and last_audio_start != -1
+        audio_lengths = (seq_len - last_audio_start) if is_audio else 0
+        return {
+            "audio_lengths": int(audio_lengths),
+            "delayed_lengths": -1,
+            "is_audio": bool(is_audio),
+            "step": 0,
+        }
+
+    def _advance_state(self, state: dict[str, Any], sampled_id: int) -> dict[str, Any]:
+        """Update state given the text token sampled at the previous step."""
+        audio_lengths = int(state.get("audio_lengths", 0))
+        delayed_lengths = int(state.get("delayed_lengths", -1))
+        is_audio = bool(state.get("is_audio", False))
+
+        if sampled_id in (
+            self.audio_start_token_id,
+            self.audio_assistant_gen_slot_token_id,
+            self.audio_assistant_delay_slot_token_id,
+        ):
+            audio_lengths += 1
+        if sampled_id == self.audio_end_token_id:
+            audio_lengths = 0
+
+        if delayed_lengths == -1:
+            if sampled_id == self.audio_assistant_delay_slot_token_id:
+                delayed_lengths = 0
+        else:
+            delayed_lengths += 1
+            if delayed_lengths > self.n_vq:
+                delayed_lengths = -1
+
+        if sampled_id == self.audio_start_token_id:
+            is_audio = True
+        if sampled_id == self.audio_end_token_id:
+            is_audio = False
+
+        state = dict(state)
+        state["audio_lengths"] = audio_lengths
+        state["delayed_lengths"] = delayed_lengths
+        state["is_audio"] = is_audio
+        state["step"] = int(state.get("step", 0)) + 1
+        return state
 
     def preprocess(
         self,
@@ -172,72 +341,136 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build per-step input embeddings (text + audio additive fusion).
 
-        Prefill (span_len > 1)
-        ~~~~~~~~~~~~~~~~~~~~~~
-        The prompt is text-only; audio tokens are all pad.  We return the
-        plain text embedding and initialise per-request state.
-
-        Decode (span_len == 1)
-        ~~~~~~~~~~~~~~~~~~~~~~
-        Combine the last text token embedding with the sum of last step's
-        audio embeddings.
+        Prefill: initialise the per-request state machine from the prompt.
+        Decode: update the state with the just-sampled text token, then build
+        the combined text+audio embedding using the previous step's codes.
         """
+        device = input_ids.device
         span_len = int(input_ids.shape[0])
-        meta = info_dict.get("meta", {}) or {}
-        audio_codes_buf = (info_dict.get("audio_codes", {}) or {}).get("current")
+        audio_state = info_dict.get("audio_state")
+        is_first_call = not isinstance(audio_state, dict)
 
-        if span_len > 1:
-            # Prefill: text-only embedding
-            embeds = self.model.get_input_embeddings()(input_ids)
+        if span_len > 1 or is_first_call:
+            # Treat as (re)initialisation — for moss_tts the serving layer
+            # currently sends a placeholder of length 1, so initialisation
+            # happens here on the very first call as well.
+            audio_state = self._initial_state(input_ids)
+            embeds = self.model.embed_tokens(input_ids)
             info_update: dict[str, Any] = {
-                "meta": {
-                    "delay_step": -1,  # -1 = delay slot not yet seen
-                },
+                "audio_state": audio_state,
                 "audio_codes": {
                     "current": torch.full(
                         (self.n_vq,), self.audio_pad_code,
-                        dtype=torch.long, device=input_ids.device,
+                        dtype=torch.long, device=device,
                     ),
                 },
             }
             return input_ids, embeds, info_update
 
-        # Decode step
-        delay_step: int = int((meta.get("delay_step") or -1))
+        # Decode step: input_ids is the text token sampled at step n-1.
+        sampled_id = int(input_ids.reshape(-1)[0].item())
+        audio_state = self._advance_state(audio_state, sampled_id)
 
-        # Build combined embedding
-        text_embed = self.model.get_input_embeddings()(input_ids.reshape(1))  # (1, H)
-
-        if delay_step >= 0 and audio_codes_buf is not None:
-            # Add audio embeddings from last step
+        # Combined embedding: text(t) + Σᵢ audio_emb_i(code_i_{t-1}).
+        text_embed = self.model.embed_tokens(input_ids.reshape(1))  # (1, H)
+        audio_codes_buf = (info_dict.get("audio_codes", {}) or {}).get("current")
+        if isinstance(audio_codes_buf, torch.Tensor) and audio_codes_buf.numel() == self.n_vq:
+            codes = audio_codes_buf.to(device=device, dtype=torch.long)
             audio_embed = torch.zeros_like(text_embed)
-            codes = audio_codes_buf.to(device=input_ids.device)
             for i, emb_layer in enumerate(self.audio_embeddings):
-                code_i = codes[i].clamp(0, self.audio_vocab_size)
-                audio_embed = audio_embed + emb_layer(code_i.unsqueeze(0))
+                code_i = codes[i].clamp(0, self.audio_vocab_size).reshape(1)
+                audio_embed = audio_embed + emb_layer(code_i)
             combined = text_embed + audio_embed
         else:
             combined = text_embed
 
-        return input_ids, combined, {}
+        return input_ids, combined, {"audio_state": audio_state}
 
     def postprocess(self, hidden_states: torch.Tensor, **_: Any) -> dict[str, Any]:
         if hidden_states.numel() == 0:
             return {}
         return {"hidden_states": {"last": hidden_states[-1].detach()}}
 
+    @staticmethod
+    def _sample_with_top_k(
+        logits: torch.Tensor,
+        top_k: int,
+        temperature: float,
+    ) -> torch.Tensor:
+        """Top-k sampling on a (..., V) logits tensor returning (...,) ids."""
+        if temperature > 0:
+            logits = logits / max(temperature, 1e-6)
+        if top_k and top_k > 0 and top_k < logits.shape[-1]:
+            top_vals, _ = torch.topk(logits, top_k, dim=-1)
+            kth = top_vals[..., -1:].expand_as(logits)
+            logits = torch.where(logits < kth, torch.full_like(logits, float("-inf")), logits)
+        if temperature <= 0:
+            return logits.argmax(dim=-1)
+        probs = torch.softmax(logits, dim=-1)
+        flat = probs.reshape(-1, probs.shape[-1])
+        sampled = torch.multinomial(flat, num_samples=1).reshape(probs.shape[:-1])
+        return sampled
+
+    def _sample_audio_codes(
+        self,
+        last_h: torch.Tensor,           # (1, H)
+        state: dict[str, Any],
+    ) -> torch.Tensor:                  # (n_vq,)
+        """Sample one row of n_vq audio codes given current state.
+
+        Mirrors upstream's pre/post audio masks:
+          pre_audio_mask  = audio_lengths > arange(n_vq)
+          post_audio_mask = arange(n_vq) > delayed_lengths - 1
+                           (or all-True when delayed_lengths is sentinel)
+          sampling_audio_mask = pre & post  → heads to sample; rest = pad_code
+        """
+        device = last_h.device
+        n_vq = self.n_vq
+        audio_lengths = int(state.get("audio_lengths", 0))
+        delayed_lengths = int(state.get("delayed_lengths", -1))
+
+        idx = torch.arange(n_vq, device=device)
+        pre_mask = idx < audio_lengths
+        if delayed_lengths == -1:
+            post_mask = torch.ones(n_vq, dtype=torch.bool, device=device)
+        else:
+            post_mask = idx > (delayed_lengths - 1)
+        sampling_mask = pre_mask & post_mask
+
+        codes = torch.full((n_vq,), self.audio_pad_code, dtype=torch.long, device=device)
+        if not bool(sampling_mask.any()):
+            return codes
+
+        # Use deploy YAML defaults. The audio sampler isn't routed through
+        # vLLM's sampler so we apply the upstream's audio_top_k locally.
+        audio_top_k = 25
+        audio_temp = 1.7
+
+        for i in range(n_vq):
+            if not bool(sampling_mask[i]):
+                continue
+            head = self.audio_heads[i]
+            logits = head(last_h).reshape(-1)              # (V,)
+            logits[..., -1] = float("-inf")                # invalid sentinel
+            logits[..., self.audio_pad_code] = float("-inf")
+            sampled = self._sample_with_top_k(logits, audio_top_k, audio_temp)
+            codes[i] = sampled.long()
+        return codes
+
     def make_omni_output(
         self,
         model_outputs: torch.Tensor | OmniOutput,
         **kwargs: Any,
     ) -> OmniOutput:
-        """Sample audio codes from the n_vq parallel heads and package output.
+        """Sample audio codes per request and stash text-mask state.
 
-        The audio codes are accumulated across decode steps.  Each step
-        appends one row (n_vq codes) to the per-request buffer.  When the
-        AR scheduler signals EOS, the full buffer is passed to Stage 1.
+        Per-request state lives in ``info["audio_state"]``.  Audio codes are
+        accumulated in ``info["audio_codes"]["accumulated"]`` (T_acc, NQ) and
+        the most recent row is stored in ``info["audio_codes"]["current"]``
+        for the next preprocess step.
         """
         if isinstance(model_outputs, OmniOutput):
+            self._batch_state = None
             return model_outputs
 
         hidden = model_outputs  # (S, H)
@@ -247,56 +480,53 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
             or []
         )
 
-        audio_codes_list: list[torch.Tensor] = []
-
+        # Ensure each request has an initialised state (defensive: typically
+        # populated by preprocess on the first call).
         for info in info_dicts:
-            if not isinstance(info, dict):
-                continue
-
-            meta = info.get("meta", {}) or {}
-            delay_step: int = int((meta.get("delay_step") or -1))
-
-            # Collect accumulated audio codes from buffer
-            acc = (info.get("audio_codes", {}) or {}).get("accumulated")
-            if isinstance(acc, torch.Tensor) and acc.numel() > 0:
-                audio_codes_list.append(acc)
-
-            # Sample new audio codes from each head at the last hidden state
-            if hidden.numel() > 0:
-                last_h = hidden[-1].unsqueeze(0)  # (1, H)
-                new_codes = torch.full(
-                    (1, self.n_vq), self.audio_pad_code,
-                    dtype=torch.long, device=hidden.device,
-                )
-                if delay_step >= 0:
-                    for i, head in enumerate(self.audio_heads):
-                        logits_i = head(last_h)  # (1, audio_vocab_size+1)
-                        # Mask invalid last token (upstream convention)
-                        logits_i[..., -1] = float("-inf")
-                        code_i = logits_i.argmax(dim=-1)  # greedy; sampler overrides
-                        new_codes[0, i] = code_i.squeeze()
-
-                # Append to accumulated buffer
-                if acc is not None:
-                    updated_acc = torch.cat([acc, new_codes], dim=0)
-                else:
-                    updated_acc = new_codes
-
-                # Update per-request buffer (returned inside info_update)
-                info["audio_codes"] = {
-                    "current": new_codes.squeeze(0),
-                    "accumulated": updated_acc,
+            if isinstance(info, dict) and not isinstance(info.get("audio_state"), dict):
+                info["audio_state"] = {
+                    "audio_lengths": 0,
+                    "delayed_lengths": -1,
+                    "is_audio": False,
+                    "step": 0,
                 }
 
-                # Advance delay counter when delay slot token was seen
-                last_text_token = hidden.shape[0] - 1  # placeholder; real check below
-                # The AR scheduler surfaces the sampled text token via sampling_metadata;
-                # for now we advance the counter unconditionally once active.
-                if delay_step == -1:
-                    pass  # will be set when delay_slot_id is sampled
+        # Stash the per-row state for compute_logits to apply masks. logits
+        # rows align with hidden rows, which align with info_dicts in order.
+        self._batch_state = [
+            (info["audio_state"] if isinstance(info, dict) else {}) for info in info_dicts
+        ]
+
+        audio_codes_list: list[torch.Tensor] = []
+
+        if hidden.numel() > 0:
+            num_rows = hidden.shape[0]
+            rows_per_req = max(1, num_rows // max(1, len(info_dicts) or 1))
+
+            for i, info in enumerate(info_dicts):
+                if not isinstance(info, dict):
+                    continue
+                row_start = i * rows_per_req
+                row_end = min(row_start + rows_per_req, num_rows)
+                if row_start >= row_end:
+                    continue
+
+                # Sample new audio codes from the last hidden state of this request.
+                last_h = hidden[row_end - 1].unsqueeze(0)  # (1, H)
+                state = info.get("audio_state", {}) or {}
+                new_codes = self._sample_audio_codes(last_h, state)  # (n_vq,)
+
+                acc = (info.get("audio_codes", {}) or {}).get("accumulated")
+                if isinstance(acc, torch.Tensor) and acc.numel() > 0:
+                    updated_acc = torch.cat([acc.to(new_codes.device), new_codes.unsqueeze(0)], dim=0)
                 else:
-                    meta["delay_step"] = delay_step + 1
-                info["meta"] = meta
+                    updated_acc = new_codes.unsqueeze(0)
+
+                info["audio_codes"] = {
+                    "current": new_codes,
+                    "accumulated": updated_acc,
+                }
+                audio_codes_list.append(updated_acc)
 
         if not audio_codes_list:
             return OmniOutput(
@@ -304,11 +534,13 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
                 multimodal_outputs={},
             )
 
-        # Pass accumulated audio codes to Stage 1
-        audio_codes = torch.cat(audio_codes_list, dim=0)  # (T, NQ)
+        # Forward the accumulated audio codes (T, NQ) of the first request to
+        # Stage 1.  Multi-request batching for the codec is not yet supported
+        # by this adapter; the existing code already takes the first stage
+        # output anyway.
         return OmniOutput(
             text_hidden_states=hidden,
-            multimodal_outputs={"codes": {"audio": audio_codes}},
+            multimodal_outputs={"codes": {"audio": audio_codes_list[0]}},
         )
 
     # ------------------------------------------------------------------
@@ -330,13 +562,15 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         loaded: set[str] = set()
         params_dict = dict(self.named_parameters())
 
+        # Buffer Qwen3 backbone weights (stripped of `language_model.` prefix)
+        # and delegate to self.model.load_weights() so q/k/v and gate/up are
+        # correctly fused into qkv_proj/gate_up_proj.
+        backbone_weights: list[tuple[str, torch.Tensor]] = []
+
         for name, tensor in weights:
-            # Qwen3 backbone
-            if name.startswith("language_model.model."):
-                mapped = name[len("language_model."):]  # model.*
-                if mapped in params_dict:
-                    default_weight_loader(params_dict[mapped], tensor)
-                    loaded.add(mapped)
+            # Qwen3 backbone — checkpoint stores keys as language_model.<layer>.
+            if name.startswith("language_model.") and not name.startswith("language_model.lm_head"):
+                backbone_weights.append((name[len("language_model."):], tensor))
                 continue
 
             # Text LM head (lm_heads.0 in upstream == language_model.lm_head)
@@ -368,6 +602,10 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
                     default_weight_loader(params_dict[tgt], tensor)
                     loaded.add(tgt)
                 continue
+
+        backbone_loaded = self.model.load_weights(iter(backbone_weights))
+        for n in backbone_loaded:
+            loaded.add(f"model.{n}")
 
         return loaded
 
@@ -455,7 +693,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         }
 
     def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
-        return self.model.get_input_embeddings()(input_ids)
+        return self.model.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -491,7 +729,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         span_len = int(input_ids.shape[0])
         if span_len > 1:
-            embeds = self.model.get_input_embeddings()(input_ids)
+            embeds = self.model.embed_tokens(input_ids)
             return input_ids, embeds, {
                 "audio_codes": {
                     "current": torch.full(
@@ -500,7 +738,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
                     ),
                 },
             }
-        return input_ids, self.model.get_input_embeddings()(input_ids), {}
+        return input_ids, self.model.embed_tokens(input_ids), {}
 
     def postprocess(self, hidden_states: torch.Tensor, **_: Any) -> dict[str, Any]:
         if hidden_states.numel() == 0:

@@ -44,11 +44,12 @@ class MossTTSDelayConfig(PretrainedConfig):
         audio_user_slot_token_id: int = 151654,
         audio_assistant_gen_slot_token_id: int = 151656,
         audio_assistant_delay_slot_token_id: int = 151662,
+        pad_token_id: int = 151643,
+        im_start_token_id: int = 151644,
+        im_end_token_id: int = 151645,
         codec_model_name_or_path: str = "OpenMOSS-Team/MOSS-Audio-Tokenizer",
         **kwargs: object,
     ) -> None:
-        super().__init__(**kwargs)
-
         if language_config is None:
             language_config = {}
         if isinstance(language_config, dict):
@@ -56,6 +57,8 @@ class MossTTSDelayConfig(PretrainedConfig):
             self.language_config = Qwen3Config(**language_config)
         else:
             self.language_config = language_config
+
+        super().__init__(**kwargs)
 
         self.n_vq = n_vq
         self.audio_vocab_size = audio_vocab_size
@@ -66,6 +69,9 @@ class MossTTSDelayConfig(PretrainedConfig):
         self.audio_user_slot_token_id = audio_user_slot_token_id
         self.audio_assistant_gen_slot_token_id = audio_assistant_gen_slot_token_id
         self.audio_assistant_delay_slot_token_id = audio_assistant_delay_slot_token_id
+        self.pad_token_id = pad_token_id
+        self.im_start_token_id = im_start_token_id
+        self.im_end_token_id = im_end_token_id
         self.codec_model_name_or_path = codec_model_name_or_path
 
     def get_text_config(self, **_: object) -> Qwen3Config:
