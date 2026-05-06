@@ -68,6 +68,7 @@ _VOXCPM_TTS_MODEL_STAGES = {"latent_generator", "vae"}
 _VOXCPM2_TTS_MODEL_STAGES = {"latent_generator"}
 _MING_TTS_MODEL_STAGES = {"ming_tts"}
 _MOSS_TTS_MODEL_STAGES = {"moss_tts_nano"}
+_MOSS_TTS_FULL_MODEL_STAGES = {"moss_tts", "moss_tts_codec"}
 _TTS_MODEL_STAGES: set[str] = (
     _VOXTRAL_TTS_MODEL_STAGES
     | _QWEN3_TTS_MODEL_STAGES
@@ -78,6 +79,7 @@ _TTS_MODEL_STAGES: set[str] = (
     | _VOXCPM2_TTS_MODEL_STAGES
     | _MING_TTS_MODEL_STAGES
     | _MOSS_TTS_MODEL_STAGES
+    | _MOSS_TTS_FULL_MODEL_STAGES
 )
 _SAMPLING_MAX_TOKENS_TTS_MODEL_TYPES = {"fish_tts", "qwen3_tts", "voxtral_tts", "cosyvoice3", "voxcpm2"}
 _TTS_LANGUAGES: set[str] = {
@@ -460,6 +462,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return "ming_flash_omni_tts"
         if model_stage in _MOSS_TTS_MODEL_STAGES:
             return "moss_tts_nano"
+        if model_stage in _MOSS_TTS_FULL_MODEL_STAGES:
+            return "moss_tts"
         return None
 
     def _compute_max_instructions_length(self) -> int:
@@ -1098,7 +1102,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return None  # VoxCPM2 accepts any text input
         if self._tts_model_type == "ming_flash_omni_tts":
             return self._validate_ming_tts_request(request)
-        if self._tts_model_type == "moss_tts_nano":
+        if self._tts_model_type in ("moss_tts_nano", "moss_tts"):
             return self._validate_moss_tts_request(request)
         return self._validate_qwen_tts_request(request)
 
@@ -2010,7 +2014,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             elif self._tts_model_type == "ming_flash_omni_tts":
                 prompt = self._build_ming_prompt(request)
                 tts_params = {}
-            elif self._tts_model_type == "moss_tts_nano":
+            elif self._tts_model_type in ("moss_tts_nano", "moss_tts"):
                 tts_params = await self._build_moss_tts_params(request)
                 if request.voice:
                     voice_lower = request.voice.lower()
@@ -2070,6 +2074,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             model_type = "ming_flash_omni_tts"
         elif self._tts_model_type == "moss_tts_nano":
             model_type = "moss_tts_nano"
+        elif self._tts_model_type == "moss_tts":
+            model_type = "moss_tts"
         elif self._is_tts:
             model_type = tts_params.get("task_type", ["unknown"])[0]
         else:
