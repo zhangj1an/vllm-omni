@@ -292,7 +292,10 @@ class _PatchedPretransform(nn.Module):
             x = x.reshape(b, d, -1, h).permute(0, 1, 3, 2).reshape(b, d * h, -1)
             return x, lengths // h
         else:
-            x = x.reshape(b, d // h, h, -1).permute(0, 1, 3, 2).reshape(b, d // h, -1 * h)
+            # Upsample by ``h``: split channel dim, then flatten last two dims.
+            # Was ``reshape(b, d // h, -1 * h)`` which evaluates to ``-h`` and
+            # is rejected by torch (the failing path produced ``[1, 640, -2]``).
+            x = x.reshape(b, d // h, h, -1).permute(0, 1, 3, 2).reshape(b, d // h, -1)
             return x, lengths * h
 
 

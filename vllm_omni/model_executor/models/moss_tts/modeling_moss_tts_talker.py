@@ -11,6 +11,7 @@ from typing import Any, Iterable
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -24,6 +25,8 @@ from vllm_omni.model_executor.models.moss_tts.configuration_moss_tts import (
     MossTTSRealtimeConfig,
 )
 from vllm_omni.model_executor.models.output_templates import OmniOutput
+
+logger = init_logger(__name__)
 
 _AUDIO_PAD_ID = 0  # padding id used before delay slot fires
 
@@ -351,19 +354,51 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         is_first_call = not isinstance(audio_state, dict)
 
         if span_len > 1 or is_first_call:
-            # Treat as (re)initialisation — for moss_tts the serving layer
-            # currently sends a placeholder of length 1, so initialisation
-            # happens here on the very first call as well.
+            # Prefill (or first call). Initialise the per-request state and
+            # build text embeddings. If the request carries reference-audio
+            # codes (``codes.ref`` from the upstream MossTTSDelayProcessor's
+            # delay-pattern grid, shape ``(L_full, n_vq)``), additively embed
+            # them at the matching prefill positions so the talker can attend
+            # to the speaker's timbre when generating its response.
             audio_state = self._initial_state(input_ids)
             embeds = self.model.embed_tokens(input_ids)
+
+            ref_codes = (info_dict.get("codes", {}) or {}).get("ref")
+            last_ref_row = None
+            ref_offset = int(info_dict.get("ref_offset", 0))
+            if isinstance(ref_codes, torch.Tensor) and ref_codes.numel() > 0:
+                if ref_codes.dim() == 1:
+                    if ref_codes.numel() % self.n_vq == 0:
+                        ref_codes = ref_codes.view(-1, self.n_vq)
+                    else:
+                        ref_codes = None  # malformed, skip silently
+                if isinstance(ref_codes, torch.Tensor) and ref_codes.dim() == 2:
+                    # Slice the window matching this prefill chunk (chunked
+                    # prefill calls preprocess multiple times for one request).
+                    end_off = ref_offset + span_len
+                    chunk = ref_codes[ref_offset:end_off]
+                    if chunk.numel() > 0 and chunk.shape[0] == span_len:
+                        codes = chunk.to(device=device, dtype=torch.long).clamp_(
+                            0, self.audio_vocab_size
+                        )
+                        audio_embed = torch.zeros_like(embeds)
+                        for i, emb_layer in enumerate(self.audio_embeddings):
+                            audio_embed = audio_embed + emb_layer(codes[:, i])
+                        embeds = embeds + audio_embed
+                        last_ref_row = codes[-1].detach()
+
+            current_codes = (
+                last_ref_row
+                if last_ref_row is not None
+                else torch.full(
+                    (self.n_vq,), self.audio_pad_code,
+                    dtype=torch.long, device=device,
+                )
+            )
             info_update: dict[str, Any] = {
                 "audio_state": audio_state,
-                "audio_codes": {
-                    "current": torch.full(
-                        (self.n_vq,), self.audio_pad_code,
-                        dtype=torch.long, device=device,
-                    ),
-                },
+                "audio_codes": {"current": current_codes},
+                "ref_offset": ref_offset + span_len,
             }
             return input_ids, embeds, info_update
 

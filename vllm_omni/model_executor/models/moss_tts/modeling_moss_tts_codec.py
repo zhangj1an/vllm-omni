@@ -100,8 +100,12 @@ class MossTTSCodecDecoder(nn.Module):
     ) -> OmniOutput:
         """Decode audio VQ codes to waveform.
 
-        Each request's codes arrive in the ``runtime_additional_information``
-        list as ``info["codes"]["audio"]`` with shape ``(T, NQ)``.
+        Stage 0 emits flat codebook-major ``[NQ * T_chunk]`` audio codes. The
+        chunk transfer adapter assigns those to ``request.prompt_token_ids``,
+        which arrives here as ``input_ids``. Per-request offsets are derived
+        from ``runtime_additional_information``-attached request metadata; meta
+        like ``left_context_size`` (overlap context for the causal decoder)
+        also lives there.
 
         Returns
         -------
@@ -128,43 +132,58 @@ class MossTTSCodecDecoder(nn.Module):
         srs: list[torch.Tensor] = [sr_tensor] * num_req
         device = next(self._codec.parameters()).device
 
+        if input_ids is None or input_ids.numel() == 0:
+            return OmniOutput(
+                text_hidden_states=None,
+                multimodal_outputs={"model_outputs": audios, "sr": srs},
+            )
+
+        # ``input_ids`` is concatenated across all requests; split by
+        # query_start_loc-style offsets from ``num_scheduled_tokens`` in
+        # kwargs if available, else assume one request.
+        ids_flat = input_ids.reshape(-1).to(dtype=torch.long)
+        num_scheduled_tokens = kwargs.get("num_scheduled_tokens")
+        if isinstance(num_scheduled_tokens, list) and len(num_scheduled_tokens) == num_req:
+            offsets = [0]
+            for n in num_scheduled_tokens:
+                offsets.append(offsets[-1] + int(n))
+        else:
+            offsets = [0, int(ids_flat.shape[0])]
+
         for i, info in enumerate(info_list):
-            if not isinstance(info, dict):
+            if i + 1 >= len(offsets):
+                break
+            seg = ids_flat[offsets[i]:offsets[i + 1]]
+            if seg.numel() == 0:
                 continue
-            codes_dict = info.get("codes", {}) or {}
-            audio_codes = codes_dict.get("audio")
-            if audio_codes is None or not isinstance(audio_codes, torch.Tensor):
+            if seg.numel() % self._n_vq != 0:
+                logger.warning(
+                    "MossTTS codec input length %d not divisible by n_vq %d; skipping.",
+                    int(seg.numel()), self._n_vq,
+                )
                 continue
-            if audio_codes.numel() == 0:
-                continue
+            t_chunk = int(seg.numel() // self._n_vq)
+            codes_nq_t = seg.reshape(self._n_vq, t_chunk).to(device=device)
+            # Clamp out-of-range codes (the talker uses ``audio_pad_code``
+            # =``codebook_size`` for delay-pattern padding; passing it to the
+            # codec embedding lookup would be an OOB index. The downstream
+            # de-delay step is intended to drop those rows, but until that's
+            # wired we clamp so the kernel does not assert.)
+            codebook_size = self._codec.config.codebook_size
+            codes_nq_t = codes_nq_t.clamp_(0, int(codebook_size) - 1)
 
             # left_context_size: number of left-context frames prepended to
             # this chunk by the stage input processor (overlap-add pattern,
             # same as Qwen3-TTS code2wav).  We decode them together with the
             # real chunk for smooth boundaries, then trim them from the output.
-            meta = info.get("meta", {}) or {}
+            meta = (info.get("meta", {}) if isinstance(info, dict) else {}) or {}
             left_ctx = meta.get("left_context_size", 0)
-            if isinstance(left_ctx, (list, torch.Tensor)):
-                left_ctx = int(left_ctx[0]) if hasattr(left_ctx, "__len__") else int(left_ctx.item())
+            if isinstance(left_ctx, (list, tuple)):
+                left_ctx = int(left_ctx[0]) if left_ctx else 0
+            elif isinstance(left_ctx, torch.Tensor):
+                left_ctx = int(left_ctx.reshape(-1)[0].item()) if left_ctx.numel() else 0
             left_ctx = int(left_ctx)
 
-            # audio_codes: (T, NQ) or (NQ, T) or flat — normalise to (NQ, T)
-            if audio_codes.dim() == 1:
-                t = audio_codes.numel() // self._n_vq
-                if t == 0:
-                    continue
-                codes_nq_t = audio_codes.reshape(self._n_vq, t)
-            elif audio_codes.dim() == 2:
-                codes_nq_t = (
-                    audio_codes.transpose(0, 1).contiguous()
-                    if audio_codes.shape[1] == self._n_vq
-                    else audio_codes
-                )
-            else:
-                logger.warning("Unexpected audio_codes shape %s; skipping.", audio_codes.shape)
-                continue
-
-            codes_nq_t = codes_nq_t.to(device=device, dtype=torch.long)
             out = self._codec.batch_decode(codes_list=[codes_nq_t], num_quantizers=self._n_vq)
 
             if out.audio is None:
@@ -174,8 +193,7 @@ class MossTTSCodecDecoder(nn.Module):
             if out.audio_lengths is not None:
                 wav = wav[:int(out.audio_lengths[0].item())]
 
-            # Trim left-context samples (overlap-add: context was prepended so
-            # the causal decoder has enough past signal at chunk boundaries).
+            # Trim left-context samples.
             if left_ctx > 0:
                 trim = left_ctx * self._codec.downsample_rate
                 wav = wav[trim:]
@@ -237,7 +255,11 @@ class MossTTSCodecDecoder(nn.Module):
         # Move sr_tensor to the same device
         self._sr_tensor = self._sr_tensor.to(device=device)
 
-        return set(n for n, _ in codec.named_parameters())
+        # vLLM's track_weights_loading() compares the returned set against
+        # ``self.named_parameters()``. After ``self._codec = codec`` above,
+        # those parameters are registered with the ``_codec.`` prefix, so
+        # mirror that here.
+        return {f"_codec.{name}" for name, _ in codec.named_parameters()}
 
 
 __all__ = ["MossTTSCodecDecoder"]

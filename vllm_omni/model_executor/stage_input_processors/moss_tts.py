@@ -117,18 +117,25 @@ def talker2codec_async_chunk(
         }
     req_state = state[req_id]
 
-    # Extract new codes from this chunk
+    # Extract new codes from this chunk. The talker emits the full per-request
+    # ``audio_codes["accumulated"]`` snapshot every step, so we only append the
+    # *new* tail rows (otherwise we'd duplicate history quadratically).
+    # ``pooling_output`` carries the unflattened OmniPayload at the top level
+    # (``codes.audio``), matching the qwen3_tts pattern.
     if pooling_output is not None:
-        mm = pooling_output.get("multimodal_outputs", {}) or {}
-        codes_dict = mm.get("codes", {}) or {}
-        new_codes = codes_dict.get("audio")
-        if isinstance(new_codes, torch.Tensor) and new_codes.numel() > 0:
-            if req_state["accumulated"] is None:
-                req_state["accumulated"] = new_codes.cpu()
-            else:
-                req_state["accumulated"] = torch.cat(
-                    [req_state["accumulated"], new_codes.cpu()], dim=0
-                )
+        codes_dict = pooling_output.get("codes", {}) or {}
+        snapshot = codes_dict.get("audio")
+        if isinstance(snapshot, torch.Tensor) and snapshot.numel() > 0:
+            snapshot_cpu = snapshot.cpu()
+            prev_t = 0 if req_state["accumulated"] is None else int(req_state["accumulated"].shape[0])
+            new_rows = snapshot_cpu[prev_t:]
+            if new_rows.numel() > 0:
+                if req_state["accumulated"] is None:
+                    req_state["accumulated"] = new_rows
+                else:
+                    req_state["accumulated"] = torch.cat(
+                        [req_state["accumulated"], new_rows], dim=0
+                    )
 
     acc = req_state["accumulated"]
     if acc is None or acc.numel() == 0:
@@ -136,9 +143,12 @@ def talker2codec_async_chunk(
             del state[req_id]
         return None
 
-    # Determine chunk threshold (default 25 frames for low latency)
-    chunk_frames: int = getattr(transfer_manager, "codec_chunk_frames", 25)
-    left_context: int = getattr(transfer_manager, "codec_left_context_frames", 0)
+    # The MOSS audio tokenizer's causal decoder doesn't yet have left-context
+    # plumbing in this port, and a streaming chunk of 25 frames trips an
+    # internal patched-pretransform reshape on the first chunk. Until we wire
+    # left-context properly, accumulate all codes and emit only on finish.
+    chunk_frames: int = 1 << 30
+    left_context: int = 0
 
     t_acc = int(acc.shape[0])
     should_emit = is_finished or (t_acc - req_state["total_emitted"] >= chunk_frames)
@@ -154,14 +164,20 @@ def talker2codec_async_chunk(
     if is_finished:
         del state[req_id]
 
-    nq = int(chunk_codes.shape[1])
-    codes_nq_t = chunk_codes.transpose(0, 1).contiguous()  # (NQ, T_chunk)
+    # Stage 1 (LLM_GENERATION codec) consumes ``codes.audio`` as a flat
+    # codebook-major int list — chunk_transfer_adapter assigns it to
+    # ``request.prompt_token_ids`` and the codec rebuilds the (NQ, T) grid.
+    # Returning a tensor here breaks downstream ``if not new_ids`` checks.
+    chunk_codes_long = chunk_codes.to(torch.long).cpu().contiguous()  # (T_chunk, NQ)
+    nq = int(chunk_codes_long.shape[1])
+    t_chunk = int(chunk_codes_long.shape[0])
+    codec_flat = chunk_codes_long.transpose(0, 1).reshape(-1).tolist()
 
     return {
-        "codes": {"audio": codes_nq_t},
+        "codes": {"audio": codec_flat},
         "meta": {
             "left_context_size": left_context,
-            "finished": is_finished,
+            "finished": torch.tensor(is_finished, dtype=torch.bool),
         },
     }
 
