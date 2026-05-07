@@ -237,9 +237,45 @@ class MossTTSCodecDecoder(nn.Module):
         )
         codec_weights = model_loader._get_weights_iterator(source)
         params_dict = dict(codec.named_parameters())
+
+        # Upstream MossAudioTokenizer uses different submodule names than the
+        # vendored re-implementation in ``audio_tokenizer.py``. Without this
+        # remap only ~half the codec parameters load (codebooks + WN convs)
+        # and the rest stay at their random init, which produces noise that
+        # sounds correct in duration but is structurally garbage.
+        _SUFFIX_REMAP: list[tuple[str, str]] = [
+            (".self_attn.in_projs.0.", ".attn.in_proj."),
+            (".self_attn.out_projs.0.", ".attn.out_proj."),
+            (".linear1.", ".ff1."),
+            (".linear2.", ".ff2."),
+            (".layer_scale_1.", ".ls1."),
+            (".layer_scale_2.", ".ls2."),
+            (".input_proj.", ".in_proj."),
+            (".output_proj.", ".out_proj."),
+        ]
+
+        def _remap(name: str) -> str:
+            for src, dst in _SUFFIX_REMAP:
+                if src in name:
+                    return name.replace(src, dst)
+            return name
+
+        loaded_total = 0
+        skipped: list[str] = []
         for name, tensor in codec_weights:
-            if name in params_dict:
-                default_weight_loader(params_dict[name], tensor)
+            # Try direct name first (e.g. ``quantizer.input_proj.*`` exists
+            # under the same name in both layouts), then the remap (transformer
+            # submodules need ``.linear1.``→``.ff1.`` etc.).
+            tgt = name if name in params_dict else _remap(name)
+            if tgt in params_dict:
+                default_weight_loader(params_dict[tgt], tensor)
+                loaded_total += 1
+            else:
+                skipped.append(name)
+        logger.info(
+            "MOSS Audio Tokenizer weights: loaded=%d/%d skipped=%d (first skipped: %s)",
+            loaded_total, len(params_dict), len(skipped), skipped[:3] if skipped else "none",
+        )
 
         device = self.vllm_config.device_config.device
         codec.to(device=device, dtype=torch.float32)

@@ -164,14 +164,43 @@ def talker2codec_async_chunk(
     if is_finished:
         del state[req_id]
 
-    # Stage 1 (LLM_GENERATION codec) consumes ``codes.audio`` as a flat
-    # codebook-major int list — chunk_transfer_adapter assigns it to
-    # ``request.prompt_token_ids`` and the codec rebuilds the (NQ, T) grid.
-    # Returning a tensor here breaks downstream ``if not new_ids`` checks.
+    # Mirror upstream ``MossTTSDelayProcessor._parse_audio_codes``: the talker
+    # samples codes in a delay pattern (a row is emitted every step, but only
+    # the slot ``i == arange < audio_lengths`` carries a real code; the rest is
+    # ``audio_pad_code``). Before sending to the codec we must
+    #   1. de-delay   ``(T+nq-1, nq)`` → ``(T, nq)``
+    #   2. drop rows that are entirely pad (separators between audio segments,
+    #      and the leading text-mode rows that precede the first audio_start).
     chunk_codes_long = chunk_codes.to(torch.long).cpu().contiguous()  # (T_chunk, NQ)
     nq = int(chunk_codes_long.shape[1])
     t_chunk = int(chunk_codes_long.shape[0])
-    codec_flat = chunk_codes_long.transpose(0, 1).reshape(-1).tolist()
+    audio_pad_code = nq * 0 + 1024  # see config.audio_pad_code; 1024 for MOSS-TTS
+
+    if t_chunk > nq:
+        de_delayed = chunk_codes_long.new_zeros((t_chunk - nq + 1, nq))
+        for i in range(nq):
+            de_delayed[:, i] = chunk_codes_long[i : i + de_delayed.shape[0], i]
+    else:
+        de_delayed = chunk_codes_long.new_zeros((0, nq))
+
+    if de_delayed.shape[0] > 0:
+        is_pad = (de_delayed == audio_pad_code).all(dim=1)
+        non_pad = ~is_pad
+        if bool(non_pad.any()):
+            de_delayed = de_delayed[non_pad]
+        else:
+            de_delayed = de_delayed.new_zeros((0, nq))
+
+    if de_delayed.shape[0] == 0:
+        # Nothing left after filtering — emit silence sentinel so the codec
+        # request still completes cleanly.
+        codec_flat: list[int] = []
+    else:
+        # Stage 1 (LLM_GENERATION codec) consumes ``codes.audio`` as a flat
+        # codebook-major int list — chunk_transfer_adapter assigns it to
+        # ``request.prompt_token_ids`` and the codec rebuilds the (NQ, T) grid.
+        # Returning a tensor here breaks downstream ``if not new_ids`` checks.
+        codec_flat = de_delayed.transpose(0, 1).contiguous().reshape(-1).tolist()
 
     return {
         "codes": {"audio": codec_flat},

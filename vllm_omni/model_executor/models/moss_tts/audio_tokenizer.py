@@ -153,20 +153,35 @@ class _LayerScale(nn.Module):
 
 
 def _apply_rope(q: torch.Tensor, k: torch.Tensor, max_period: float = 10_000) -> tuple[torch.Tensor, torch.Tensor]:
-    """Rotary position embedding over sequence dimension (B, H, T, D)."""
+    """Rotary position embedding over sequence dimension (B, H, T, D).
+
+    Matches upstream MossAudioTokenizer's ``apply_rope``: pair the last dim
+    as ``(re, im)`` interleaved (GPT-J style) — *not* GPT-NeoX split-halves.
+    The two conventions are not interchangeable with the same checkpoint;
+    using the wrong one silently rotates random subspaces of the K/V vectors.
+    """
     B, H, T, D = q.shape
     half = D // 2
     ds = torch.arange(half, device=q.device, dtype=torch.float32)
     freqs = torch.exp(ds * (-math.log(max_period) * 2 / D))
-    ts = torch.arange(T, device=q.device, dtype=torch.float32).unsqueeze(1)  # (T, 1)
-    cos = torch.cos(freqs * ts).to(q.dtype)   # (T, D/2)
-    sin = torch.sin(freqs * ts).to(q.dtype)
+    ts = torch.arange(T, device=q.device, dtype=torch.float32).view(1, 1, -1, 1)  # (1, 1, T, 1)
+    rotr = torch.cos(freqs * ts)  # (1, 1, T, D/2)
+    roti = torch.sin(freqs * ts)
 
-    def rotate(x: torch.Tensor) -> torch.Tensor:
-        x1, x2 = x[..., :half], x[..., half:]
-        return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    dims = q.shape[:-1]
+    q_pair = q.view(*dims, half, 2)
+    k_pair = k.view(*dims, half, 2)
+    qr, qi = q_pair[..., 0].float(), q_pair[..., 1].float()
+    kr, ki = k_pair[..., 0].float(), k_pair[..., 1].float()
 
-    return rotate(q), rotate(k)
+    qor = qr * rotr - qi * roti
+    qoi = qr * roti + qi * rotr
+    kor = kr * rotr - ki * roti
+    koi = kr * roti + ki * rotr
+
+    qo = torch.stack([qor.to(q.dtype), qoi.to(q.dtype)], dim=-1).view(*dims, D)
+    ko = torch.stack([kor.to(k.dtype), koi.to(k.dtype)], dim=-1).view(*dims, D)
+    return qo, ko
 
 
 class _Attention(nn.Module):
