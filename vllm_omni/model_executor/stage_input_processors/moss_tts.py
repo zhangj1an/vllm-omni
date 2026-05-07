@@ -136,6 +136,14 @@ def talker2codec_async_chunk(
                     req_state["accumulated"] = torch.cat(
                         [req_state["accumulated"], new_rows], dim=0
                     )
+        # Realtime variant emits raw (un-delay-patterned) codes; record that
+        # so the emit step below skips the apply_de_delay_pattern transform.
+        # Realtime sets ``meta.finished`` to a 1-D bool tensor; the delay
+        # variant leaves ``meta`` empty.
+        meta_in = pooling_output.get("meta", {}) or {}
+        flag = meta_in.get("finished")
+        if isinstance(flag, torch.Tensor) and flag.numel() >= 1 and bool(flag.reshape(-1)[0].item()):
+            req_state["skip_dedelay"] = True
 
     acc = req_state["accumulated"]
     if acc is None or acc.numel() == 0:
@@ -164,19 +172,22 @@ def talker2codec_async_chunk(
     if is_finished:
         del state[req_id]
 
-    # Mirror upstream ``MossTTSDelayProcessor._parse_audio_codes``: the talker
-    # samples codes in a delay pattern (a row is emitted every step, but only
-    # the slot ``i == arange < audio_lengths`` carries a real code; the rest is
-    # ``audio_pad_code``). Before sending to the codec we must
+    # Mirror upstream ``MossTTSDelayProcessor._parse_audio_codes``: the delay
+    # talker samples codes in a delay pattern (a row is emitted every step, but
+    # only the slot ``i == arange < audio_lengths`` carries a real code; the
+    # rest is ``audio_pad_code``). Before sending to the codec we must
     #   1. de-delay   ``(T+nq-1, nq)`` → ``(T, nq)``
     #   2. drop rows that are entirely pad (separators between audio segments,
     #      and the leading text-mode rows that precede the first audio_start).
+    # The realtime talker emits raw codes (no delay), so steps 1 is skipped.
     chunk_codes_long = chunk_codes.to(torch.long).cpu().contiguous()  # (T_chunk, NQ)
     nq = int(chunk_codes_long.shape[1])
     t_chunk = int(chunk_codes_long.shape[0])
-    audio_pad_code = nq * 0 + 1024  # see config.audio_pad_code; 1024 for MOSS-TTS
+    audio_pad_code = 1024  # MOSS-TTS audio_pad_code; same value across variants.
 
-    if t_chunk > nq:
+    if req_state.get("skip_dedelay"):
+        de_delayed = chunk_codes_long
+    elif t_chunk > nq:
         de_delayed = chunk_codes_long.new_zeros((t_chunk - nq + 1, nq))
         for i in range(nq):
             de_delayed[:, i] = chunk_codes_long[i : i + de_delayed.shape[0], i]

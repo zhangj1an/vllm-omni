@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Iterable
 
 import torch
@@ -23,6 +24,9 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm_omni.model_executor.models.moss_tts.configuration_moss_tts import (
     MossTTSDelayConfig,
     MossTTSRealtimeConfig,
+)
+from vllm_omni.model_executor.models.moss_tts.modeling_moss_tts_local import (
+    MossTTSRealtimeLocalTransformer,
 )
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 
@@ -650,85 +654,99 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class _MossTTSRealtimeLocalTransformer(nn.Module):
-    """Lightweight per-step local depth transformer for MossTTSRealtime.
-
-    Runs after the main Qwen3 hidden state to produce the full RVQ token
-    block (n_vq codes) for the current time step.
-
-    STUB: The upstream local transformer architecture is a 4-layer causal
-    transformer with max_position_embeddings=33.  Replace this stub with the
-    actual implementation once the full source is available.
-    """
-
-    def __init__(self, config: MossTTSRealtimeConfig) -> None:
-        super().__init__()
-        lt_cfg = config.local_transformer_config
-        self.n_vq = config.n_vq
-        self.hidden_size = config.hidden_size
-        # STUB: build lt_cfg.num_hidden_layers transformer layers here.
-
-    def forward(
-        self,
-        hidden: torch.Tensor,       # (1, H) last hidden from main model
-        prev_codes: torch.Tensor,   # (n_vq,) codes from previous step
-    ) -> torch.Tensor:              # (n_vq,) codes for current step
-        # STUB: run local transformer, return sampled codes.
-        raise NotImplementedError(
-            "MossTTSRealtimeLocalTransformer requires the full upstream source."
-        )
-
-
 class MossTTSRealtimeTalkerForGeneration(nn.Module):
     """Stage-0 talker for MossTTSRealtime (1.7B, TTFB ~180 ms).
 
-    Architecture differences from MossTTSDelayTalkerForGeneration:
-    * Flat Qwen3 config (no nested language_config).
-    * Local depth transformer replaces delay-pattern scheduling: after each
-      AR step the local transformer generates the full n_vq audio token block
-      for that time step synchronously.
-    * Streaming-friendly: first chunk latency is lower because no delay
-      warm-up is needed.
+    Architecture differs from the delay model:
+    * Backbone (Qwen3) consumes ``embed_tokens[0](text) + Σᵢ embed_tokens[i+1](audio_i)``.
+    * The model does NOT have a text LM head — the text column at every
+      decode step is forced to ``text_pad`` (or ``eos`` when the audio EOS
+      token has been emitted), so we synthesise a deterministic logit row
+      to feed the vLLM sampler.
+    * Per-step audio generation runs the small ``local_transformer`` (4-layer
+      Qwen3-style decoder, ``rvq=16`` codebooks) inside ``make_omni_output``.
+      Stop condition: codebook-0 token equals ``audio_eos_token`` (1026).
     """
 
     have_multimodal_outputs: bool = True
     has_preprocess: bool = True
     has_postprocess: bool = True
 
+    AUDIO_BOS = 1025
+    AUDIO_EOS = 1026
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.vllm_config = vllm_config
         self.config: MossTTSRealtimeConfig = vllm_config.model_config.hf_config
+        lang_cfg = self.config.language_config
+        local_cfg = self.config.local_config
 
-        self.hidden_size: int = self.config.hidden_size
-        self.n_vq: int = self.config.n_vq
-        self.audio_vocab_size: int = self.config.audio_vocab_size
-        self.audio_pad_token: int = self.config.audio_pad_token
+        self.hidden_size: int = int(lang_cfg.hidden_size)
+        self.n_vq: int = int(self.config.rvq)
+        self.audio_vocab_size: int = int(self.config.audio_vocab_size)
+        self.audio_pad_token: int = int(self.config.audio_pad_token)
+        self.text_pad_id: int = int(self.config.text_pad)
+        self.audio_eos_id: int = int(getattr(self.config, "eos_token_id", 151645))
+        self.text_vocab_size: int = int(lang_cfg.vocab_size)
 
-        # Qwen3 backbone (flat config)
+        # Qwen3 backbone (uses the inner language_config). vLLM exposes its
+        # internal weights under ``model.*`` so we keep that prefix and remap
+        # the upstream ``language_model.*`` keys at load time.
+        from vllm.config import VllmConfig as _VllmConfig
+        backbone_vllm_config = copy.copy(vllm_config)
+        # Swap in the inner Qwen3 config so vLLM picks the right num_layers,
+        # heads etc.; KV cache sizing already uses get_text_config().
+        backbone_model_config = copy.copy(vllm_config.model_config)
+        backbone_model_config.hf_config = lang_cfg
+        backbone_model_config.hf_text_config = lang_cfg
+        backbone_vllm_config.model_config = backbone_model_config
         self.model = Qwen3Model(
-            vllm_config=vllm_config,
+            vllm_config=backbone_vllm_config,
             prefix=_maybe_prefix(prefix, "model"),
         )
 
-        self.text_lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.hidden_size,
-            bias=False,
-            prefix=_maybe_prefix(prefix, "text_lm_head"),
+        # Outer per-channel embeddings: index 0 is text (vocab=text_vocab_size),
+        # indices 1..rvq are audio codebooks (vocab=audio_vocab_size). Match
+        # upstream's ``MossTTSRealtime.embed_tokens`` ModuleList exactly.
+        self.embed_tokens = nn.ModuleList()
+        self.embed_tokens.append(
+            nn.Embedding(
+                self.text_vocab_size,
+                self.hidden_size,
+                padding_idx=int(getattr(lang_cfg, "pad_token_id", 151643) or 151643),
+            )
         )
-        self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        for _ in range(self.n_vq):
+            self.embed_tokens.append(
+                nn.Embedding(self.audio_vocab_size, self.hidden_size, padding_idx=self.audio_pad_token)
+            )
 
-        # Local depth transformer for per-step RVQ block generation
-        self.local_transformer = _MossTTSRealtimeLocalTransformer(self.config)
+        # Local depth transformer + per-codebook LM heads.
+        self.local_transformer = MossTTSRealtimeLocalTransformer(local_cfg)
+        self.local_lm_heads = nn.ModuleList(
+            [nn.Linear(int(local_cfg.hidden_size), self.audio_vocab_size, bias=False) for _ in range(self.n_vq)]
+        )
+
+        # No real text LM head — compute_logits builds a one-hot row directly.
+        # We still need a logits_processor so vLLM downstream stays happy with
+        # something callable; a minimal pass-through suffices.
+        self.logits_processor = LogitsProcessor(self.text_vocab_size)
+        self._batch_state: list[dict[str, Any]] | None = None
 
         self.gpu_resident_buffer_keys: set[tuple[str, str]] = {
             ("audio_codes", "current"),
+            ("audio_codes", "accumulated"),
             ("hidden_states", "last"),
         }
 
+    # ------------------------------------------------------------------
+    # vLLM hooks
+    # ------------------------------------------------------------------
+
     def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
-        return self.model.embed_tokens(input_ids)
+        # Used by vllm dummy profiling; real prefill goes through preprocess().
+        return self.embed_tokens[0](input_ids)
 
     def forward(
         self,
@@ -750,11 +768,51 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         hidden_states: torch.Tensor | OmniOutput,
         sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor | None:
+        """Synthesise a one-hot text logit row per request.
+
+        The realtime model has no text LM head — text is always either
+        ``text_pad`` (continue) or ``eos`` (stop because audio EOS just fired).
+        """
         if isinstance(hidden_states, OmniOutput):
             hidden_states = hidden_states.text_hidden_states
-        if hidden_states is None:
+        if hidden_states is None or hidden_states.numel() == 0:
             return None
-        return self.logits_processor(self.text_lm_head, hidden_states, sampling_metadata)
+
+        B = hidden_states.shape[0]
+        V = self.text_vocab_size
+        logits = hidden_states.new_full((B, V), float("-inf"))
+
+        states = self._batch_state or []
+        rows_per_state = max(1, B // max(1, len(states) or 1))
+        for i, state in enumerate(states):
+            r0 = i * rows_per_state
+            r1 = min(r0 + rows_per_state, B)
+            if r0 >= r1:
+                continue
+            tok = self.audio_eos_id if (isinstance(state, dict) and state.get("is_stopping")) else self.text_pad_id
+            logits[r0:r1, tok] = 0.0
+        # Defensive: if no states recorded yet (very first call before
+        # make_omni_output ran), default to text_pad everywhere.
+        if not states:
+            logits[:, self.text_pad_id] = 0.0
+        return logits
+
+    # ------------------------------------------------------------------
+    # Embedding (text + audio codebooks, additive)
+    # ------------------------------------------------------------------
+
+    def _build_input_embeds(
+        self,
+        text_ids: torch.Tensor,         # (T,)
+        audio_codes: torch.Tensor | None,  # (T, n_vq) or None
+    ) -> torch.Tensor:
+        embeds = self.embed_tokens[0](text_ids)
+        if audio_codes is None:
+            return embeds
+        for i in range(self.n_vq):
+            col = audio_codes[:, i].clamp_(0, self.audio_vocab_size - 1)
+            embeds = embeds + self.embed_tokens[i + 1](col)
+        return embeds
 
     def preprocess(
         self,
@@ -762,23 +820,57 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         input_embeds: torch.Tensor | None,
         **info_dict: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        device = input_ids.device
         span_len = int(input_ids.shape[0])
-        if span_len > 1:
-            embeds = self.model.embed_tokens(input_ids)
-            return input_ids, embeds, {
-                "audio_codes": {
-                    "current": torch.full(
-                        (self.n_vq,), self.audio_pad_token,
-                        dtype=torch.long, device=input_ids.device,
-                    ),
-                },
+        audio_state = info_dict.get("audio_state")
+        is_first_call = not isinstance(audio_state, dict)
+
+        if span_len > 1 or is_first_call:
+            # Prefill: read the full reference-audio code grid (channels x T)
+            # from ``info_dict["codes"]["ref"]``; slice the chunk that aligns
+            # with this prefill window.
+            ref_codes = (info_dict.get("codes", {}) or {}).get("ref")
+            ref_offset = int(info_dict.get("ref_offset", 0))
+            chunk_audio = None
+            if isinstance(ref_codes, torch.Tensor) and ref_codes.numel() > 0:
+                if ref_codes.dim() == 1 and ref_codes.numel() % self.n_vq == 0:
+                    ref_codes = ref_codes.view(-1, self.n_vq)
+                if isinstance(ref_codes, torch.Tensor) and ref_codes.dim() == 2:
+                    end_off = ref_offset + span_len
+                    sliced = ref_codes[ref_offset:end_off]
+                    if sliced.shape[0] == span_len:
+                        chunk_audio = sliced.to(device=device, dtype=torch.long)
+            embeds = self._build_input_embeds(input_ids, chunk_audio)
+            current_codes = (
+                chunk_audio[-1].detach() if chunk_audio is not None
+                else torch.full((self.n_vq,), self.audio_pad_token, dtype=torch.long, device=device)
+            )
+            info_update: dict[str, Any] = {
+                "audio_state": {"is_stopping": False, "step": 0},
+                "audio_codes": {"current": current_codes},
+                "ref_offset": ref_offset + span_len,
             }
-        return input_ids, self.model.embed_tokens(input_ids), {}
+            return input_ids, embeds, info_update
+
+        # Decode step: text_token from the just-sampled vLLM logit, plus the
+        # audio codes the local transformer produced last step.
+        prev_codes = (info_dict.get("audio_codes", {}) or {}).get("current")
+        if prev_codes is None:
+            prev_codes = torch.full((self.n_vq,), self.audio_pad_token, dtype=torch.long, device=device)
+        embeds = self._build_input_embeds(
+            input_ids.reshape(-1),
+            prev_codes.to(device=device, dtype=torch.long).unsqueeze(0),
+        )
+        return input_ids, embeds, {}
 
     def postprocess(self, hidden_states: torch.Tensor, **_: Any) -> dict[str, Any]:
         if hidden_states.numel() == 0:
             return {}
         return {"hidden_states": {"last": hidden_states[-1].detach()}}
+
+    # ------------------------------------------------------------------
+    # Per-step audio generation via local transformer
+    # ------------------------------------------------------------------
 
     def make_omni_output(
         self,
@@ -786,73 +878,137 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         **kwargs: Any,
     ) -> OmniOutput:
         if isinstance(model_outputs, OmniOutput):
+            self._batch_state = None
             return model_outputs
 
-        hidden = model_outputs
+        hidden = model_outputs  # (S, H)
         info_dicts: list[dict[str, Any]] = (
             kwargs.get("model_intermediate_buffer")
             or kwargs.get("runtime_additional_information")
             or []
         )
 
-        audio_codes_list: list[torch.Tensor] = []
+        # Defensive state init.
         for info in info_dicts:
-            if not isinstance(info, dict):
-                continue
-            acc = (info.get("audio_codes", {}) or {}).get("accumulated")
-            if isinstance(acc, torch.Tensor) and acc.numel() > 0:
-                audio_codes_list.append(acc)
+            if isinstance(info, dict) and not isinstance(info.get("audio_state"), dict):
+                info["audio_state"] = {"is_stopping": False, "step": 0}
 
-            if hidden.numel() > 0:
-                last_h = hidden[-1].unsqueeze(0)
-                prev = (info.get("audio_codes", {}) or {}).get("current")
-                if prev is None:
-                    prev = torch.full((self.n_vq,), self.audio_pad_token,
-                                      dtype=torch.long, device=hidden.device)
-                # Run local transformer to get codes for this step
-                try:
-                    new_codes = self.local_transformer(last_h, prev.to(hidden.device))
-                except NotImplementedError:
-                    new_codes = torch.full((self.n_vq,), self.audio_pad_token,
-                                           dtype=torch.long, device=hidden.device)
-                new_codes = new_codes.unsqueeze(0)
-                updated_acc = torch.cat([acc, new_codes], dim=0) if acc is not None else new_codes
-                info["audio_codes"] = {"current": new_codes.squeeze(0), "accumulated": updated_acc}
+        self._batch_state = [
+            (info["audio_state"] if isinstance(info, dict) else {}) for info in info_dicts
+        ]
+
+        audio_codes_list: list[torch.Tensor] = []
+        if hidden.numel() > 0 and info_dicts:
+            num_rows = hidden.shape[0]
+            rows_per_req = max(1, num_rows // max(1, len(info_dicts) or 1))
+            for i, info in enumerate(info_dicts):
+                if not isinstance(info, dict):
+                    continue
+                row_start = i * rows_per_req
+                row_end = min(row_start + rows_per_req, num_rows)
+                if row_start >= row_end:
+                    continue
+
+                state = info.get("audio_state", {}) or {}
+                if state.get("is_stopping"):
+                    continue  # already stopped — no more audio frames
+
+                last_h = hidden[row_end - 1].unsqueeze(0)  # (1, H)
+                # Generate one frame of (n_vq,) codes via the local transformer.
+                new_codes = self.local_transformer.generate_frame(
+                    last_h,
+                    self.local_lm_heads,
+                    temperature=1.0,
+                    top_p=0.95,
+                    top_k=50,
+                    do_sample=True,
+                ).squeeze(0)  # (n_vq,)
+
+                ch0 = int(new_codes[0].item())
+                # Stop condition mirrors upstream: codebook 0 == eos_audio_id.
+                if ch0 == self.AUDIO_EOS:
+                    state["is_stopping"] = True
+                    state["step"] = int(state.get("step", 0)) + 1
+                    info["audio_codes"] = {
+                        "current": new_codes,
+                        "accumulated": (info.get("audio_codes", {}) or {}).get("accumulated"),
+                    }
+                    continue  # don't append the eos frame to accumulated
+
+                if ch0 in (self.AUDIO_BOS, self.audio_pad_token):
+                    # Skip the bos / pad frames — they don't decode to real audio.
+                    state["step"] = int(state.get("step", 0)) + 1
+                    info["audio_codes"] = {
+                        "current": new_codes,
+                        "accumulated": (info.get("audio_codes", {}) or {}).get("accumulated"),
+                    }
+                    continue
+
+                acc = (info.get("audio_codes", {}) or {}).get("accumulated")
+                if isinstance(acc, torch.Tensor) and acc.numel() > 0:
+                    updated_acc = torch.cat([acc.to(new_codes.device), new_codes.unsqueeze(0)], dim=0)
+                else:
+                    updated_acc = new_codes.unsqueeze(0)
+
+                info["audio_codes"] = {"current": new_codes, "accumulated": updated_acc}
+                state["step"] = int(state.get("step", 0)) + 1
+                audio_codes_list.append(updated_acc)
 
         if not audio_codes_list:
             return OmniOutput(text_hidden_states=hidden, multimodal_outputs={})
 
-        audio_codes = torch.cat(audio_codes_list, dim=0)
+        # Forward the first request's accumulated codes (multi-request
+        # batching for the codec is not yet wired up — same as delay).
+        # The realtime variant emits raw codes (no delay pattern), so we
+        # signal that to the chunk processor via a 1-D bool tensor in
+        # ``meta.finished`` (already a tensor field on the schema). The
+        # processor reads its truth value as "skip de-delay" only for
+        # realtime; the delay path doesn't populate ``meta`` at all.
+        device = audio_codes_list[0].device
         return OmniOutput(
             text_hidden_states=hidden,
-            multimodal_outputs={"codes": {"audio": audio_codes}},
+            multimodal_outputs={
+                "codes": {"audio": audio_codes_list[0]},
+                "meta": {"finished": torch.tensor([True], dtype=torch.bool, device=device)},
+            },
         )
+
+    # ------------------------------------------------------------------
+    # Weight loading
+    # ------------------------------------------------------------------
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> set[str]:
-        """Map HF weight names for MossTTSRealtime (flat Qwen3 config).
+        """Remap upstream MossTTSRealtime checkpoint names → vendored layout.
 
-        HF layout:
-          model.*                     → model.*
-          lm_head.weight (text)       → text_lm_head.weight
-          local_transformer.*         → local_transformer.*
+        Mapping:
+          embed_tokens.{i}.*               → embed_tokens.{i}.*               (kept)
+          language_model.embed_tokens.*    → model.embed_tokens.*             (Qwen3 inner)
+          language_model.layers.*          → model.layers.*
+          language_model.norm.*            → model.norm.*
+          local_transformer.model.*        → local_transformer.*              (drop .model.)
+          local_transformer.local_lm_heads.* → local_lm_heads.*               (top-level)
         """
         loaded: set[str] = set()
         params_dict = dict(self.named_parameters())
 
+        def remap(name: str) -> str:
+            if name.startswith("language_model."):
+                return "model." + name[len("language_model."):]
+            if name.startswith("local_transformer.model."):
+                return "local_transformer." + name[len("local_transformer.model."):]
+            if name.startswith("local_transformer.local_lm_heads."):
+                return "local_lm_heads." + name[len("local_transformer.local_lm_heads."):]
+            return name
+
         for name, tensor in weights:
-            if name in ("lm_head.weight",):
-                tgt = "text_lm_head.weight"
-                if tgt in params_dict:
-                    default_weight_loader(params_dict[tgt], tensor)
-                    loaded.add(tgt)
-                continue
-
-            if name in params_dict:
-                default_weight_loader(params_dict[name], tensor)
-                loaded.add(name)
-
+            tgt = remap(name)
+            if tgt in params_dict:
+                default_weight_loader(params_dict[tgt], tensor)
+                loaded.add(tgt)
+            else:
+                logger.debug("MossTTSRealtime: skipping unmatched weight %s -> %s", name, tgt)
         return loaded
 
 

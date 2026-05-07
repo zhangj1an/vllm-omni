@@ -54,8 +54,40 @@ MOSS_TTS_PIPELINE = PipelineConfig(
     ),
 )
 
-# The pipeline config is the same for all 5 variants; the per-variant
-# differences (n_vq, backbone size, generation strategy) are encoded in the
-# HF config.json and the deploy YAML.
+MOSS_TTS_REALTIME_PIPELINE = PipelineConfig(
+    model_type="moss_tts_realtime",
+    model_arch="MossTTSRealtime",  # different talker class from the delay variant
+    stages=(
+        StagePipelineConfig(
+            stage_id=0,
+            model_stage="moss_tts",
+            execution_type=StageExecutionType.LLM_AR,
+            input_sources=(),
+            owns_tokenizer=True,
+            engine_output_type="latent",
+            async_chunk_process_next_stage_input_func=(
+                f"{_PROC}.talker2codec_async_chunk"
+            ),
+            sampling_constraints={"detokenize": False},
+        ),
+        StagePipelineConfig(
+            stage_id=1,
+            model_stage="moss_tts_codec",
+            execution_type=StageExecutionType.LLM_GENERATION,
+            input_sources=(0,),
+            final_output=True,
+            final_output_type="audio",
+            engine_output_type="audio",
+            model_arch="MossTTSCodecDecoder",
+            sync_process_input_func=f"{_PROC}.talker2codec",
+            sampling_constraints={"detokenize": True},
+        ),
+    ),
+)
 
-__all__ = ["MOSS_TTS_PIPELINE"]
+# The pipeline config is otherwise the same for all 5 variants; the per-variant
+# differences (n_vq, backbone size, generation strategy) are encoded in the
+# HF config.json and the deploy YAML. Realtime is split out because it has a
+# different talker architecture (MossTTSRealtime vs MossTTSDelayModel).
+
+__all__ = ["MOSS_TTS_PIPELINE", "MOSS_TTS_REALTIME_PIPELINE"]

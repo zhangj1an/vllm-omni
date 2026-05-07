@@ -105,6 +105,74 @@ def _build_unified_codes(
     return text_ids, audio_codes, n_vq
 
 
+def _build_realtime_prompt(
+    model_id: str,
+    text: str,
+    ref_audio: torch.Tensor | None,
+) -> tuple[list[int], torch.Tensor, int]:
+    """Build the prefill prompt for MOSS-TTS-Realtime.
+
+    Realtime uses a different prompt format than the delay variants: a system
+    prompt + (optional) voice-clone context with the encoded reference audio
+    inlined, followed by the user text and an assistant header. The format is
+    a ``(L, channels+1=17)`` int grid where col 0 is text/special tokens and
+    cols 1..16 are RVQ codebook entries (``audio_channel_pad`` outside the
+    ref-audio block).
+
+    The upstream ``MossTTSRealtimeProcessor`` is shipped via
+    ``trust_remote_code`` but is not auto-discovered by ``AutoProcessor``
+    (no ``processor_config.json``) — we import its module directly from the
+    snapshot directory and use its ``make_ensemble``/``make_user_prompt``.
+    """
+    import importlib.util
+    import sys as _sys
+    from pathlib import Path
+
+    import numpy as np
+    import torch
+    from huggingface_hub import snapshot_download
+    from transformers import AutoModel, AutoTokenizer
+
+    snap_dir = Path(snapshot_download(repo_id=model_id))
+    proc_module_path = snap_dir / "processing_mossttsrealtime.py"
+    if not proc_module_path.exists():
+        raise FileNotFoundError(f"realtime processor module missing at {proc_module_path}")
+
+    # Load the processor module without polluting sys.path globally.
+    spec = importlib.util.spec_from_file_location("_moss_tts_realtime_proc", proc_module_path)
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    _sys.modules[spec.name] = mod  # type: ignore[union-attr]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    realtime_processor = mod.MossTTSRealtimeProcessor(tokenizer=tokenizer)
+
+    # Encode reference audio via the standalone MOSS Audio Tokenizer (CPU is
+    # fine — it runs once per request).
+    audio_tokens = None
+    if ref_audio is not None:
+        codec = AutoModel.from_pretrained("OpenMOSS-Team/MOSS-Audio-Tokenizer", trust_remote_code=True).eval()
+        wav_2d = ref_audio if ref_audio.dim() == 2 else ref_audio.unsqueeze(0)
+        with torch.no_grad():
+            enc = codec.batch_encode([wav_2d.squeeze(0)], num_quantizers=16)
+        # enc.audio_codes: (NQ, B, T); we want (T, NQ) numpy.
+        codes = enc.audio_codes[:, 0, : int(enc.audio_codes_lengths[0].item())]
+        audio_tokens = codes.transpose(0, 1).contiguous().cpu().numpy()  # (T, 16)
+        del codec
+        gc.collect()
+
+    # Build system + (optional) voice-clone prompt, then user text.
+    system_grid = realtime_processor.make_ensemble(prompt_audio_tokens=audio_tokens)
+    user_grid = realtime_processor.make_user_prompt(
+        text=text, audio_tokens=np.zeros((0, 16), dtype=np.int64)
+    )
+    grid = np.concatenate([system_grid, user_grid], axis=0)  # (L, 17)
+
+    text_ids = grid[:, 0].tolist()
+    audio_codes = torch.from_numpy(grid[:, 1:].astype(np.int64).copy())  # (L, 16)
+    return text_ids, audio_codes, 16
+
+
 def run_tts(args: argparse.Namespace) -> None:
     from vllm import SamplingParams
 
@@ -121,11 +189,22 @@ def run_tts(args: argparse.Namespace) -> None:
 
     is_sound_effect = "SoundEffect" in args.model
     is_voice_gen = "VoiceGenerator" in args.model
+    is_realtime = "Realtime" in args.model
 
     ref_audio = None
     builder_kwargs: dict = {}
 
-    if is_sound_effect:
+    if is_realtime:
+        # MOSS-TTS-Realtime uses a different prompt format and has its own
+        # per-step depth transformer; the delay-style ``MossTTSDelayProcessor``
+        # path doesn't apply.
+        if not args.ref_audio:
+            sys.exit("MOSS-TTS-Realtime currently requires --ref-audio (voice clone).")
+        ref_audio = _load_ref_audio(args.ref_audio)
+        text = args.text or ""
+        text_ids, audio_codes, n_vq = _build_realtime_prompt(args.model, text, ref_audio)
+        print(f"Prefill prompt: {len(text_ids)} tokens, {n_vq}-quantizer audio block (realtime)")
+    elif is_sound_effect:
         if not args.ambient_sound:
             sys.exit("MOSS-SoundEffect requires --ambient-sound")
         builder_kwargs["ambient_sound"] = args.ambient_sound
@@ -149,10 +228,11 @@ def run_tts(args: argparse.Namespace) -> None:
         ref_audio = _load_ref_audio(args.ref_audio)
         text = args.text or ""
 
-    text_ids, audio_codes, n_vq = _build_unified_codes(
-        args.model, text, ref_audio, **builder_kwargs
-    )
-    print(f"Prefill prompt: {len(text_ids)} tokens, {n_vq}-quantizer audio block")
+    if not is_realtime:
+        text_ids, audio_codes, n_vq = _build_unified_codes(
+            args.model, text, ref_audio, **builder_kwargs
+        )
+        print(f"Prefill prompt: {len(text_ids)} tokens, {n_vq}-quantizer audio block")
 
     omni = Omni(model=args.model, deploy_config=deploy_config, stage_init_timeout=600)
 

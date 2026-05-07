@@ -79,96 +79,154 @@ class MossTTSDelayConfig(PretrainedConfig):
 
 
 class MossTTSLocalTransformerConfig(PretrainedConfig):
-    """Config for the lightweight local depth transformer in MossTTSRealtime."""
+    """Config for the lightweight local depth transformer in MossTTSRealtime.
+
+    Mirrors upstream ``MossTTSRealtimeLocalTransformerConfig`` so the realtime
+    checkpoint loads via ``AutoConfig`` without dropping fields silently.
+    """
 
     model_type = "moss_tts_realtime_local_transformer"
 
     def __init__(
         self,
+        head_dim: int = 128,
         hidden_size: int = 2048,
         num_hidden_layers: int = 4,
         num_attention_heads: int = 16,
+        num_key_value_heads: int = 8,
         intermediate_size: int = 6144,
         max_position_embeddings: int = 33,
+        rms_norm_eps: float = 1e-6,
+        rope_theta: float = 1_000_000.0,
+        rope_type: str = "linear",
+        attention_bias: bool = False,
+        attention_dropout: float = 0.0,
+        hidden_act: str = "silu",
+        initializer_range: float = 0.02,
+        use_cache: bool = True,
+        tie_word_embeddings: bool = False,
+        pad_token_id: int = 1024,
+        audio_pad_token: int = 1024,
+        audio_vocab_size: int = 1027,
+        rvq: int = 16,
         **kwargs: object,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__(pad_token_id=pad_token_id, tie_word_embeddings=tie_word_embeddings, **kwargs)
+        self.head_dim = head_dim
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
         self.intermediate_size = intermediate_size
         self.max_position_embeddings = max_position_embeddings
+        self.rms_norm_eps = rms_norm_eps
+        self.rope_theta = rope_theta
+        self.rope_type = rope_type
+        self.attention_bias = attention_bias
+        self.attention_dropout = attention_dropout
+        self.hidden_act = hidden_act
+        self.initializer_range = initializer_range
+        self.use_cache = use_cache
+        self.audio_pad_token = audio_pad_token
+        self.audio_vocab_size = audio_vocab_size
+        self.rvq = rvq
+        # rope_parameters used by transformers.modeling_rope_utils
+        self.rope_parameters = {
+            "rope_type": rope_type,
+            "rope_theta": rope_theta,
+            "factor": 1.0,
+        }
 
 
 class MossTTSRealtimeConfig(PretrainedConfig):
     """Config for MossTTSRealtime (1.7B, TTFB ~180 ms streaming model).
 
-    Unlike MossTTSDelayConfig, this model has a flat Qwen3 config (no nested
-    language_config) plus a local depth transformer for per-step RVQ block
-    generation.
+    Mirrors the upstream layout: a nested ``language_config`` (Qwen3) plus a
+    ``local_config`` for the per-step depth transformer that decodes the RVQ
+    codebooks. The flat fields here are the *outer* model's attributes.
     """
 
     model_type = "moss_tts_realtime"
 
     def __init__(
         self,
-        vocab_size: int = 151936,
-        hidden_size: int = 2048,
-        num_hidden_layers: int = 28,
-        num_attention_heads: int = 16,
-        intermediate_size: int = 6144,
-        max_position_embeddings: int = 40960,
-        rms_norm_eps: float = 1e-6,
-        rope_theta: float = 1_000_000.0,
+        language_config: dict | None = None,
+        local_config: dict | None = None,
         rvq: int = 16,
         audio_vocab_size: int = 1027,
         audio_pad_token: int = 1024,
         sampling_rate: int = 24000,
         reference_audio_pad: int = 151654,
         text_pad: int = 151655,
+        vocab_size: int = 151936,
         bos_token_id: int = 151643,
         eos_token_id: int = 151645,
-        local_transformer_config: dict | None = None,
+        initializer_range: float = 0.02,
         codec_model_name_or_path: str = "OpenMOSS-Team/MOSS-Audio-Tokenizer",
         **kwargs: object,
     ) -> None:
-        super().__init__(
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            **kwargs,
-        )
-        self.vocab_size = vocab_size
-        self.hidden_size = hidden_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.intermediate_size = intermediate_size
-        self.max_position_embeddings = max_position_embeddings
-        self.rms_norm_eps = rms_norm_eps
-        self.rope_theta = rope_theta
+        if language_config is None:
+            language_config = {}
+        if isinstance(language_config, dict):
+            language_config.pop("model_type", None)
+            self.language_config = Qwen3Config(**language_config)
+        else:
+            self.language_config = language_config
+
+        if local_config is None:
+            local_config = {}
+        if isinstance(local_config, dict):
+            local_config.pop("model_type", None)
+            self.local_config = MossTTSLocalTransformerConfig(**local_config)
+        else:
+            self.local_config = local_config
+
+        super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
+
         self.rvq = rvq
-        self.n_vq = rvq  # alias for uniform access
+        self.n_vq = rvq  # alias for uniform access from talker code
         self.audio_vocab_size = audio_vocab_size
         self.audio_pad_token = audio_pad_token
         self.sampling_rate = sampling_rate
         self.reference_audio_pad = reference_audio_pad
         self.text_pad = text_pad
+        self.vocab_size = vocab_size
+        self.initializer_range = initializer_range
         self.codec_model_name_or_path = codec_model_name_or_path
 
-        if local_transformer_config is None:
-            local_transformer_config = {}
-        if isinstance(local_transformer_config, dict):
-            self.local_transformer_config = MossTTSLocalTransformerConfig(
-                hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
-                intermediate_size=intermediate_size,
-                **local_transformer_config,
-            )
-        else:
-            self.local_transformer_config = local_transformer_config
+    # The talker still reads ``hidden_size`` etc. directly from the config in
+    # places — proxy them through to ``language_config`` for backward compat.
+    @property
+    def hidden_size(self) -> int:
+        return int(self.language_config.hidden_size)
 
-    def get_text_config(self, **_: object) -> "MossTTSRealtimeConfig":
-        # The model IS a flat Qwen3-style config; return self for vLLM sizing.
-        return self
+    @property
+    def num_hidden_layers(self) -> int:
+        return int(self.language_config.num_hidden_layers)
+
+    @property
+    def num_attention_heads(self) -> int:
+        return int(self.language_config.num_attention_heads)
+
+    @property
+    def intermediate_size(self) -> int:
+        return int(self.language_config.intermediate_size)
+
+    @property
+    def max_position_embeddings(self) -> int:
+        return int(self.language_config.max_position_embeddings)
+
+    @property
+    def rms_norm_eps(self) -> float:
+        return float(self.language_config.rms_norm_eps)
+
+    @property
+    def rope_theta(self) -> float:
+        return float(self.language_config.rope_theta)
+
+    # vLLM sizes KV cache from get_text_config(); return the inner Qwen3 cfg.
+    def get_text_config(self, **_: object) -> Qwen3Config:
+        return self.language_config
 
 
 AutoConfig.register("moss_tts_delay", MossTTSDelayConfig)

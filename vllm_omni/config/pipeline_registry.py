@@ -107,6 +107,6 @@ _OMNI_PIPELINES: dict[str, tuple[str, str]] = {
     ),
     "moss_tts_realtime": (
         "vllm_omni.model_executor.models.moss_tts.pipeline",
-        "MOSS_TTS_PIPELINE",
+        "MOSS_TTS_REALTIME_PIPELINE",
     ),
 }
