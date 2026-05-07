@@ -129,10 +129,19 @@ def run_tts(args: argparse.Namespace) -> None:
         if not args.ambient_sound:
             sys.exit("MOSS-SoundEffect requires --ambient-sound")
         builder_kwargs["ambient_sound"] = args.ambient_sound
+        # MOSS-SoundEffect emits ~12.5 codec frames per second; ``tokens``
+        # tells the AR loop the target duration.
         if args.duration_tokens:
             builder_kwargs["tokens"] = args.duration_tokens
+        elif args.duration_seconds:
+            builder_kwargs["tokens"] = max(1, int(float(args.duration_seconds) * 12.5))
         text = args.text or ""
     elif is_voice_gen:
+        # MOSS-VoiceGenerator needs an instruction (voice description) plus
+        # the text to synthesise; no reference audio.
+        if not args.instruction:
+            sys.exit("MOSS-VoiceGenerator requires --instruction (voice description)")
+        builder_kwargs["instruction"] = args.instruction
         text = args.text or ""
     else:
         if not args.ref_audio:
@@ -219,6 +228,17 @@ def main() -> None:
         type=int,
         default=None,
         help="Target duration in tokens (1 s ≈ 12.5 tokens) for MOSS-SoundEffect",
+    )
+    parser.add_argument(
+        "--duration-seconds",
+        type=float,
+        default=None,
+        help="Target duration in seconds (converted via ~12.5 tokens/s) for MOSS-SoundEffect",
+    )
+    parser.add_argument(
+        "--instruction",
+        default=None,
+        help="Voice description for MOSS-VoiceGenerator (e.g. 'a young woman with a clear voice')",
     )
     parser.add_argument("--output", default="output.wav", help="Output WAV path")
     args = parser.parse_args()
