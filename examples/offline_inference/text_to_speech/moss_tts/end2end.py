@@ -161,16 +161,44 @@ def _build_realtime_prompt(
         del codec
         gc.collect()
 
-    # Build system + (optional) voice-clone prompt, then user text.
-    system_grid = realtime_processor.make_ensemble(prompt_audio_tokens=audio_tokens)
-    user_grid = realtime_processor.make_user_prompt(
-        text=text, audio_tokens=np.zeros((0, 16), dtype=np.int64)
-    )
-    grid = np.concatenate([system_grid, user_grid], axis=0)  # (L, 17)
+    # Build the inference-style prefill (mirrors upstream
+    # ``MossTTSRealtimeInference._build_prefill_batch``):
+    #   system_prompt [+ voice_clone_block]
+    #   <|im_start|>assistant\n
+    #   <text_tokens...>            (col 0 = text, cols 1..16 = audio_channel_pad)
+    #   <last text token>           (col 1 = audio_bos at the last text position)
+    # Generation continues from here; the local transformer emits real audio
+    # codes for codebook 0 directly (no BOS frame at gen_step=0).
+    system_grid = realtime_processor.make_ensemble(prompt_audio_tokens=audio_tokens)  # (L_sys, 17)
 
+    # Append "<|im_start|>assistant\n" header (the snapshot's make_ensemble
+    # omits it; inferencer.py's version includes it. We add it here.)
+    assistant_header_ids = tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
+    assistant_grid = np.full((len(assistant_header_ids), 17), 1024, dtype=np.int64)
+    assistant_grid[:, 0] = assistant_header_ids
+
+    # Append the FIRST 12 text tokens with audio_bos (1025) at the last
+    # included text position (audio column 0 == grid col 1). The remaining
+    # text tokens are fed one-per-step during generation via the talker's
+    # compute_logits → vLLM sampler pipeline (see ``ids.all`` in the
+    # additional_information). This matches upstream
+    # ``MossTTSRealtimeInference._build_prefill_batch`` (prefill_max_text=12).
+    text_ids_only = tokenizer.encode(text, add_special_tokens=False)
+    if not text_ids_only:
+        raise ValueError("Empty text after tokenisation")
+    PREFILL_MAX_TEXT = 12
+    cur_len = min(len(text_ids_only), PREFILL_MAX_TEXT)
+    text_grid = np.full((cur_len, 17), 1024, dtype=np.int64)
+    text_grid[:, 0] = text_ids_only[:cur_len]
+    text_grid[-1, 1] = 1025  # audio_bos_token at last *prefilled* text token
+
+    grid = np.concatenate([system_grid, assistant_grid, text_grid], axis=0)
     text_ids = grid[:, 0].tolist()
     audio_codes = torch.from_numpy(grid[:, 1:].astype(np.int64).copy())  # (L, 16)
-    return text_ids, audio_codes, 16
+
+    # ``remaining_text_ids`` will be fed one-per-step by the talker.
+    remaining_text_ids = list(text_ids_only[cur_len:])
+    return text_ids, audio_codes, 16, remaining_text_ids
 
 
 def run_tts(args: argparse.Namespace) -> None:
@@ -194,6 +222,7 @@ def run_tts(args: argparse.Namespace) -> None:
     ref_audio = None
     builder_kwargs: dict = {}
 
+    remaining_text_ids: list[int] | None = None
     if is_realtime:
         # MOSS-TTS-Realtime uses a different prompt format and has its own
         # per-step depth transformer; the delay-style ``MossTTSDelayProcessor``
@@ -202,8 +231,9 @@ def run_tts(args: argparse.Namespace) -> None:
             sys.exit("MOSS-TTS-Realtime currently requires --ref-audio (voice clone).")
         ref_audio = _load_ref_audio(args.ref_audio)
         text = args.text or ""
-        text_ids, audio_codes, n_vq = _build_realtime_prompt(args.model, text, ref_audio)
-        print(f"Prefill prompt: {len(text_ids)} tokens, {n_vq}-quantizer audio block (realtime)")
+        text_ids, audio_codes, n_vq, remaining_text_ids = _build_realtime_prompt(args.model, text, ref_audio)
+        print(f"Prefill prompt: {len(text_ids)} tokens, {n_vq}-quantizer audio block (realtime); "
+              f"{len(remaining_text_ids)} text tokens to stream")
     elif is_sound_effect:
         if not args.ambient_sound:
             sys.exit("MOSS-SoundEffect requires --ambient-sound")
@@ -253,15 +283,22 @@ def run_tts(args: argparse.Namespace) -> None:
         detokenize=True,
     )
 
+    additional_info: dict = {
+        # Reference-audio codes consumed by the talker prefill (additive
+        # embedding); shape is (L, n_vq) where pad_code marks non-audio
+        # positions. The OmniPayload schema reserves ``codes.ref`` for
+        # exactly this kind of conditioning input.
+        "codes": {"ref": audio_codes},
+    }
+    if remaining_text_ids:
+        # Realtime variant: feed the remaining text tokens (everything past
+        # the first ``PREFILL_MAX_TEXT``) one-per-step during decode via the
+        # talker's compute_logits → vLLM sampler one-hot trick.
+        additional_info["ids"] = {"all": remaining_text_ids}
+
     request = {
         "prompt_token_ids": text_ids,
-        "additional_information": {
-            # Reference-audio codes consumed by the talker prefill (additive
-            # embedding); shape is (L, n_vq) where pad_code marks non-audio
-            # positions. The OmniPayload schema reserves ``codes.ref`` for
-            # exactly this kind of conditioning input.
-            "codes": {"ref": audio_codes},
-        },
+        "additional_information": additional_info,
     }
 
     chunks: list[torch.Tensor] = []

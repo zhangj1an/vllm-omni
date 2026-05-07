@@ -200,10 +200,16 @@ class MossTTSRealtimeLocalTransformer(nn.Module):
         top_k: int = 50,
         top_p: float = 0.95,
         do_sample: bool = True,
+        repetition_penalty: float = 1.0,
+        history_per_codebook: list[list[int]] | None = None,
     ) -> torch.Tensor:
         """Generate one audio frame (rvq codebook tokens) for batch B.
 
         Returns a ``(B, rvq)`` LongTensor.
+
+        ``history_per_codebook[i]`` is a list of recently-emitted token ids for
+        codebook ``i``; when ``repetition_penalty != 1.0`` those tokens get
+        their logits scaled down (mirrors upstream's rep-penalty behaviour).
         """
         device = backbone_last_hidden.device
         dtype = backbone_last_hidden.dtype
@@ -234,6 +240,15 @@ class MossTTSRealtimeLocalTransformer(nn.Module):
 
             x = self.norm(x)              # (B, 1, H)
             logits = lm_heads[step](x[:, 0, :]).float()  # (B, vocab)
+            if repetition_penalty != 1.0 and history_per_codebook is not None and step < len(history_per_codebook):
+                hist = history_per_codebook[step]
+                if hist:
+                    hist_t = torch.tensor(hist, dtype=torch.long, device=logits.device)
+                    # Penalize tokens that appeared in recent history.
+                    sel = logits.index_select(-1, hist_t)
+                    pos = sel > 0
+                    sel = torch.where(pos, sel / repetition_penalty, sel * repetition_penalty)
+                    logits.index_copy_(-1, hist_t, sel)
             codes[:, step] = _sample_token(logits, temperature, top_k, top_p, do_sample)
 
         return codes

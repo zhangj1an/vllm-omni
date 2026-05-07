@@ -789,7 +789,21 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
             r1 = min(r0 + rows_per_state, B)
             if r0 >= r1:
                 continue
-            tok = self.audio_eos_id if (isinstance(state, dict) and state.get("is_stopping")) else self.text_pad_id
+            if not isinstance(state, dict):
+                logits[r0:r1, self.text_pad_id] = 0.0
+                continue
+            if state.get("is_stopping"):
+                logits[r0:r1, self.audio_eos_id] = 0.0
+                continue
+            # Streaming text: emit the next remaining text token, then advance
+            # the cursor. Once exhausted, fall back to ``text_pad``.
+            cursor = int(state.get("text_cursor", 0))
+            remaining = state.get("remaining_text") or []
+            if 0 <= cursor < len(remaining):
+                tok = int(remaining[cursor])
+                state["text_cursor"] = cursor + 1
+            else:
+                tok = self.text_pad_id
             logits[r0:r1, tok] = 0.0
         # Defensive: if no states recorded yet (very first call before
         # make_omni_output ran), default to text_pad everywhere.
@@ -845,8 +859,19 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
                 chunk_audio[-1].detach() if chunk_audio is not None
                 else torch.full((self.n_vq,), self.audio_pad_token, dtype=torch.long, device=device)
             )
+            # Capture the streaming-text list from the request (set by the
+            # realtime end2end builder; empty for the delay variants which
+            # don't take this code path anyway).
+            remaining = (info_dict.get("ids", {}) or {}).get("all")
+            if not isinstance(remaining, list):
+                remaining = []
             info_update: dict[str, Any] = {
-                "audio_state": {"is_stopping": False, "step": 0},
+                "audio_state": {
+                    "is_stopping": False,
+                    "step": 0,
+                    "text_cursor": 0,
+                    "remaining_text": list(remaining),
+                },
                 "audio_codes": {"current": current_codes},
                 "ref_offset": ref_offset + span_len,
             }
@@ -914,15 +939,35 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
                     continue  # already stopped — no more audio frames
 
                 last_h = hidden[row_end - 1].unsqueeze(0)  # (1, H)
-                # Generate one frame of (n_vq,) codes via the local transformer.
+                # Sampling parameters mirror upstream ``MossTTSRealtimeInference.generate``:
+                # 0.8 / 0.6 / 30 + 1.1 repetition penalty over a 50-frame window.
+                rep_window = 50
+                hist_per_cb: list[list[int]] = []
+                acc_for_hist = (info.get("audio_codes", {}) or {}).get("accumulated")
+                if isinstance(acc_for_hist, torch.Tensor) and acc_for_hist.numel() > 0:
+                    tail = acc_for_hist[-rep_window:].long().cpu().tolist()
+                    for cb in range(self.n_vq):
+                        hist_per_cb.append([row[cb] for row in tail])
+                else:
+                    hist_per_cb = [[] for _ in range(self.n_vq)]
                 new_codes = self.local_transformer.generate_frame(
                     last_h,
                     self.local_lm_heads,
-                    temperature=1.0,
-                    top_p=0.95,
-                    top_k=50,
+                    temperature=0.8,
+                    top_p=0.6,
+                    top_k=30,
                     do_sample=True,
+                    repetition_penalty=1.1,
+                    history_per_codebook=hist_per_cb,
                 ).squeeze(0)  # (n_vq,)
+                if int(state.get("step", 0)) < 5 or int(state.get("step", 0)) % 50 == 0:
+                    logger.info(
+                        "[MossTTSRealtime make_omni] step=%d ch0=%d cursor=%d/%d",
+                        int(state.get("step", 0)),
+                        int(new_codes[0].item()),
+                        int(state.get("text_cursor", 0)),
+                        len(state.get("remaining_text") or []),
+                    )
 
                 ch0 = int(new_codes[0].item())
                 # Stop condition mirrors upstream: codebook 0 == eos_audio_id.
@@ -993,22 +1038,42 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         loaded: set[str] = set()
         params_dict = dict(self.named_parameters())
 
-        def remap(name: str) -> str:
-            if name.startswith("language_model."):
-                return "model." + name[len("language_model."):]
-            if name.startswith("local_transformer.model."):
-                return "local_transformer." + name[len("local_transformer.model."):]
-            if name.startswith("local_transformer.local_lm_heads."):
-                return "local_lm_heads." + name[len("local_transformer.local_lm_heads."):]
-            return name
-
+        # Qwen3 backbone weights need vLLM's stacked-params loader to fuse
+        # ``q_proj``/``k_proj``/``v_proj`` → ``qkv_proj`` and
+        # ``gate_proj``/``up_proj`` → ``gate_up_proj``. ``default_weight_loader``
+        # alone leaves those fused params un-initialised, which silently turns
+        # the backbone into a slightly-corrupted model that never emits EOS.
+        backbone_weights: list[tuple[str, torch.Tensor]] = []
+        skipped: list[str] = []
         for name, tensor in weights:
-            tgt = remap(name)
+            if name.startswith("language_model."):
+                backbone_weights.append((name[len("language_model."):], tensor))
+                continue
+            if name.startswith("local_transformer.model."):
+                tgt = "local_transformer." + name[len("local_transformer.model."):]
+            elif name.startswith("local_transformer.local_lm_heads."):
+                tgt = "local_lm_heads." + name[len("local_transformer.local_lm_heads."):]
+            else:
+                tgt = name
             if tgt in params_dict:
                 default_weight_loader(params_dict[tgt], tensor)
                 loaded.add(tgt)
             else:
-                logger.debug("MossTTSRealtime: skipping unmatched weight %s -> %s", name, tgt)
+                skipped.append(f"{name}->{tgt}")
+
+        # Delegate Qwen3 weights to its own loader (handles fused params).
+        backbone_loaded = self.model.load_weights(iter(backbone_weights))
+        for n in backbone_loaded:
+            loaded.add(f"model.{n}")
+
+        logger.info(
+            "[MossTTSRealtime] loaded %d/%d params; skipped=%d (first 5: %s)",
+            len(loaded), len(params_dict), len(skipped), skipped[:5],
+        )
+        not_loaded = [n for n in params_dict if n not in loaded]
+        if not_loaded:
+            logger.warning("[MossTTSRealtime] %d params NOT loaded (first 5: %s)",
+                           len(not_loaded), not_loaded[:5])
         return loaded
 
 
