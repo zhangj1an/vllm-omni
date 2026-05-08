@@ -48,21 +48,34 @@ elif current_omni_platform.is_musa():
     except (ImportError, ModuleNotFoundError):
         pass
 else:
-    # CUDA: try FA3 -> FA2 fallback chain
-    # Try FA3 from fa3-fwd PyPI package
+    # CUDA: prefer vllm.vllm_flash_attn (always present, dispatches FA3/FA2 by
+    # device capability), then fall back to upstream FA3 / FA2 packages if a
+    # user has explicitly installed them. Earlier versions of this file put
+    # fa3-fwd / flash_attn_interface first; the import-time ordering of those
+    # is unsafe because they import cleanly even on devices whose prebuilt
+    # kernel images don't run there (e.g. Blackwell with fa3-fwd's Hopper
+    # wheel), and the failure surfaces only at first kernel call.
+    # See PR #3302 (the TODO note) and the discussion thread for context.
     try:
-        from fa3_fwd_interface import flash_attn_varlen_func  # noqa: F401
+        from vllm.vllm_flash_attn import flash_attn_varlen_func  # noqa: F401
     except (ImportError, ModuleNotFoundError):
         pass
 
-    # Fallback: Try FA3 from flash-attention source build
+    # Opt-in fast path: FA3 from fa3-fwd PyPI prebuilt wheel.
+    if flash_attn_varlen_func is None:
+        try:
+            from fa3_fwd_interface import flash_attn_varlen_func  # noqa: F401
+        except (ImportError, ModuleNotFoundError):
+            pass
+
+    # Opt-in fast path: FA3 from flash-attention upstream source build.
     if flash_attn_varlen_func is None:
         try:
             from flash_attn_interface import flash_attn_varlen_func  # noqa: F401
         except (ImportError, ModuleNotFoundError):
             pass
 
-    # Fallback: Try FA2 from flash-attn package (try multiple import paths)
+    # Fallback: FA2 from flash-attn package (try multiple import paths).
     if flash_attn_varlen_func is None:
         try:
             from flash_attn import flash_attn_varlen_func  # noqa: F401
@@ -72,16 +85,6 @@ else:
     if flash_attn_varlen_func is None:
         try:
             from flash_attn.flash_attn_interface import (  # noqa: F401
-                flash_attn_varlen_func,
-            )
-        except (ImportError, ModuleNotFoundError):
-            pass
-
-    # Fallback: Try vLLM's encapsulated flash attention dispatcher
-    # TODO discuss priority and remove potentially redundant fallbacks
-    if flash_attn_varlen_func is None:
-        try:
-            from vllm.vllm_flash_attn import (  # noqa: F401
                 flash_attn_varlen_func,
             )
         except (ImportError, ModuleNotFoundError):
