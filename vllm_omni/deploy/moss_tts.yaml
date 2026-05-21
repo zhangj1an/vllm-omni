@@ -41,8 +41,11 @@ stages:
     enforce_eager: true
     enable_prefix_caching: false
     async_scheduling: true
-    max_num_batched_tokens: 65536
-    max_model_len: 65536
+    # Talker can emit up to max_tokens=4096 frames × n_vq=32 = 131072 codec
+    # tokens per request; cap codec stage above that so a single long output
+    # doesn't trigger "could not broadcast (>65536,) into (65536,)".
+    max_num_batched_tokens: 196608
+    max_model_len: 196608
     devices: "0"
     input_connectors:
       from_stage_0: shm

@@ -37,3 +37,14 @@ models:
     endpoint: /v1/audio/speech
     task_extra_body:
       voice_clone: {}
+
+  # MOSS-TTS family. Only the production MOSS-TTS (8B) variant is wired into
+  # vllm_omni/entrypoints/openai/serving_speech.py for OpenAI /v1/audio/speech
+  # — TTSD/SoundEffect/VoiceGenerator/Realtime are exercised offline via
+  # examples/.../moss_tts/end2end.py rather than through bench_tts.py.
+  OpenMOSS-Team/MOSS-TTS:
+    supported_tasks: [voice_clone]
+    backend: openai-audio-speech
+    endpoint: /v1/audio/speech
+    task_extra_body:
+      voice_clone: {}
