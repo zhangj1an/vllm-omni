@@ -42,8 +42,8 @@ stages:
     enforce_eager: true
     enable_prefix_caching: false
     async_scheduling: true
-    max_num_batched_tokens: 65536
-    max_model_len: 65536
+    max_num_batched_tokens: 196608
+    max_model_len: 196608
     devices: "0"
     input_connectors:
       from_stage_0: shm

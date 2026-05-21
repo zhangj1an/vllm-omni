@@ -38,6 +38,8 @@ logger = init_logger(__name__)
 
 from vllm_omni.benchmarks.data_modules.daily_omni_dataset import DailyOmniDataset, DailyOmniSampleRequest
 from vllm_omni.benchmarks.data_modules.random_multi_modal_dataset import OmniRandomMultiModalDataset
+from vllm_omni.benchmarks.data_modules.sound_effect_dataset import SoundEffectDataset
+from vllm_omni.benchmarks.data_modules.ttsd_dataset import TTSDDataset
 from vllm_omni.benchmarks.data_modules.seed_tts_dataset import (
     SEED_TTS_DEFAULT_OMNI_SYSTEM_PROMPT,
     SeedTTSDataset,
@@ -138,7 +140,13 @@ def get_samples(args, tokenizer):
     is_daily_omni = args.dataset_name == "daily-omni" or (
         args.dataset_name == "hf" and _daily_omni_repo_from_args(args) is not None
     )
-    is_seed_tts = args.dataset_name in ("seed-tts", "seed-tts-text", "seed-tts-design")
+    is_seed_tts = args.dataset_name in (
+        "seed-tts",
+        "seed-tts-text",
+        "seed-tts-design",
+        "ttsd",
+        "sound-effect",
+    )
 
     # Check if we need to handle omni-related backends/datasets
     is_omni_backend = args.backend in ["openai-chat-omni", "openai-audio-speech", "daily-omni"]
@@ -255,6 +263,8 @@ def get_samples(args, tokenizer):
             "seed-tts": SeedTTSDataset,
             "seed-tts-text": SeedTTSTextDataset,
             "seed-tts-design": SeedTTSDesignDataset,
+            "ttsd": TTSDDataset,
+            "sound-effect": SoundEffectDataset,
         }
         DatasetCls = _cls_map[args.dataset_name]
         dataset = DatasetCls(

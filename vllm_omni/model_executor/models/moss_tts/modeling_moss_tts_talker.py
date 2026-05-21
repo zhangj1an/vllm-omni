@@ -226,6 +226,24 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
             delayed_lengths = int(state.get("delayed_lengths", -1))
             is_audio = bool(state.get("is_audio", False))
             step = int(state.get("step", 0))
+            audio_lengths_cur = int(state.get("audio_lengths", 0))
+            max_new_frames = int(state.get("max_new_frames", -1))
+
+            # ---- max_new_frames cap (force im_end / EOS) ----
+            # When the request specified ``max_new_frames`` and we've emitted
+            # that many audio-bearing tokens, force ``im_end`` so the AR loop
+            # stops. Without this, short prompts run to deploy-default
+            # ``max_tokens`` and produce 100+ s of audio per ~10-word input.
+            if (
+                max_new_frames > 0
+                and is_audio
+                and audio_lengths_cur >= max_new_frames
+                and 0 <= self.im_end_token_id < vocab_size
+            ):
+                neg_inf = torch.full_like(row, float("-inf"))
+                neg_inf[..., self.im_end_token_id] = 0.0
+                logits[row_start:row_end] = neg_inf
+                continue
 
             # ---- Forced tokens (delay-slot run / audio-end) ----
             forced: int | None = None
@@ -399,6 +417,16 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
                     dtype=torch.long, device=device,
                 )
             )
+            # Lift max_new_frames from request additional_information into
+            # audio_state so compute_logits can force im_end once we've
+            # emitted that many audio frames (mirrors the moss_tts_nano cap).
+            max_new_frames_req = info_dict.get("max_new_frames")
+            if isinstance(max_new_frames_req, (list, tuple)) and max_new_frames_req:
+                max_new_frames_req = max_new_frames_req[0]
+            try:
+                audio_state["max_new_frames"] = int(max_new_frames_req) if max_new_frames_req is not None else -1
+            except (TypeError, ValueError):
+                audio_state["max_new_frames"] = -1
             info_update: dict[str, Any] = {
                 "audio_state": audio_state,
                 "audio_codes": {"current": current_codes},

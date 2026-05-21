@@ -301,7 +301,11 @@ def run_tts(args: argparse.Namespace) -> None:
         "additional_information": additional_info,
     }
 
+    import time as _time
+
     chunks: list[torch.Tensor] = []
+    t_gen_start = _time.monotonic()
+    t_first_audio: float | None = None
     for stage_outputs in omni.generate(request, [talker_sp, codec_sp]):
         # Each yielded ``stage_outputs`` is an OmniRequestOutput; the codec
         # stage attaches its waveform under ``multimodal_output["model_outputs"]``.
@@ -313,10 +317,16 @@ def run_tts(args: argparse.Namespace) -> None:
         if wav is None:
             continue
         if isinstance(wav, list):
-            chunks.extend(w.reshape(-1) for w in wav if isinstance(w, torch.Tensor) and w.numel() > 0)
+            non_empty = [w.reshape(-1) for w in wav if isinstance(w, torch.Tensor) and w.numel() > 0]
+            if non_empty and t_first_audio is None:
+                t_first_audio = _time.monotonic()
+            chunks.extend(non_empty)
         elif isinstance(wav, torch.Tensor) and wav.numel() > 0:
+            if t_first_audio is None:
+                t_first_audio = _time.monotonic()
             chunks.append(wav.reshape(-1))
 
+    t_gen_end = _time.monotonic()
     if not chunks:
         print("No audio in output — check model loading logs.")
         return
@@ -324,6 +334,9 @@ def run_tts(args: argparse.Namespace) -> None:
     wav_t = torch.cat(chunks).float().cpu()
     sf.write(args.output, wav_t.numpy(), 24000)
     print(f"Saved {len(wav_t)/24000:.2f}s of audio to {args.output}")
+    ttfa_ms = (t_first_audio - t_gen_start) * 1000.0 if t_first_audio is not None else float("nan")
+    gen_total_ms = (t_gen_end - t_gen_start) * 1000.0
+    print(f"TTFA_MS={ttfa_ms:.1f} GEN_TOTAL_MS={gen_total_ms:.1f} AUDIO_S={len(wav_t)/24000:.2f}")
 
 
 def main() -> None:
