@@ -1060,7 +1060,6 @@ class ImageKVCacheManager:
 
         head_num_per_rank = query.shape[1]
         kv_head_num_per_rank = key.shape[1]
-        repeat_num = head_num_per_rank // kv_head_num_per_rank
         head_dim = query.shape[2]
 
         query = query.reshape(bs, q_len, head_num_per_rank, head_dim)
@@ -1102,11 +1101,10 @@ class ImageKVCacheManager:
                 joint_text_query = query[:, :0, :, :]
                 joint_text_key, joint_text_value = self._reuse_prompt_kv(key, value, seq_len, bs, shard_image_size)
 
-        key = repeat_kv(key, repeat_num)
-        value = repeat_kv(value, repeat_num)
-        if self.sp_size > 1:
-            joint_text_key = repeat_kv(joint_text_key, repeat_num)
-            joint_text_value = repeat_kv(joint_text_value, repeat_num)
+        # K/V stay compact (num_kv_heads). The Attention layer's SP path keeps
+        # them compact through the head-dim all-to-all, reducing comm volume
+        # by the GQA ratio (num_heads / num_kv_heads); the backend handles
+        # GQA broadcast (FlashAttention native, SDPA enable_gqa).
 
         attention_mask = attention_mask.contiguous()
 

@@ -64,6 +64,7 @@ class CuDNNAttentionImpl(AttentionImpl):
             attention_mask = _maybe_reshape_attn_mask(query, key, attn_metadata.attn_mask, mask_mode="broadcast_k")
 
         query, key, value = (x.permute(0, 2, 1, 3) for x in (query, key, value))
+        enable_gqa = key.shape[1] != query.shape[1]
         # Pin cuDNN exclusively. A priority list like [CUDNN, FLASH, MATH] hits a
         # PyTorch SDPA dispatch quirk: when FLASH rejects a non-None attn_mask,
         # cuDNN gets runtime-disabled in the same call and the dispatcher falls
@@ -84,6 +85,7 @@ class CuDNNAttentionImpl(AttentionImpl):
                     dropout_p=0.0,
                     is_causal=self.causal,
                     scale=self.softmax_scale,
+                    enable_gqa=enable_gqa,
                 )
         except RuntimeError as e:
             if "No available kernel" not in str(e):
@@ -100,5 +102,6 @@ class CuDNNAttentionImpl(AttentionImpl):
                 dropout_p=0.0,
                 is_causal=self.causal,
                 scale=self.softmax_scale,
+                enable_gqa=enable_gqa,
             )
         return output.permute(0, 2, 1, 3)
