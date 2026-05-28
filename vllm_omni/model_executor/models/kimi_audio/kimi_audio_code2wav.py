@@ -92,7 +92,7 @@ class KimiAudioCode2Wav(nn.Module):
 
         wrapper = KimiAudioCudaGraphDecoderWrapper(vocoder=vocoder, enabled=True)
         wrapper.warmup(
-            device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+            device=torch.device(f"cuda:{torch.accelerator.current_device_index()}"),
             dtype=self._detokenizer.dtype,
             codec_chunk_frames=codec_chunk_frames,
             codec_left_context_frames=codec_left,

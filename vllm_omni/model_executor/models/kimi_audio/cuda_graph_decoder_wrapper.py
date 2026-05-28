@@ -86,7 +86,7 @@ class KimiAudioCudaGraphDecoderWrapper:
             dummy = torch.zeros(size, _NUM_MELS, dtype=dtype, device=device)
             with torch.no_grad():
                 _ = self.vocoder.decode_mel(dummy)
-        torch.cuda.synchronize(device)
+        torch.accelerator.synchronize(device)
 
         for size in self.capture_sizes:
             self._capture(size, device, dtype)
@@ -99,7 +99,7 @@ class KimiAudioCudaGraphDecoderWrapper:
         static_input = torch.zeros(size, _NUM_MELS, dtype=dtype, device=device)
         with torch.no_grad():
             _ = self.vocoder.decode_mel(static_input)
-        torch.cuda.synchronize(device)
+        torch.accelerator.synchronize(device)
 
         graph = CUDAGraph()
         with torch.no_grad():

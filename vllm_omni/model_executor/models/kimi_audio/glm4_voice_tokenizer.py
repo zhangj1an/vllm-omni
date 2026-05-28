@@ -23,7 +23,7 @@ def _load_tokenizer():
     repo = "THUDM/glm-4-voice-tokenizer"
     model = WhisperVQEncoder.from_pretrained(repo).eval()
     if torch.cuda.is_available():
-        model = model.to(torch.cuda.current_device())
+        model = model.to(torch.accelerator.current_device_index())
     extractor = WhisperFeatureExtractor.from_pretrained(repo)
     return model, extractor
 

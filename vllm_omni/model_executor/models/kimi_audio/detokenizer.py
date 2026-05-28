@@ -177,7 +177,7 @@ def get_audio_detokenizer(model_path, dtype: torch.dtype = torch.bfloat16):
     fm_model_config = os.path.join(model_path, "audio_detokenizer", "config.yaml")
     fm_ckpt_path = os.path.join(model_path, "audio_detokenizer", "model.pt")
 
-    device = torch.cuda.current_device()
+    device = torch.accelerator.current_device_index()
     detokenizer = PrefixStreamingFlowMatchingDetokenizer.from_pretrained(
         max_prompt_chunk=10,  # 10 * 3 = 30s
         fm_config=fm_model_config,
