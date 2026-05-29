@@ -428,7 +428,6 @@ def _build_modules(specs: list[dict[str, Any]], is_downsample: bool,
         if spec["module_type"] == "PatchedPretransform":
             m = _PatchedPretransform(**spec, is_downsample=is_downsample)
         else:
-            context = int(rate * context_duration)
             spec.pop("conv_layout", None)
             spec.pop("module_type", None)
             spec.pop("gating", None)

@@ -69,7 +69,6 @@ def talker2codec(
             continue
 
         # audio_codes: (T, NQ) → flatten to [NQ, T] → list[int]
-        t, nq = audio_codes.shape[0], audio_codes.shape[1]
         codes_nq_t = audio_codes.transpose(0, 1).contiguous()  # (NQ, T)
         flat = codes_nq_t.reshape(-1).tolist()
 

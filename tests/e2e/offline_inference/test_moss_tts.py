@@ -95,9 +95,19 @@ def _collect_audio(omni: Omni, request: dict) -> tuple[torch.Tensor, int]:
         for req_output in stage_outputs.request_output:
             mm = req_output.outputs[0].multimodal_output
             assert mm is not None, "Expected non-None multimodal_output"
-            audio = mm.get("audio") or mm.get("model_outputs")
+            # Never use ``a or b`` on tensor values — a multi-element tensor
+            # raises on truthiness. Check ``is None`` explicitly and handle the
+            # pre-consolidation list form.
+            audio = mm.get("audio")
+            if audio is None:
+                audio = mm.get("model_outputs")
             sr = mm.get("sr")
             assert audio is not None, "Expected 'audio' or 'model_outputs' in multimodal_output"
+            if isinstance(audio, list):
+                audio = torch.cat(
+                    [t.reshape(-1) for t in audio if isinstance(t, torch.Tensor) and t.numel() > 0],
+                    dim=0,
+                )
             assert isinstance(audio, torch.Tensor), f"Expected Tensor, got {type(audio)}"
             return audio.reshape(-1).cpu(), int(sr.item()) if sr is not None else SAMPLE_RATE
     raise AssertionError("No stage outputs received")
@@ -165,8 +175,15 @@ def test_moss_tts_delay_batch(delay_engine, ref_audio_path):
         for req_output in stage_outputs.request_output:
             mm = req_output.outputs[0].multimodal_output
             assert mm is not None
-            audio = mm.get("audio") or mm.get("model_outputs")
+            audio = mm.get("audio")
+            if audio is None:
+                audio = mm.get("model_outputs")
             assert audio is not None
+            if isinstance(audio, list):
+                audio = torch.cat(
+                    [t.reshape(-1) for t in audio if isinstance(t, torch.Tensor) and t.numel() > 0],
+                    dim=0,
+                )
             results.append(audio.reshape(-1).cpu())
 
     assert len(results) == 2, f"Expected 2 outputs, got {len(results)}"

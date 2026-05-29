@@ -16,9 +16,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM, Qwen3Model
+from vllm.model_executor.models.qwen3 import Qwen3Model
 from vllm.sequence import IntermediateTensors
-from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_omni.model_executor.models.moss_tts.configuration_moss_tts import (
@@ -721,7 +720,6 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         # Qwen3 backbone (uses the inner language_config). vLLM exposes its
         # internal weights under ``model.*`` so we keep that prefix and remap
         # the upstream ``language_model.*`` keys at load time.
-        from vllm.config import VllmConfig as _VllmConfig
         backbone_vllm_config = copy.copy(vllm_config)
         # Swap in the inner Qwen3 config so vLLM picks the right num_layers,
         # heads etc.; KV cache sizing already uses get_text_config().
