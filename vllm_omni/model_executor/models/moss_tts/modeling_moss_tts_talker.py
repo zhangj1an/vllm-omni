@@ -1060,7 +1060,8 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
           language_model.embed_tokens.*    → model.embed_tokens.*             (Qwen3 inner)
           language_model.layers.*          → model.layers.*
           language_model.norm.*            → model.norm.*
-          local_transformer.model.*        → local_transformer.*              (drop .model.)
+          local_transformer.model.embed_tokens.* → local_transformer.model.codec_embedding.*
+          local_transformer.model.*        → local_transformer.model.*        (shared body, kept)
           local_transformer.local_lm_heads.* → local_lm_heads.*               (top-level)
         """
         loaded: set[str] = set()
@@ -1078,7 +1079,15 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
                 backbone_weights.append((name[len("language_model."):], tensor))
                 continue
             if name.startswith("local_transformer.model."):
-                tgt = "local_transformer." + name[len("local_transformer.model."):]
+                # Shared CodePredictorBaseModel keeps the ``.model.`` nesting and
+                # the per-layer/norm names verbatim; only the codebook embedding
+                # is renamed (upstream ``embed_tokens`` → ``codec_embedding``).
+                sub = name[len("local_transformer.model."):]
+                if sub.startswith("rotary_emb.inv_freq"):
+                    continue  # non-persistent buffer, recomputed at runtime
+                if sub.startswith("embed_tokens."):
+                    sub = "codec_embedding." + sub[len("embed_tokens."):]
+                tgt = "local_transformer.model." + sub
             elif name.startswith("local_transformer.local_lm_heads."):
                 tgt = "local_lm_heads." + name[len("local_transformer.local_lm_heads."):]
             else:

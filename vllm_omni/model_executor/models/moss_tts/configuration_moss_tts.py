@@ -130,6 +130,13 @@ class MossTTSLocalTransformerConfig(PretrainedConfig):
         self.audio_pad_token = audio_pad_token
         self.audio_vocab_size = audio_vocab_size
         self.rvq = rvq
+        # The shared ``CodePredictorBaseModel`` (reused from Qwen3-TTS /
+        # Qwen3-Omni) reads ``num_code_groups`` and ``vocab_size`` to size its
+        # codebook embeddings and causal mask. MossTTS names the same
+        # quantities ``rvq`` and ``audio_vocab_size``; mirror them so the
+        # common transformer body can be driven from this config unchanged.
+        self.num_code_groups = rvq
+        self.vocab_size = audio_vocab_size
         # rope_parameters used by transformers.modeling_rope_utils
         self.rope_parameters = {
             "rope_type": rope_type,
