@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2026 OpenMOSS and the vLLM-Omni team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License").
@@ -18,6 +17,7 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _extract_audio_codes(stage_output: Any) -> torch.Tensor | None:
     """Pull audio codes from a Stage-0 OmniOutput or raw tensor."""
@@ -39,6 +39,7 @@ def _extract_audio_codes(stage_output: Any) -> torch.Tensor | None:
 # ---------------------------------------------------------------------------
 # Non-streaming (sync): called once after Stage 0 finishes
 # ---------------------------------------------------------------------------
+
 
 def talker2codec(
     stage_list: list[Any],
@@ -86,6 +87,7 @@ def talker2codec(
 # Streaming (async chunk): called each time Stage 0 emits a new chunk
 # ---------------------------------------------------------------------------
 
+
 def talker2codec_async_chunk(
     transfer_manager: Any,
     pooling_output: dict[str, Any] | None,
@@ -111,7 +113,7 @@ def talker2codec_async_chunk(
 
     if req_id not in state:
         state[req_id] = {
-            "accumulated": None,   # (T_acc, NQ) tensor or None
+            "accumulated": None,  # (T_acc, NQ) tensor or None
             "total_emitted": 0,
         }
     req_state = state[req_id]
@@ -132,9 +134,7 @@ def talker2codec_async_chunk(
                 if req_state["accumulated"] is None:
                     req_state["accumulated"] = new_rows
                 else:
-                    req_state["accumulated"] = torch.cat(
-                        [req_state["accumulated"], new_rows], dim=0
-                    )
+                    req_state["accumulated"] = torch.cat([req_state["accumulated"], new_rows], dim=0)
         # Realtime variant emits raw (un-delay-patterned) codes; record that
         # so the emit step below skips the apply_de_delay_pattern transform.
         # Realtime sets ``meta.finished`` to a 1-D bool tensor; the delay

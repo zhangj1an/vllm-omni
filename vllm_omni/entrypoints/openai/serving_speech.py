@@ -1474,9 +1474,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         v = self._moss_variant
         if v in (None, "tts", "realtime"):
             if request.ref_audio is None:
-                label = "MOSS-TTS-Nano" if v is None else (
-                    "MOSS-TTS-Realtime" if v == "realtime" else "MOSS-TTS"
-                )
+                label = "MOSS-TTS-Nano" if v is None else ("MOSS-TTS-Realtime" if v == "realtime" else "MOSS-TTS")
                 return f"{label} requires 'ref_audio' (reference audio for voice cloning)."
             return self._validate_ref_audio_format(request.ref_audio)
 
@@ -1545,6 +1543,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         prompt and forwards the rest as ``additional_information``.
         """
         import torch  # local to avoid pulling torch at module import time
+
         v = self._moss_variant
 
         # ---- Legacy nano path (unchanged) ----
@@ -1592,6 +1591,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 wav = wav.unsqueeze(0)
             if sr != sr_target:
                 import torchaudio
+
                 wav = torchaudio.functional.resample(wav, sr, sr_target)
             with torch.no_grad():
                 codes_list = proc.encode_audios_from_wav([wav], sampling_rate=sr_target, n_vq=n_vq)

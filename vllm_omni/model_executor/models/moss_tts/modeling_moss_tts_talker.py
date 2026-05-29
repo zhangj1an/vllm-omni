@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2026 OpenMOSS and the vLLM-Omni team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License").
@@ -7,7 +6,8 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -122,23 +122,17 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         # Audio VQ heads (heads 1…n_vq in upstream naming)
         # Each head predicts one RVQ codebook: vocab = audio_vocab_size + 1
         self.audio_heads = nn.ModuleList(
-            [
-                nn.Linear(hidden_size, self.audio_vocab_size + 1, bias=False)
-                for _ in range(self.n_vq)
-            ]
+            [nn.Linear(hidden_size, self.audio_vocab_size + 1, bias=False) for _ in range(self.n_vq)]
         )
 
         # Per-codebook audio embeddings (emb_ext in upstream)
         self.audio_embeddings = nn.ModuleList(
-            [
-                nn.Embedding(self.audio_vocab_size + 1, hidden_size)
-                for _ in range(self.n_vq)
-            ]
+            [nn.Embedding(self.audio_vocab_size + 1, hidden_size) for _ in range(self.n_vq)]
         )
 
         # GPU-resident per-request buffer keys (avoid CPU round-trips)
         self.gpu_resident_buffer_keys: set[tuple[str, str]] = {
-            ("audio_codes", "current"),   # last step's audio codes
+            ("audio_codes", "current"),  # last step's audio codes
             ("audio_codes", "accumulated"),
             ("hidden_states", "last"),
         }
@@ -399,9 +393,7 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
                     end_off = ref_offset + span_len
                     chunk = ref_codes[ref_offset:end_off]
                     if chunk.numel() > 0 and chunk.shape[0] == span_len:
-                        codes = chunk.to(device=device, dtype=torch.long).clamp_(
-                            0, self.audio_vocab_size
-                        )
+                        codes = chunk.to(device=device, dtype=torch.long).clamp_(0, self.audio_vocab_size)
                         audio_embed = torch.zeros_like(embeds)
                         for i, emb_layer in enumerate(self.audio_embeddings):
                             audio_embed = audio_embed + emb_layer(codes[:, i])
@@ -412,8 +404,10 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
                 last_ref_row
                 if last_ref_row is not None
                 else torch.full(
-                    (self.n_vq,), self.audio_pad_code,
-                    dtype=torch.long, device=device,
+                    (self.n_vq,),
+                    self.audio_pad_code,
+                    dtype=torch.long,
+                    device=device,
                 )
             )
             # Lift max_new_frames from request additional_information into
@@ -479,9 +473,9 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
 
     def _sample_audio_codes(
         self,
-        last_h: torch.Tensor,           # (1, H)
+        last_h: torch.Tensor,  # (1, H)
         state: dict[str, Any],
-    ) -> torch.Tensor:                  # (n_vq,)
+    ) -> torch.Tensor:  # (n_vq,)
         """Sample one row of n_vq audio codes given current state.
 
         Mirrors upstream's pre/post audio masks:
@@ -516,8 +510,8 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
             if not bool(sampling_mask[i]):
                 continue
             head = self.audio_heads[i]
-            logits = head(last_h).reshape(-1)              # (V,)
-            logits[..., -1] = float("-inf")                # invalid sentinel
+            logits = head(last_h).reshape(-1)  # (V,)
+            logits[..., -1] = float("-inf")  # invalid sentinel
             logits[..., self.audio_pad_code] = float("-inf")
             sampled = self._sample_with_top_k(logits, audio_top_k, audio_temp)
             codes[i] = sampled.long()
@@ -541,9 +535,7 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
 
         hidden = model_outputs  # (S, H)
         info_dicts: list[dict[str, Any]] = (
-            kwargs.get("model_intermediate_buffer")
-            or kwargs.get("runtime_additional_information")
-            or []
+            kwargs.get("model_intermediate_buffer") or kwargs.get("runtime_additional_information") or []
         )
 
         # Ensure each request has an initialised state (defensive: typically
@@ -559,9 +551,7 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
 
         # Stash the per-row state for compute_logits to apply masks. logits
         # rows align with hidden rows, which align with info_dicts in order.
-        self._batch_state = [
-            (info["audio_state"] if isinstance(info, dict) else {}) for info in info_dicts
-        ]
+        self._batch_state = [(info["audio_state"] if isinstance(info, dict) else {}) for info in info_dicts]
 
         audio_codes_list: list[torch.Tensor] = []
 
@@ -613,9 +603,7 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
     # Weight loading
     # ------------------------------------------------------------------
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Map HF weight names to vLLM-Omni module names.
 
         HF layout (MossTTSDelayModel):
@@ -636,7 +624,7 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         for name, tensor in weights:
             # Qwen3 backbone — checkpoint stores keys as language_model.<layer>.
             if name.startswith("language_model.") and not name.startswith("language_model.lm_head"):
-                backbone_weights.append((name[len("language_model."):], tensor))
+                backbone_weights.append((name[len("language_model.") :], tensor))
                 continue
 
             # Text LM head (lm_heads.0 in upstream == language_model.lm_head)
@@ -843,7 +831,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
 
     def _build_input_embeds(
         self,
-        text_ids: torch.Tensor,         # (T,)
+        text_ids: torch.Tensor,  # (T,)
         audio_codes: torch.Tensor | None,  # (T, n_vq) or None
     ) -> torch.Tensor:
         embeds = self.embed_tokens[0](text_ids)
@@ -882,7 +870,8 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
                         chunk_audio = sliced.to(device=device, dtype=torch.long)
             embeds = self._build_input_embeds(input_ids, chunk_audio)
             current_codes = (
-                chunk_audio[-1].detach() if chunk_audio is not None
+                chunk_audio[-1].detach()
+                if chunk_audio is not None
                 else torch.full((self.n_vq,), self.audio_pad_token, dtype=torch.long, device=device)
             )
             # Capture the streaming-text list from the request (set by the
@@ -934,9 +923,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
 
         hidden = model_outputs  # (S, H)
         info_dicts: list[dict[str, Any]] = (
-            kwargs.get("model_intermediate_buffer")
-            or kwargs.get("runtime_additional_information")
-            or []
+            kwargs.get("model_intermediate_buffer") or kwargs.get("runtime_additional_information") or []
         )
 
         # Defensive state init.
@@ -944,9 +931,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
             if isinstance(info, dict) and not isinstance(info.get("audio_state"), dict):
                 info["audio_state"] = {"is_stopping": False, "step": 0}
 
-        self._batch_state = [
-            (info["audio_state"] if isinstance(info, dict) else {}) for info in info_dicts
-        ]
+        self._batch_state = [(info["audio_state"] if isinstance(info, dict) else {}) for info in info_dicts]
 
         audio_codes_list: list[torch.Tensor] = []
         if hidden.numel() > 0 and info_dicts:
@@ -1048,9 +1033,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
     # Weight loading
     # ------------------------------------------------------------------
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Remap upstream MossTTSRealtime checkpoint names → vendored layout.
 
         Mapping:
@@ -1074,20 +1057,20 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         skipped: list[str] = []
         for name, tensor in weights:
             if name.startswith("language_model."):
-                backbone_weights.append((name[len("language_model."):], tensor))
+                backbone_weights.append((name[len("language_model.") :], tensor))
                 continue
             if name.startswith("local_transformer.model."):
                 # Shared CodePredictorBaseModel keeps the ``.model.`` nesting and
                 # the per-layer/norm names verbatim; only the codebook embedding
                 # is renamed (upstream ``embed_tokens`` → ``codec_embedding``).
-                sub = name[len("local_transformer.model."):]
+                sub = name[len("local_transformer.model.") :]
                 if sub.startswith("rotary_emb.inv_freq"):
                     continue  # non-persistent buffer, recomputed at runtime
                 if sub.startswith("embed_tokens."):
-                    sub = "codec_embedding." + sub[len("embed_tokens."):]
+                    sub = "codec_embedding." + sub[len("embed_tokens.") :]
                 tgt = "local_transformer.model." + sub
             elif name.startswith("local_transformer.local_lm_heads."):
-                tgt = "local_lm_heads." + name[len("local_transformer.local_lm_heads."):]
+                tgt = "local_lm_heads." + name[len("local_transformer.local_lm_heads.") :]
             else:
                 tgt = name
             if tgt in params_dict:
@@ -1103,12 +1086,14 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
 
         logger.info(
             "[MossTTSRealtime] loaded %d/%d params; skipped=%d (first 5: %s)",
-            len(loaded), len(params_dict), len(skipped), skipped[:5],
+            len(loaded),
+            len(params_dict),
+            len(skipped),
+            skipped[:5],
         )
         not_loaded = [n for n in params_dict if n not in loaded]
         if not_loaded:
-            logger.warning("[MossTTSRealtime] %d params NOT loaded (first 5: %s)",
-                           len(not_loaded), not_loaded[:5])
+            logger.warning("[MossTTSRealtime] %d params NOT loaded (first 5: %s)", len(not_loaded), not_loaded[:5])
         return loaded
 
 

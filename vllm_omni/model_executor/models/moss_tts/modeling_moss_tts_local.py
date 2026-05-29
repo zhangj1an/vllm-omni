@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2026 OpenMOSS and the vLLM-Omni team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License").
@@ -65,8 +64,8 @@ class MossTTSRealtimeLocalTransformer(nn.Module):
     @torch.no_grad()
     def generate_frame(
         self,
-        backbone_last_hidden: torch.Tensor,    # (B, H)
-        lm_heads: nn.ModuleList,               # ModuleList of rvq Linear(H -> audio_vocab_size)
+        backbone_last_hidden: torch.Tensor,  # (B, H)
+        lm_heads: nn.ModuleList,  # ModuleList of rvq Linear(H -> audio_vocab_size)
         *,
         temperature: float = 1.0,
         top_k: int = 50,

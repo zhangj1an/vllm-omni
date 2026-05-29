@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2026 OpenMOSS and the vLLM-Omni team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
