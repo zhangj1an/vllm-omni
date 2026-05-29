@@ -51,6 +51,16 @@ models:
     task_extra_body:
       voice_clone: {}
 
+  # MOSS-TTS-v1.5: continued-training upgrade of MOSS-TTS 1.0 — same
+  # MossTTSDelay-8B architecture and API, so identical wiring. Adds 31-language
+  # synthesis via the `language` field and inline `[pause Xs]` markers.
+  OpenMOSS-Team/MOSS-TTS-v1.5:
+    supported_tasks: [voice_clone]
+    backend: openai-audio-speech
+    endpoint: /v1/audio/speech
+    task_extra_body:
+      voice_clone: {}
+
   OpenMOSS-Team/MOSS-TTS-Realtime:
     supported_tasks: [voice_clone]
     backend: openai-audio-speech

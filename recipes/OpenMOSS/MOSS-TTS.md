@@ -3,9 +3,9 @@
 ## Summary
 
 - Vendor: OpenMOSS
-- Models: `OpenMOSS-Team/MOSS-TTS` (8B), `OpenMOSS-Team/MOSS-TTS-Realtime` (1.7B),
-  `OpenMOSS-Team/MOSS-TTSD-v1.0` (8B), `OpenMOSS-Team/MOSS-SoundEffect` (8B),
-  `OpenMOSS-Team/MOSS-VoiceGenerator` (1.7B)
+- Models: `OpenMOSS-Team/MOSS-TTS` (8B), `OpenMOSS-Team/MOSS-TTS-v1.5` (8B),
+  `OpenMOSS-Team/MOSS-TTS-Realtime` (1.7B), `OpenMOSS-Team/MOSS-TTSD-v1.0` (8B),
+  `OpenMOSS-Team/MOSS-SoundEffect` (8B), `OpenMOSS-Team/MOSS-VoiceGenerator` (1.7B)
 - Task: Text-to-speech synthesis, sound effect generation, zero-shot voice design
 - Mode: Online serving via the OpenAI-compatible `/v1/audio/speech` API; offline inference
 - Maintainer: Community
@@ -18,6 +18,7 @@ Chinese and English). Choose a variant based on your latency and quality require
 | Model | Params | Use case |
 |---|---|---|
 | MOSS-TTS | 8B | General TTS, highest quality |
+| MOSS-TTS-v1.5 | 8B | General TTS upgrade of 1.0: 31 languages, steadier cloning, `[pause Xs]` markers (set `language` for best results); same `MossTTSDelay` API |
 | MOSS-TTS-Realtime | 1.7B | Lowest latency (TTFB ~180 ms), streaming-first |
 | MOSS-TTSD-v1.0 | 8B | Multi-turn dialogue TTS |
 | MOSS-SoundEffect | 8B | Sound effect synthesis from text description |

@@ -1625,6 +1625,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         elif v == "voice_generator":
             user_kwargs["instruction"] = request.instructions or ""
 
+        # Optional language tag for the spoken-text variants. MOSS-TTS-v1.5's
+        # headline improvement is multilingual synthesis when the language is
+        # given (build_user_message(..., language=...)); 1.0 ignores it
+        # gracefully. Sound-effect output is non-verbal, so skip it there.
+        if v in ("tts", "ttsd", "voice_generator") and getattr(request, "language", None):
+            user_kwargs["language"] = request.language
+
         # Build the unified-codes prompt: (L, 1+n_vq) where col 0 is text/special
         # tokens and cols 1..n_vq are the delay-pattern audio code grid (mostly
         # audio_pad_code outside the reference block).
