@@ -39,8 +39,6 @@ logger = init_logger(__name__)
 from vllm_omni.benchmarks.audio_continuity import compute_continuity_stats
 from vllm_omni.benchmarks.data_modules.daily_omni_dataset import DailyOmniDataset, DailyOmniSampleRequest
 from vllm_omni.benchmarks.data_modules.random_multi_modal_dataset import OmniRandomMultiModalDataset
-from vllm_omni.benchmarks.data_modules.sound_effect_dataset import SoundEffectDataset
-from vllm_omni.benchmarks.data_modules.ttsd_dataset import TTSDDataset
 from vllm_omni.benchmarks.data_modules.seed_tts_dataset import (
     SEED_TTS_DEFAULT_OMNI_SYSTEM_PROMPT,
     SeedTTSDataset,
@@ -48,6 +46,8 @@ from vllm_omni.benchmarks.data_modules.seed_tts_dataset import (
     SeedTTSSampleRequest,
     SeedTTSTextDataset,
 )
+from vllm_omni.benchmarks.data_modules.sound_effect_dataset import SoundEffectDataset
+from vllm_omni.benchmarks.data_modules.ttsd_dataset import TTSDDataset
 
 _AUDIO_CONTINUITY_THRESHOLD_ENV = "VLLM_OMNI_BENCH_AUDIO_CONTINUITY_THRESHOLD_S"
 _DEFAULT_AUDIO_CONTINUITY_THRESHOLD_S = 0.1

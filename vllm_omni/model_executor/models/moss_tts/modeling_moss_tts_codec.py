@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2026 OpenMOSS and the vLLM-Omni team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License").
@@ -7,7 +6,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -60,9 +60,7 @@ class MossTTSCodecDecoder(nn.Module):
 
         cfg = vllm_config.model_config.hf_config
         self._n_vq: int = int(getattr(cfg, "n_vq", getattr(cfg, "rvq", 16)))
-        self._codec_path: str = str(
-            getattr(cfg, "codec_model_name_or_path", "OpenMOSS-Team/MOSS-Audio-Tokenizer")
-        )
+        self._codec_path: str = str(getattr(cfg, "codec_model_name_or_path", "OpenMOSS-Team/MOSS-Audio-Tokenizer"))
 
         # Resolved at load_weights() time
         self._codec: MossAudioTokenizerModel | None = None
@@ -153,13 +151,14 @@ class MossTTSCodecDecoder(nn.Module):
         for i, info in enumerate(info_list):
             if i + 1 >= len(offsets):
                 break
-            seg = ids_flat[offsets[i]:offsets[i + 1]]
+            seg = ids_flat[offsets[i] : offsets[i + 1]]
             if seg.numel() == 0:
                 continue
             if seg.numel() % self._n_vq != 0:
                 logger.warning(
                     "MossTTS codec input length %d not divisible by n_vq %d; skipping.",
-                    int(seg.numel()), self._n_vq,
+                    int(seg.numel()),
+                    self._n_vq,
                 )
                 continue
             t_chunk = int(seg.numel() // self._n_vq)
@@ -191,7 +190,7 @@ class MossTTSCodecDecoder(nn.Module):
 
             wav = out.audio.reshape(-1).to(dtype=torch.float32).cpu()
             if out.audio_lengths is not None:
-                wav = wav[:int(out.audio_lengths[0].item())]
+                wav = wav[: int(out.audio_lengths[0].item())]
 
             # Trim left-context samples.
             if left_ctx > 0:
@@ -209,9 +208,7 @@ class MossTTSCodecDecoder(nn.Module):
     # Weight loading
     # ------------------------------------------------------------------
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Drain the Stage-0 weights iterator, then load the codec from its own checkpoint.
 
         The codec lives in a separate HuggingFace repo
@@ -274,7 +271,10 @@ class MossTTSCodecDecoder(nn.Module):
                 skipped.append(name)
         logger.info(
             "MOSS Audio Tokenizer weights: loaded=%d/%d skipped=%d (first skipped: %s)",
-            loaded_total, len(params_dict), len(skipped), skipped[:3] if skipped else "none",
+            loaded_total,
+            len(params_dict),
+            len(skipped),
+            skipped[:3] if skipped else "none",
         )
 
         device = self.vllm_config.device_config.device

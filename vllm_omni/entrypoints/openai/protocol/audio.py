@@ -67,8 +67,7 @@ class OpenAICreateSpeechRequest(BaseModel):
     duration_seconds: float | None = Field(
         default=None,
         ge=0.0,
-        description="Target audio duration in seconds (MOSS-SoundEffect). "
-        "Converted to ~12.5 frames/s internally.",
+        description="Target audio duration in seconds (MOSS-SoundEffect). Converted to ~12.5 frames/s internally.",
     )
     x_vector_only_mode: bool | None = Field(
         default=None,

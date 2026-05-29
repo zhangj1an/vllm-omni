@@ -69,9 +69,7 @@ def _build_unified_codes(
         # now requires torchcodec on recent torchaudio releases).
         # encode_audios_from_wav expects (C, T) per item.
         wav_2d = ref_audio if ref_audio.dim() == 2 else ref_audio.unsqueeze(0)
-        codes_list = proc.encode_audios_from_wav(
-            [wav_2d], sampling_rate=24000, n_vq=proc.model_config.n_vq
-        )
+        codes_list = proc.encode_audios_from_wav([wav_2d], sampling_rate=24000, n_vq=proc.model_config.n_vq)
         reference = [codes_list[0]]
 
     user_msg_kwargs: dict = {"text": text}
@@ -232,8 +230,10 @@ def run_tts(args: argparse.Namespace) -> None:
         ref_audio = _load_ref_audio(args.ref_audio)
         text = args.text or ""
         text_ids, audio_codes, n_vq, remaining_text_ids = _build_realtime_prompt(args.model, text, ref_audio)
-        print(f"Prefill prompt: {len(text_ids)} tokens, {n_vq}-quantizer audio block (realtime); "
-              f"{len(remaining_text_ids)} text tokens to stream")
+        print(
+            f"Prefill prompt: {len(text_ids)} tokens, {n_vq}-quantizer audio block (realtime); "
+            f"{len(remaining_text_ids)} text tokens to stream"
+        )
     elif is_sound_effect:
         if not args.ambient_sound:
             sys.exit("MOSS-SoundEffect requires --ambient-sound")
@@ -259,9 +259,7 @@ def run_tts(args: argparse.Namespace) -> None:
         text = args.text or ""
 
     if not is_realtime:
-        text_ids, audio_codes, n_vq = _build_unified_codes(
-            args.model, text, ref_audio, **builder_kwargs
-        )
+        text_ids, audio_codes, n_vq = _build_unified_codes(args.model, text, ref_audio, **builder_kwargs)
         print(f"Prefill prompt: {len(text_ids)} tokens, {n_vq}-quantizer audio block")
 
     omni = Omni(model=args.model, deploy_config=deploy_config, stage_init_timeout=600)
@@ -333,10 +331,10 @@ def run_tts(args: argparse.Namespace) -> None:
 
     wav_t = torch.cat(chunks).float().cpu()
     sf.write(args.output, wav_t.numpy(), 24000)
-    print(f"Saved {len(wav_t)/24000:.2f}s of audio to {args.output}")
+    print(f"Saved {len(wav_t) / 24000:.2f}s of audio to {args.output}")
     ttfa_ms = (t_first_audio - t_gen_start) * 1000.0 if t_first_audio is not None else float("nan")
     gen_total_ms = (t_gen_end - t_gen_start) * 1000.0
-    print(f"TTFA_MS={ttfa_ms:.1f} GEN_TOTAL_MS={gen_total_ms:.1f} AUDIO_S={len(wav_t)/24000:.2f}")
+    print(f"TTFA_MS={ttfa_ms:.1f} GEN_TOTAL_MS={gen_total_ms:.1f} AUDIO_S={len(wav_t) / 24000:.2f}")
 
 
 def main() -> None:

@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2026 OpenMOSS and the vLLM-Omni team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License").
@@ -32,9 +31,7 @@ MOSS_TTS_PIPELINE = PipelineConfig(
             input_sources=(),
             owns_tokenizer=True,
             engine_output_type="latent",
-            async_chunk_process_next_stage_input_func=(
-                f"{_PROC}.talker2codec_async_chunk"
-            ),
+            async_chunk_process_next_stage_input_func=(f"{_PROC}.talker2codec_async_chunk"),
             sampling_constraints={
                 "detokenize": False,
             },
@@ -65,9 +62,7 @@ MOSS_TTS_REALTIME_PIPELINE = PipelineConfig(
             input_sources=(),
             owns_tokenizer=True,
             engine_output_type="latent",
-            async_chunk_process_next_stage_input_func=(
-                f"{_PROC}.talker2codec_async_chunk"
-            ),
+            async_chunk_process_next_stage_input_func=(f"{_PROC}.talker2codec_async_chunk"),
             sampling_constraints={"detokenize": False},
         ),
         StagePipelineConfig(

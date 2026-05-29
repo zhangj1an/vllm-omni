@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from vllm.benchmarks.datasets import SampleRequest
