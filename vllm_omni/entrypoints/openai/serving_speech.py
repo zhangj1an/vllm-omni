@@ -1583,19 +1583,29 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         n_vq = int(getattr(proc.model_config, "n_vq", 32))
         sr_target = int(getattr(proc.model_config, "sampling_rate", 24000))
 
-        # Encode reference audio(s) into codes if present
-        async def _encode_ref(ref_str: str) -> torch.Tensor:
-            wav_list, sr = await self._resolve_ref_audio(ref_str)
-            wav = torch.tensor(wav_list, dtype=torch.float32)
-            if wav.dim() == 1:
-                wav = wav.unsqueeze(0)
-            if sr != sr_target:
-                import torchaudio
+        # Reference-audio encoding + speaker caching lives in the model package
+        # (moss_tts.reference_encoder), mirroring Fish Speech / CosyVoice3 /
+        # Qwen3-TTS which keep reference handling with the model rather than in
+        # this shared serving file. Imported lazily so the API-server process
+        # only pulls it on the delay-family path (alongside the upstream proc).
+        from vllm_omni.model_executor.models.moss_tts.reference_encoder import encode_reference_codes
 
-                wav = torchaudio.functional.resample(wav, sr, sr_target)
-            with torch.no_grad():
-                codes_list = proc.encode_audios_from_wav([wav], sampling_rate=sr_target, n_vq=n_vq)
-            return codes_list[0]
+        _voice = getattr(request, "voice", None)
+        _voice = _voice.strip() if isinstance(_voice, str) else ""
+        _voice_created = self._voice_created_at(_voice.lower()) if _voice else 0
+
+        async def _encode_ref(ref_str: str) -> torch.Tensor:
+            return await encode_reference_codes(
+                ref_str,
+                processor=proc,
+                resolve_ref_audio=self._resolve_ref_audio,
+                speaker_cache=self._speaker_cache,
+                variant=v,
+                n_vq=n_vq,
+                sr_target=sr_target,
+                voice_name=_voice or None,
+                voice_created_at=_voice_created,
+            )
 
         user_kwargs: dict[str, Any] = {"text": request.input or ""}
         if v in ("tts", "realtime"):
