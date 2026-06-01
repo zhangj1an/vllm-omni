@@ -1662,9 +1662,15 @@ class Bagel(nn.Module):
                 scheduler_kwargs=scheduler_kwargs,
             )
 
-        # ── SP + CFG: sequential single-branch forwards ──
+        # ── CFG: sequential single-branch forwards ──
+        # NOTE: the batched-CFG path below concatenates all CFG branches into a
+        # single forward, but the (post-#3728) gen/und attention is dense and does
+        # NOT honor per-sequence (query_lens) boundaries — so the branches would
+        # cross-attend and contaminate each other, washing out the result
+        # (issue #3977). Run each branch as its own forward (matching upstream's
+        # separate forward_inference calls) so attention stays within one sequence.
         use_sp = self._sp_size > 1
-        if use_sp and use_cfg_text:
+        if use_cfg_text:
             if return_trajectory_latents and len(timesteps) > 0:
                 trajectory_latents.append(x_t.clone())
             for i, t in enumerate(timesteps):
