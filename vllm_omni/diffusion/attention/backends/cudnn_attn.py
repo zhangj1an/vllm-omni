@@ -51,6 +51,12 @@ class CuDNNAttentionImpl(AttentionImpl):
     ) -> None:
         self.causal = causal
         self.softmax_scale = softmax_scale
+        # GQA models (e.g. Bagel's Qwen2 backbone: 28 q-heads vs 4 kv-heads) need
+        # enable_gqa so cuDNN broadcasts KV across query-head groups; without it
+        # the dispatcher rejects the shape ("size of tensor a (28) must match b
+        # (4)" / "No available kernel"). cuDNN on Blackwell handles GQA (+masks)
+        # memory-efficiently, unlike the SDPA MATH fallback.
+        self.requires_gqa = num_kv_heads is not None and num_heads != num_kv_heads
 
     def forward_cuda(
         self,
@@ -84,6 +90,7 @@ class CuDNNAttentionImpl(AttentionImpl):
                     dropout_p=0.0,
                     is_causal=self.causal,
                     scale=self.softmax_scale,
+                    enable_gqa=self.requires_gqa,
                 )
         except RuntimeError as e:
             if "No available kernel" not in str(e):
@@ -100,5 +107,6 @@ class CuDNNAttentionImpl(AttentionImpl):
                 dropout_p=0.0,
                 is_causal=self.causal,
                 scale=self.softmax_scale,
+                enable_gqa=self.requires_gqa,
             )
         return output.permute(0, 2, 1, 3)

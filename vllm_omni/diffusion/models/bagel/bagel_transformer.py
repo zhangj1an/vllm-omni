@@ -395,6 +395,7 @@ class PackedAttentionMoT(nn.Module):
         packed_vae_token_indexes: torch.Tensor,
         packed_text_indexes: torch.Tensor,
         update_past_key_values: bool = False,
+        gen_attn_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, NaiveCache | None]:
         """Forward pass for generation mode.
 
@@ -489,7 +490,13 @@ class PackedAttentionMoT(nn.Module):
             q = torch.cat([text_q, vae_q], dim=0).unsqueeze(0)
             k = torch.cat([ctx_k, vae_k], dim=0).unsqueeze(0)
             v = torch.cat([ctx_v, vae_v], dim=0).unsqueeze(0)
-            attn_out = self.attn_noncausal(q, k, v)
+            # Block-diagonal mask keeps batched-CFG branches from cross-attending.
+            # Built once in Bagel.generate_image to match this
+            # q=[text,vae] / k=[cache,text,vae] ordering. None for single-branch.
+            attn_md = (
+                DiffusionAttentionMetadata(attn_mask=gen_attn_mask) if gen_attn_mask is not None else None
+            )
+            attn_out = self.attn_noncausal(q, k, v, attn_md)
 
         text_len = text_q.shape[0]
         attn_out = attn_out.squeeze(0)
@@ -588,6 +595,7 @@ class PackedAttentionMoT(nn.Module):
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
+        gen_attn_mask=None,
     ):
         if mode == "gen":
             if is_causal:
@@ -599,6 +607,7 @@ class PackedAttentionMoT(nn.Module):
                 packed_vae_token_indexes=packed_vae_token_indexes,
                 packed_text_indexes=packed_text_indexes,
                 update_past_key_values=update_past_key_values,
+                gen_attn_mask=gen_attn_mask,
             )
 
         return self._forward_und(
@@ -659,6 +668,7 @@ class Qwen2MoTDecoderLayer(nn.Module):
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
+        gen_attn_mask=None,
     ) -> BaseNavitOutputWithPast:
         if packed_query_sequence is None:
             packed_query_sequence = hidden_states
@@ -686,6 +696,7 @@ class Qwen2MoTDecoderLayer(nn.Module):
             mode=mode,
             packed_vae_token_indexes=packed_vae_token_indexes,
             packed_text_indexes=packed_text_indexes,
+            gen_attn_mask=gen_attn_mask,
         )
         packed_query_sequence = residual + packed_query_sequence
 
@@ -769,6 +780,7 @@ class Qwen2MoTModel(Qwen2PreTrainedModel):
         packed_text_indexes=None,
         packed_text_ids: torch.Tensor | None = None,
         return_embeddings_only: bool = False,
+        gen_attn_mask: torch.Tensor | None = None,
     ) -> BaseNavitOutputWithPast:
         if packed_query_sequence is None:
             if packed_text_ids is None:
@@ -796,6 +808,7 @@ class Qwen2MoTModel(Qwen2PreTrainedModel):
                 extra_inputs.update(
                     packed_vae_token_indexes=packed_vae_token_indexes,
                     packed_text_indexes=packed_text_indexes,
+                    gen_attn_mask=gen_attn_mask,
                 )
 
         for layer_idx, decoder_layer in enumerate(self.layers):
@@ -884,6 +897,7 @@ class Qwen2MoTForCausalLM(Qwen2PreTrainedModel):
         packed_text_indexes=None,
         packed_text_ids: torch.Tensor | None = None,
         return_embeddings_only: bool = False,
+        gen_attn_mask: torch.Tensor | None = None,
     ) -> BaseNavitOutputWithPast:
         outputs = self.model(
             packed_query_sequence=packed_query_sequence,
@@ -897,6 +911,7 @@ class Qwen2MoTForCausalLM(Qwen2PreTrainedModel):
             packed_text_indexes=packed_text_indexes,
             packed_text_ids=packed_text_ids,
             return_embeddings_only=return_embeddings_only,
+            gen_attn_mask=gen_attn_mask,
         )
 
         return outputs
@@ -1520,6 +1535,48 @@ class Bagel(nn.Module):
             merged.value_cache[layer_idx] = torch.cat(val_parts, dim=0) if val_parts else None
         return merged
 
+    @staticmethod
+    def _build_cfg_block_mask(
+        branches_cache: list,
+        batched_text_indexes: torch.Tensor,
+        batched_vae_indexes: torch.Tensor,
+        seq_len: int,
+        merged_cache: NaiveCache,
+    ) -> torch.Tensor | None:
+        """Block-diagonal attention mask for batched-CFG gen attention.
+
+        ``_forward_gen`` builds ``q = [text_q, vae_q]`` and
+        ``k = [cache, text_k, vae_k]``. A query token may only attend to key
+        tokens belonging to the same CFG branch (including that branch's KV-cache
+        segment). Returns a boolean ``[Sq, Sk]`` mask (True = attend) or ``None``
+        when there is no cache to separate (single-sequence forward needs no mask).
+
+        Cache segments follow ``_merge_naive_caches`` ordering: branches are
+        concatenated in list order, skipping branches whose cache is ``None`` — so
+        each cache segment is tagged with its *actual* branch index here.
+        """
+        device = batched_text_indexes.device
+        text_branch = batched_text_indexes // seq_len
+        vae_branch = batched_vae_indexes // seq_len
+        q_branch = torch.cat([text_branch, vae_branch])
+
+        cache_parts = []
+        for b_idx, cache in enumerate(branches_cache):
+            kc = cache.key_cache[0] if cache is not None else None
+            if kc is not None and kc.shape[0] > 0:
+                cache_parts.append(torch.full((kc.shape[0],), b_idx, device=device, dtype=torch.long))
+
+        if not cache_parts:
+            # No cache to separate; dense attention over a single packed batch is
+            # only correct with a block mask when a cache is present, but with no
+            # cache the only cross-branch keys are text/vae — still need a mask.
+            k_branch = q_branch
+        else:
+            cache_branch = torch.cat(cache_parts)
+            k_branch = torch.cat([cache_branch, text_branch, vae_branch])
+
+        return q_branch[:, None] == k_branch[None, :]
+
     def prepare_start_tokens(self, curr_kvlens, curr_rope, new_token_ids):
         """Prepare start tokens for autoregressive text generation.
 
@@ -1662,15 +1719,22 @@ class Bagel(nn.Module):
                 scheduler_kwargs=scheduler_kwargs,
             )
 
-        # ── CFG: sequential single-branch forwards ──
-        # NOTE: the batched-CFG path below concatenates all CFG branches into a
-        # single forward, but the (post-#3728) gen/und attention is dense and does
-        # NOT honor per-sequence (query_lens) boundaries — so the branches would
-        # cross-attend and contaminate each other, washing out the result
-        # (issue #3977). Run each branch as its own forward (matching upstream's
-        # separate forward_inference calls) so attention stays within one sequence.
+        # ── CFG branch strategy ──
+        # Default: batched-CFG (the batched path below) — all CFG branches run in
+        # ONE forward, kept correct (no cross-branch contamination) by the
+        # block-diagonal attention mask. This is the fast default.
+        #
+        # Opt-out: VLLM_OMNI_BAGEL_SEPARATE_CFG=1 runs each branch as its own
+        # forward (attention stays within one sequence; matches upstream). Lower
+        # peak memory — batched-CFG's score matrix is ~num_branches**2 larger and
+        # OOMs on a score-materializing SDPA kernel (MATH, the only GQA-capable
+        # SDPA on Blackwell sm_120) at high resolution; cuDNN/varlen backends are
+        # fine. SP always uses per-branch forwards (it cannot batch across ranks).
+        import os
+
         use_sp = self._sp_size > 1
-        if use_cfg_text:
+        separate_cfg = os.environ.get("VLLM_OMNI_BAGEL_SEPARATE_CFG", "0") == "1"
+        if use_cfg_text and (use_sp or separate_cfg):
             if return_trajectory_latents and len(timesteps) > 0:
                 trajectory_latents.append(x_t.clone())
             for i, t in enumerate(timesteps):
@@ -1785,18 +1849,35 @@ class Bagel(nn.Module):
 
             num_branches = len(branches_cache)
 
+            batched_text_indexes = torch.cat(
+                [packed_text_indexes + b_idx * seq_len for b_idx in range(num_branches)]
+            )
+            batched_vae_indexes = torch.cat(
+                [packed_vae_token_indexes + b_idx * seq_len for b_idx in range(num_branches)]
+            )
+            merged_cache = self._merge_naive_caches(branches_cache)
+
             cfg_batched = {
                 "num_branches": num_branches,
                 "seq_len": seq_len,
                 "batched_query_lens": packed_seqlens.repeat(num_branches),
                 "batched_position_ids": torch.cat(branches_pid),
-                "batched_text_indexes": torch.cat(
-                    [packed_text_indexes + b_idx * seq_len for b_idx in range(num_branches)]
+                "batched_text_indexes": batched_text_indexes,
+                "batched_vae_indexes": batched_vae_indexes,
+                "merged_cache": merged_cache,
+                # Block-diagonal CFG mask (built once, reused every step/layer).
+                # The dense gen attention does not honor per-sequence boundaries,
+                # so without this the CFG branches cross-attend and wash out the
+                # result. _forward_gen assembles q = [text, vae] and
+                # k = [cache, text, vae]; build branch ids in that exact order so
+                # each query only attends to keys in its own branch.
+                "gen_attn_mask": self._build_cfg_block_mask(
+                    branches_cache,
+                    batched_text_indexes,
+                    batched_vae_indexes,
+                    seq_len,
+                    merged_cache,
                 ),
-                "batched_vae_indexes": torch.cat(
-                    [packed_vae_token_indexes + b_idx * seq_len for b_idx in range(num_branches)]
-                ),
-                "merged_cache": self._merge_naive_caches(branches_cache),
             }
 
         if return_trajectory_latents and len(timesteps) > 0:
@@ -2199,6 +2280,7 @@ class Bagel(nn.Module):
                 past_key_values=cfg_batched["merged_cache"],
                 update_past_key_values=False,
                 is_causal=False,
+                gen_attn_mask=cfg_batched.get("gen_attn_mask"),
                 **extra_inputs,
             )
 
