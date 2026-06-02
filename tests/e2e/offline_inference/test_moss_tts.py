@@ -30,9 +30,13 @@ from vllm_omni import Omni
 # Shared constants
 # ---------------------------------------------------------------------------
 
+# Selected by the nightly "TTS · Function Test" (-m "full_model and L4 and tts").
+# Without the tts + run-level marks these tests are collected but never run.
+pytestmark = [pytest.mark.full_model, pytest.mark.tts]
+
 SAMPLE_RATE = 24_000  # All MOSS-TTS full variants output 24 kHz
 
-REF_AUDIO_URL = "https://raw.githubusercontent.com/OpenMOSS/MOSS-TTS/main/assets/audio/zh_1.wav"
+REF_AUDIO_URL = "https://raw.githubusercontent.com/OpenMOSS/MOSS-TTS/main/assets/audio/reference_zh_1.wav"
 
 _DEFAULT_SAMPLING = SamplingParams(
     temperature=1.7,

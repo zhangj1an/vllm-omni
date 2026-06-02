@@ -11,6 +11,8 @@ import torch
 from vllm.inputs import TokensPrompt as OmniTokensPrompt
 from vllm.logger import init_logger
 
+from vllm_omni.data_entry_keys import CodesStruct, MetaStruct, OmniPayloadStruct
+
 logger = init_logger(__name__)
 
 
@@ -93,7 +95,7 @@ def talker2codec_async_chunk(
     pooling_output: dict[str, Any] | None,
     request: Any,
     is_finished: bool = False,
-) -> dict[str, Any] | None:
+) -> OmniPayloadStruct | None:
     """Emit accumulated audio codes to Stage 1 as they arrive from Stage 0.
 
     State is maintained in ``transfer_manager`` keyed by request ID.
@@ -209,16 +211,21 @@ def talker2codec_async_chunk(
         # Stage 1 (LLM_GENERATION codec) consumes ``codes.audio`` as a flat
         # codebook-major int list — chunk_transfer_adapter assigns it to
         # ``request.prompt_token_ids`` and the codec rebuilds the (NQ, T) grid.
-        # Returning a tensor here breaks downstream ``if not new_ids`` checks.
+        # Keep it a list (not a tensor): the receive path treats a list as the
+        # token-id sequence directly, while a 1-D tensor would be ``.tolist()``-ed
+        # anyway — the list keeps the downstream ``if not new_ids`` checks intact.
         codec_flat = de_delayed.transpose(0, 1).contiguous().reshape(-1).tolist()
 
-    return {
-        "codes": {"audio": codec_flat},
-        "meta": {
-            "left_context_size": left_context,
-            "finished": torch.tensor(is_finished, dtype=torch.bool),
-        },
-    }
+    # main migrated the inter-stage connector from plain dicts to typed
+    # ``OmniPayloadStruct`` (the chunk_transfer_adapter sender reads
+    # ``payload_data.meta``); return the struct so MOSS matches that schema.
+    return OmniPayloadStruct(
+        codes=CodesStruct(audio=codec_flat),
+        meta=MetaStruct(
+            left_context_size=left_context,
+            finished=torch.tensor(is_finished, dtype=torch.bool),
+        ),
+    )
 
 
 __all__ = ["talker2codec", "talker2codec_async_chunk"]

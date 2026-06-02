@@ -24,8 +24,13 @@ from vllm import SamplingParams
 from tests.helpers.mark import hardware_test
 from vllm_omni import Omni
 
+# H100-gated (8B). Picked up by the nightly H100 omni job
+# (-m "full_model and H100 and omni"); the tts mark keeps it consistent with
+# the other MOSS-TTS tests and any tts-scoped sweeps.
+pytestmark = [pytest.mark.full_model, pytest.mark.tts]
+
 SAMPLE_RATE = 24_000
-REF_AUDIO_URL = "https://raw.githubusercontent.com/OpenMOSS/MOSS-TTS/main/assets/audio/zh_1.wav"
+REF_AUDIO_URL = "https://raw.githubusercontent.com/OpenMOSS/MOSS-TTS/main/assets/audio/reference_zh_1.wav"
 _MODEL = "OpenMOSS-Team/MOSS-TTS-v1.5"
 
 _DEFAULT_SAMPLING = SamplingParams(
