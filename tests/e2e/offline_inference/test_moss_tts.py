@@ -125,7 +125,7 @@ def delay_engine():
 
 
 @pytest.mark.omni
-@hardware_test(res={"cuda": "A10G"})
+@hardware_test(res={"cuda": "L4"})
 def test_moss_tts_delay_english(delay_engine, ref_audio_path):
     """MossTTSDelayModel: English voice_clone produces non-empty 24 kHz audio."""
     req = _build_request("Hello, this is a MOSS-TTS voice cloning test.", ref_audio_path)
@@ -137,7 +137,7 @@ def test_moss_tts_delay_english(delay_engine, ref_audio_path):
 
 
 @pytest.mark.omni
-@hardware_test(res={"cuda": "A10G"})
+@hardware_test(res={"cuda": "L4"})
 def test_moss_tts_delay_chinese(delay_engine, ref_audio_path):
     """MossTTSDelayModel: Chinese input produces non-empty audio."""
     req = _build_request("你好，这是语音合成测试。", ref_audio_path)
@@ -149,7 +149,7 @@ def test_moss_tts_delay_chinese(delay_engine, ref_audio_path):
 
 
 @pytest.mark.omni
-@hardware_test(res={"cuda": "A10G"})
+@hardware_test(res={"cuda": "L4"})
 def test_moss_tts_delay_deterministic(delay_engine, ref_audio_path):
     """MossTTSDelayModel: same seed yields identical waveforms."""
     req = _build_request("Reproducibility check.", ref_audio_path, seed=99)
@@ -161,7 +161,7 @@ def test_moss_tts_delay_deterministic(delay_engine, ref_audio_path):
 
 
 @pytest.mark.omni
-@hardware_test(res={"cuda": "A10G"})
+@hardware_test(res={"cuda": "L4"})
 def test_moss_tts_delay_batch(delay_engine, ref_audio_path):
     """MossTTSDelayModel: batch of two requests each returns non-empty audio."""
     requests = [
@@ -203,7 +203,7 @@ def realtime_engine():
 
 
 @pytest.mark.omni
-@hardware_test(res={"cuda": "A10G"})
+@hardware_test(res={"cuda": "L4"})
 def test_moss_tts_realtime_english(realtime_engine, ref_audio_path):
     """MossTTSRealtime: English voice_clone produces non-empty 24 kHz audio."""
     req = _build_request("This is a real-time TTS streaming test.", ref_audio_path)
@@ -215,7 +215,7 @@ def test_moss_tts_realtime_english(realtime_engine, ref_audio_path):
 
 
 @pytest.mark.omni
-@hardware_test(res={"cuda": "A10G"})
+@hardware_test(res={"cuda": "L4"})
 def test_moss_tts_realtime_deterministic(realtime_engine, ref_audio_path):
     """MossTTSRealtime: same seed yields identical waveforms."""
     req = _build_request("Determinism check for realtime model.", ref_audio_path, seed=7)
