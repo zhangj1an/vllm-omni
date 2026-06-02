@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 
 from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.inputs.data import OmniTokensPrompt
-from vllm_omni.model_executor.stage_input_processors.qwen3_omni import (
+from vllm_omni.model_executor.stage_input_processors.ming_flash_omni import (
     _validate_stage_inputs,
 )
 
@@ -53,7 +53,7 @@ def kimi2code2wav(
 ) -> list[OmniTokensPrompt]:
     """Sync handoff: collect every audio token, forward to code2wav as
     ``prompt_token_ids`` (still in global-vocab space)."""
-    thinker_outputs = _validate_stage_inputs(stage_list, engine_input_source)
+    _, thinker_outputs = _validate_stage_inputs(stage_list, engine_input_source)
     code2wav_inputs: list[OmniTokensPrompt] = []
 
     for i, thinker_output in enumerate(thinker_outputs):
