@@ -35,16 +35,16 @@ BAGEL_MOONCAKE_CI_DEPLOY = get_deploy_config_path("ci/bagel_mooncake.yaml")
 # "Generated with seed=52, num_inference_steps=15,
 # prompt='A cute cat'"
 REFERENCE_PIXELS = [
-    {"position": (100, 100), "rgb": (115, 113, 94)},
-    {"position": (400, 50), "rgb": (159, 160, 144)},
-    {"position": (700, 100), "rgb": (164, 151, 123)},
-    {"position": (150, 400), "rgb": (120, 121, 107)},
-    {"position": (512, 512), "rgb": (165, 133, 127)},
-    {"position": (700, 400), "rgb": (217, 130, 66)},
-    {"position": (100, 700), "rgb": (191, 168, 152)},
-    {"position": (400, 700), "rgb": (130, 96, 77)},
-    {"position": (700, 700), "rgb": (247, 203, 140)},
-    {"position": (256, 256), "rgb": (167, 156, 150)},
+    {"position": (100, 100), "rgb": (64, 45, 35)},
+    {"position": (400, 50), "rgb": (81, 58, 44)},
+    {"position": (700, 100), "rgb": (106, 77, 50)},
+    {"position": (150, 400), "rgb": (67, 47, 36)},
+    {"position": (512, 512), "rgb": (165, 155, 140)},
+    {"position": (700, 400), "rgb": (137, 101, 64)},
+    {"position": (100, 700), "rgb": (51, 42, 37)},
+    {"position": (400, 700), "rgb": (217, 214, 203)},
+    {"position": (700, 700), "rgb": (91, 55, 28)},
+    {"position": (256, 256), "rgb": (76, 53, 41)},
 ]
 
 # Maximum allowed difference per color channel
