@@ -777,7 +777,8 @@ class BagelPipeline(nn.Module, SupportsComponentDiscovery, DiffusionPipelineProf
             if torch.is_tensor(v):
                 generation_input[k] = v.to(self.device)
 
-        self._regen_init_noise_on_device(generation_input, req.sampling_params.seed)
+        # TODO: Re-enable with new reference pixels in Bagel tests
+        # self._regen_init_noise_on_device(generation_input, req.sampling_params.seed)
 
         # text cfg
         generation_input_cfg_text = self.bagel.prepare_vae_latent_cfg(
