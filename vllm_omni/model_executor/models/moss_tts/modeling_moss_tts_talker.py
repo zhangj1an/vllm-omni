@@ -38,6 +38,89 @@ def _maybe_prefix(prefix: str, name: str) -> str:
     return f"{prefix}.{name}" if prefix else name
 
 
+def _request_row_spans(num_rows: int, num_reqs: int) -> list[tuple[int, int]]:
+    """Recover per-request ``(row_start, row_end)`` spans in a flattened
+    ``[total_scheduled_tokens, H]`` hidden-state tensor.
+
+    ``make_omni_output`` receives hidden states for *all* scheduled tokens in
+    the batch concatenated along dim 0. In a mixed prefill+decode batch the
+    rows are NOT evenly distributed across requests — e.g. one 50-token
+    prefill plus two 1-token decodes yields spans ``[0:50], [50:51], [51:52]``,
+    not the ``52 // 3 == 17`` uniform split. A uniform split misattributes
+    hidden states to the wrong request and corrupts that request's audio.
+
+    The true boundaries come from the attention metadata's
+    ``query_start_loc`` (the same source the runner uses to build
+    ``logits_indices``), mirroring the pattern in ``higgs_audio_v2_talker.py``
+    and ``mimo_audio_llm.py``. We fall back to the uniform split only when the
+    metadata is unavailable (e.g. CUDA-graph dummy runs) — which is exact for
+    pure-decode and single-request batches, the only cases that reach it.
+    """
+    if num_reqs <= 0:
+        return []
+    try:
+        from vllm.forward_context import get_forward_context
+
+        attn_metadata = get_forward_context().attn_metadata
+    except Exception:
+        attn_metadata = None
+    if isinstance(attn_metadata, dict):
+        attn_metadata = next(iter(attn_metadata.values())) if attn_metadata else None
+    q_start = getattr(attn_metadata, "query_start_loc", None)
+    if isinstance(q_start, torch.Tensor) and q_start.numel() == num_reqs + 1:
+        q = q_start.detach().to("cpu").tolist()
+        spans = [(int(q[i]), int(q[i + 1])) for i in range(num_reqs)]
+        # Guard against metadata that doesn't line up with the hidden rows
+        # (padding, dummy runs): only trust it if every span is well-formed
+        # and stays within ``num_rows``.
+        if all(0 <= s <= e <= num_rows for s, e in spans):
+            return spans
+    # Fallback: uniform split (exact when every request contributes the same
+    # number of rows, e.g. pure-decode batches or batch size 1).
+    rows_per_req = max(1, num_rows // max(1, num_reqs))
+    spans = []
+    for i in range(num_reqs):
+        s = i * rows_per_req
+        e = min(s + rows_per_req, num_rows)
+        spans.append((s, e))
+    return spans
+
+
+def _audio_seed_from_info(info_dict: dict[str, Any]) -> int | None:
+    """Extract the per-request audio sampling seed from request info, or None.
+
+    The request carries it under ``additional_information["seed"]`` (a 1-element
+    list, mirroring ``max_new_frames``). Returns None when absent so the
+    sampler falls back to the global RNG (the prior, non-reproducible path).
+    """
+    seed = info_dict.get("seed")
+    if isinstance(seed, (list, tuple)):
+        seed = seed[0] if seed else None
+    if seed is None:
+        return None
+    try:
+        return int(seed)
+    except (TypeError, ValueError):
+        return None
+
+
+def _seeded_generator(seed: int | None, step: int, device: torch.device) -> torch.Generator | None:
+    """Per-``(seed, frame step)`` RNG so identical seeds reproduce audio.
+
+    The talker samples audio codes with ``torch.multinomial`` *outside* vLLM's
+    seeded sampler, so without this the global RNG advances between calls and
+    two same-seed generations diverge (different EOS timing → different audio).
+    Re-seeding from ``(seed, step)`` keeps each frame distinct yet reproducible
+    without persisting a (non-serialisable) ``Generator`` across decode steps.
+    Returns None when ``seed`` is None, preserving the prior global-RNG path.
+    """
+    if seed is None:
+        return None
+    gen = torch.Generator(device=device)
+    gen.manual_seed(((int(seed) & 0x7FFFFFFF) * 1_000_003 + int(step)) & 0x7FFFFFFFFFFFFFFF)
+    return gen
+
+
 # ---------------------------------------------------------------------------
 # MossTTSDelayTalkerForGeneration
 # ---------------------------------------------------------------------------
@@ -205,15 +288,21 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         n_vq = self.n_vq
         device = logits.device
         vocab_size = logits.shape[-1]
-        rows_per_state = max(1, logits.shape[0] // max(1, len(states)))
+
+        # The runner gathers ``hidden_states[logits_indices]`` before calling
+        # compute_logits, so ``logits`` already has exactly one row per request
+        # in batch order — row i belongs to request i. (This is unlike
+        # make_omni_output, which sees the full flattened token tensor and must
+        # recover spans from query_start_loc; the num_scheduled_tokens offset
+        # trick does NOT apply here.) Bail rather than mask the wrong rows if
+        # the shapes ever diverge.
+        if logits.shape[0] != len(states):
+            return logits
 
         for i, state in enumerate(states):
             if not isinstance(state, dict):
                 continue
-            row_start = i * rows_per_state
-            row_end = min(row_start + rows_per_state, logits.shape[0])
-            if row_start >= row_end:
-                continue
+            row_start, row_end = i, i + 1
             row = logits[row_start:row_end]
 
             delayed_lengths = int(state.get("delayed_lengths", -1))
@@ -420,6 +509,9 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
                 audio_state["max_new_frames"] = int(max_new_frames_req) if max_new_frames_req is not None else -1
             except (TypeError, ValueError):
                 audio_state["max_new_frames"] = -1
+            # Lift the per-request seed so audio-code sampling is reproducible
+            # across runs (the multinomial path bypasses vLLM's seeded sampler).
+            audio_state["audio_seed"] = _audio_seed_from_info(info_dict)
             info_update: dict[str, Any] = {
                 "audio_state": audio_state,
                 "audio_codes": {"current": current_codes},
@@ -456,6 +548,7 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         logits: torch.Tensor,
         top_k: int,
         temperature: float,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Top-k sampling on a (..., V) logits tensor returning (...,) ids."""
         if temperature > 0:
@@ -468,7 +561,7 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
             return logits.argmax(dim=-1)
         probs = torch.softmax(logits, dim=-1)
         flat = probs.reshape(-1, probs.shape[-1])
-        sampled = torch.multinomial(flat, num_samples=1).reshape(probs.shape[:-1])
+        sampled = torch.multinomial(flat, num_samples=1, generator=generator).reshape(probs.shape[:-1])
         return sampled
 
     def _sample_audio_codes(
@@ -506,6 +599,11 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         audio_top_k = 25
         audio_temp = 1.7
 
+        # Per-request seeded RNG (when the request set a seed) so identical
+        # seeds reproduce the same codes; one generator per frame, shared
+        # across the n_vq heads so the stream advances deterministically.
+        generator = _seeded_generator(state.get("audio_seed"), int(state.get("step", 0)), device)
+
         for i in range(n_vq):
             if not bool(sampling_mask[i]):
                 continue
@@ -513,7 +611,7 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
             logits = head(last_h).reshape(-1)  # (V,)
             logits[..., -1] = float("-inf")  # invalid sentinel
             logits[..., self.audio_pad_code] = float("-inf")
-            sampled = self._sample_with_top_k(logits, audio_top_k, audio_temp)
+            sampled = self._sample_with_top_k(logits, audio_top_k, audio_temp, generator)
             codes[i] = sampled.long()
         return codes
 
@@ -553,17 +651,22 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
         # rows align with hidden rows, which align with info_dicts in order.
         self._batch_state = [(info["audio_state"] if isinstance(info, dict) else {}) for info in info_dicts]
 
-        audio_codes_list: list[torch.Tensor] = []
+        # One slot per request, in batch order. ``to_payload_element`` indexes
+        # ``element[idx]`` to split a list per request, so requests that emit
+        # nothing this step keep an empty-tensor placeholder rather than being
+        # dropped — dropping would shift every later request onto the wrong
+        # slot (and a bare tensor would be broadcast identically to all).
+        audio_codes_list: list[torch.Tensor] = [torch.empty(0, dtype=torch.long) for _ in info_dicts]
+        any_codes = False
 
         if hidden.numel() > 0:
             num_rows = hidden.shape[0]
-            rows_per_req = max(1, num_rows // max(1, len(info_dicts) or 1))
+            spans = _request_row_spans(num_rows, len(info_dicts))
 
             for i, info in enumerate(info_dicts):
                 if not isinstance(info, dict):
                     continue
-                row_start = i * rows_per_req
-                row_end = min(row_start + rows_per_req, num_rows)
+                row_start, row_end = spans[i]
                 if row_start >= row_end:
                     continue
 
@@ -582,21 +685,22 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
                     "current": new_codes,
                     "accumulated": updated_acc,
                 }
-                audio_codes_list.append(updated_acc)
+                audio_codes_list[i] = updated_acc
+                any_codes = True
 
-        if not audio_codes_list:
+        if not any_codes:
             return OmniOutput(
                 text_hidden_states=hidden,
                 multimodal_outputs={},
             )
 
-        # Forward the accumulated audio codes (T, NQ) of the first request to
-        # Stage 1.  Multi-request batching for the codec is not yet supported
-        # by this adapter; the existing code already takes the first stage
-        # output anyway.
+        # Forward the per-request accumulated audio codes (T, NQ) to Stage 1 as
+        # a list so ``to_payload_element`` splits it per request. A bare tensor
+        # here is treated as request-invariant and broadcast to every request
+        # (so every request would receive request 0's audio).
         return OmniOutput(
             text_hidden_states=hidden,
-            multimodal_outputs={"codes": {"audio": audio_codes_list[0]}},
+            multimodal_outputs={"codes": {"audio": audio_codes_list}},
         )
 
     # ------------------------------------------------------------------
@@ -797,12 +901,16 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         logits = hidden_states.new_full((B, V), float("-inf"))
 
         states = self._batch_state or []
-        rows_per_state = max(1, B // max(1, len(states) or 1))
+        # ``hidden_states`` is pre-gathered to one row per request (B == num
+        # requests), so row i is request i. If there's no per-request state yet
+        # (very first call before make_omni_output ran) or the shapes diverge,
+        # emit the neutral ``text_pad`` everywhere rather than risk routing one
+        # request's text onto another request's row.
+        if not states or len(states) != B:
+            logits[:, self.text_pad_id] = 0.0
+            return logits
         for i, state in enumerate(states):
-            r0 = i * rows_per_state
-            r1 = min(r0 + rows_per_state, B)
-            if r0 >= r1:
-                continue
+            r0, r1 = i, i + 1
             if not isinstance(state, dict):
                 logits[r0:r1, self.text_pad_id] = 0.0
                 continue
@@ -819,10 +927,6 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
             else:
                 tok = self.text_pad_id
             logits[r0:r1, tok] = 0.0
-        # Defensive: if no states recorded yet (very first call before
-        # make_omni_output ran), default to text_pad everywhere.
-        if not states:
-            logits[:, self.text_pad_id] = 0.0
         return logits
 
     # ------------------------------------------------------------------
@@ -886,6 +990,9 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
                     "step": 0,
                     "text_cursor": 0,
                     "remaining_text": list(remaining),
+                    # Per-request seed so the local-transformer audio sampling is
+                    # reproducible across runs (it bypasses vLLM's seeded sampler).
+                    "audio_seed": _audio_seed_from_info(info_dict),
                 },
                 "audio_codes": {"current": current_codes},
                 "ref_offset": ref_offset + span_len,
@@ -933,15 +1040,18 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
 
         self._batch_state = [(info["audio_state"] if isinstance(info, dict) else {}) for info in info_dicts]
 
-        audio_codes_list: list[torch.Tensor] = []
+        # One slot per request (batch order) with empty-tensor placeholders, so
+        # ``to_payload_element``'s ``element[idx]`` split routes each request's
+        # codes to the right request even when some emit nothing this step.
+        audio_codes_list: list[torch.Tensor] = [torch.empty(0, dtype=torch.long) for _ in info_dicts]
+        any_codes = False
         if hidden.numel() > 0 and info_dicts:
             num_rows = hidden.shape[0]
-            rows_per_req = max(1, num_rows // max(1, len(info_dicts) or 1))
+            spans = _request_row_spans(num_rows, len(info_dicts))
             for i, info in enumerate(info_dicts):
                 if not isinstance(info, dict):
                     continue
-                row_start = i * rows_per_req
-                row_end = min(row_start + rows_per_req, num_rows)
+                row_start, row_end = spans[i]
                 if row_start >= row_end:
                     continue
 
@@ -970,6 +1080,9 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
                     do_sample=True,
                     repetition_penalty=1.1,
                     history_per_codebook=hist_per_cb,
+                    # Per-(seed, frame) RNG so identical seeds reproduce; one
+                    # generator per frame, shared across the rvq codebook loop.
+                    generator=_seeded_generator(state.get("audio_seed"), int(state.get("step", 0)), last_h.device),
                 ).squeeze(0)  # (n_vq,)
                 if int(state.get("step", 0)) < 5 or int(state.get("step", 0)) % 50 == 0:
                     logger.info(
@@ -1008,24 +1121,25 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
 
                 info["audio_codes"] = {"current": new_codes, "accumulated": updated_acc}
                 state["step"] = int(state.get("step", 0)) + 1
-                audio_codes_list.append(updated_acc)
+                audio_codes_list[i] = updated_acc
+                any_codes = True
 
-        if not audio_codes_list:
+        if not any_codes:
             return OmniOutput(text_hidden_states=hidden, multimodal_outputs={})
 
-        # Forward the first request's accumulated codes (multi-request
-        # batching for the codec is not yet wired up — same as delay).
+        # Forward the per-request accumulated codes as a list so
+        # ``to_payload_element`` splits it per request (a bare tensor would be
+        # broadcast to every request — request 0's audio for everyone).
         # The realtime variant emits raw codes (no delay pattern), so we
         # signal that to the chunk processor via a 1-D bool tensor in
         # ``meta.finished`` (already a tensor field on the schema). The
         # processor reads its truth value as "skip de-delay" only for
         # realtime; the delay path doesn't populate ``meta`` at all.
-        device = audio_codes_list[0].device
         return OmniOutput(
             text_hidden_states=hidden,
             multimodal_outputs={
-                "codes": {"audio": audio_codes_list[0]},
-                "meta": {"finished": torch.tensor([True], dtype=torch.bool, device=device)},
+                "codes": {"audio": audio_codes_list},
+                "meta": {"finished": torch.tensor([True], dtype=torch.bool, device=hidden.device)},
             },
         )
 
