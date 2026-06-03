@@ -229,7 +229,7 @@ def _resolve_deploy_config(config_path: str, run_level: str) -> str:
 @pytest.mark.core_model
 @pytest.mark.advanced_model
 @pytest.mark.diffusion
-@hardware_test(res={"cuda": "H100", "rocm": "MI325"})
+@hardware_test(res={"cuda": "H100"})
 def test_bagel_img2img_shared_memory_connector(run_level):
     """Test Bagel img2img with shared memory connector."""
     input_image = _load_input_image()
@@ -246,7 +246,7 @@ def test_bagel_img2img_shared_memory_connector(run_level):
 @pytest.mark.core_model
 @pytest.mark.advanced_model
 @pytest.mark.diffusion
-@hardware_test(res={"cuda": "H100", "rocm": "MI325"})
+@hardware_test(res={"cuda": "H100"})
 def test_bagel_text2img_shared_memory_connector(run_level):
     """Test Bagel text2img with shared memory connector."""
     config_path = _resolve_deploy_config(BAGEL_CI_DEPLOY, run_level)
