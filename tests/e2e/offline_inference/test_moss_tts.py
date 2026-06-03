@@ -17,7 +17,6 @@ triggers mid-module teardown races (see skill invariant I4).
 from __future__ import annotations
 
 import os
-import urllib.request
 
 import pytest
 import torch
@@ -36,8 +35,6 @@ pytestmark = [pytest.mark.full_model, pytest.mark.tts]
 
 SAMPLE_RATE = 24_000  # All MOSS-TTS full variants output 24 kHz
 
-REF_AUDIO_URL = "https://raw.githubusercontent.com/OpenMOSS/MOSS-TTS/main/assets/audio/reference_zh_1.wav"
-
 # Voice description for the MOSS-VoiceGenerator (``voice_generator`` variant):
 # it conditions on text (what to say) + instruction (how the voice sounds), not
 # a reference clip.
@@ -53,51 +50,8 @@ _DEFAULT_SAMPLING = SamplingParams(
 )
 
 # ---------------------------------------------------------------------------
-# Session fixtures
-# ---------------------------------------------------------------------------
-
-
-def _download_ref(url: str, dest) -> str:
-    """Download one reference clip to ``dest``; skip/fail per env on error.
-
-    Set ``MOSS_TTS_SKIP_ON_NET_FAIL=1`` to skip in air-gapped environments.
-    """
-    try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
-            dest.write_bytes(resp.read())
-    except Exception as exc:
-        msg = f"Cannot fetch reference clip {url}: {exc}"
-        if os.environ.get("MOSS_TTS_SKIP_ON_NET_FAIL"):
-            pytest.skip(msg)
-        pytest.fail(msg)
-    if not dest.exists() or dest.stat().st_size == 0:
-        pytest.fail(f"Reference clip empty after download: {dest}")
-    return str(dest)
-
-
-@pytest.fixture(scope="session")
-def ref_audio_path(tmp_path_factory) -> str:
-    """Download the upstream reference clip once per session (realtime path)."""
-    cache_dir = tmp_path_factory.mktemp("moss_tts_ref")
-    return _download_ref(REF_AUDIO_URL, cache_dir / "zh_1.wav")
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _build_request(text: str, ref_audio_path: str, seed: int = 42) -> dict:
-    return {
-        "prompt": "<|im_start|>assistant\n",
-        "additional_information": {
-            "task_type": ["voice_clone"],
-            "text": [text],
-            "mode": ["voice_clone"],
-            "prompt_audio_path": [ref_audio_path],
-            "seed": [seed],
-        },
-    }
 
 
 def _audio_from_mm(mm: dict | None) -> torch.Tensor | None:
@@ -136,20 +90,24 @@ def _sr_from_mm(mm: dict | None) -> int | None:
     return int(sr.item()) if isinstance(sr, torch.Tensor) else int(sr)
 
 
-def _collect_audio(omni: Omni, request: dict) -> tuple[torch.Tensor, int]:
+def _collect_audio(omni: Omni, request: dict, sampling: list | None = None) -> tuple[torch.Tensor, int]:
     """Run one request; return (waveform_cpu, sample_rate).
 
     ``generate()`` returns a flat list of ``OmniRequestOutput`` (one or more
     per request as audio streams); each exposes ``.multimodal_output`` directly
     (``.request_output`` is a single inner ``RequestOutput``, not an iterable).
     Concatenate every non-empty audio chunk in arrival order.
+
+    ``sampling`` is the PER-STAGE sampling-params list (length == num_stages);
+    when omitted, ``_DEFAULT_SAMPLING`` is replicated across stages.
     """
     chunks: list[torch.Tensor] = []
     sr = SAMPLE_RATE
     # sampling_params_list is PER STAGE (its length must equal num_stages),
     # not per request. MOSS-TTS is a two-stage pipeline (talker + codec), so a
     # single SamplingParams is rejected — replicate it across stages.
-    sampling = [_DEFAULT_SAMPLING] * omni.num_stages
+    if sampling is None:
+        sampling = [_DEFAULT_SAMPLING] * omni.num_stages
     for omni_out in omni.generate(request, sampling):
         mm = omni_out.multimodal_output
         sr_val = _sr_from_mm(mm)
@@ -322,48 +280,139 @@ def test_moss_tts_delay_batch(delay_engine, delay_processor):
 # (tests the local-transformer generation path)
 # ---------------------------------------------------------------------------
 
-_REALTIME_MODEL = "OpenMOSS-Team/MOSS-TTS-Realtime"
+_REALTIME_MODEL = os.environ.get("MOSS_TTS_REALTIME_MODEL", "OpenMOSS-Team/MOSS-TTS-Realtime")
 
-# The realtime variant needs the same two corrections the delay path got, but
-# they were validated only for the delay model (MOSS-VoiceGenerator) here:
-#   1) requests built through the processor (the realtime variant conditions on
-#      text + an ENCODED reference clip, not the bare ``_build_request`` prompt),
-#   2) the local-transformer audio sampler (``_sample_token``) re-seeded from the
-#      request seed, like the delay talker, for the determinism assertion.
-# Until both land and are verified against MOSS-TTS-Realtime weights, skip rather
-# than ship green-looking tests that don't actually condition per request.
-_REALTIME_SKIP = pytest.mark.skip(
-    reason="Realtime offline path needs processor-built requests + local-transformer "
-    "seeding (see test docstring); validated only for the delay variant so far."
-)
+# Realtime talker + codec sampling. The codec stage is decoded greedily
+# (temperature 0) so the determinism assertion isn't subject to codec-stage RNG;
+# the talker keeps the family-standard sampling.
+_REALTIME_TALKER_SP = SamplingParams(temperature=1.7, top_p=0.8, top_k=25, max_tokens=512, seed=42, detokenize=False)
+_REALTIME_CODEC_SP = SamplingParams(temperature=0.0, top_p=1.0, top_k=-1, max_tokens=65536, seed=42, detokenize=True)
+_REALTIME_PREFILL_MAX_TEXT = 12  # upstream MossTTSRealtimeInference._build_prefill_batch
+
+
+def _build_realtime_request(text: str, seed: int = 42) -> dict:
+    """Build a MOSS-TTS-Realtime request the way ``end2end.py`` does.
+
+    Realtime uses a different prompt format than the delay variants: a system
+    prompt grid + ``<|im_start|>assistant`` header + the first
+    ``_REALTIME_PREFILL_MAX_TEXT`` text tokens (with ``audio_bos`` on the last),
+    as a ``(L, 1+16)`` int grid (col 0 = text/special, cols 1..16 = RVQ codes).
+    The remaining text tokens are streamed one-per-step during decode via
+    ``additional_information["ids"]["all"]``.
+
+    The upstream ``MossTTSRealtimeProcessor`` isn't auto-discovered by
+    ``AutoProcessor`` (no ``processor_config.json``), so we import it directly
+    from the snapshot. We pass ``prompt_audio_tokens=None`` (no reference clip):
+    text alone conditions the content, which is all the concurrency/seeding
+    guards need (a reference clip only adds voice timbre and requires the
+    multi-GB MOSS-Audio-Tokenizer).
+    """
+    import importlib.util
+    import os as _os
+    import sys as _sys
+
+    import numpy as np
+    from transformers import AutoTokenizer
+
+    model = _REALTIME_MODEL
+    if _os.path.isdir(model):
+        snap_dir = model
+    else:
+        from huggingface_hub import snapshot_download
+
+        snap_dir = snapshot_download(repo_id=model)
+    proc_path = _os.path.join(snap_dir, "processing_mossttsrealtime.py")
+
+    spec = importlib.util.spec_from_file_location("_moss_rt_proc", proc_path)
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+    proc = mod.MossTTSRealtimeProcessor(tokenizer=tokenizer)
+
+    system_grid = proc.make_ensemble(prompt_audio_tokens=None)  # (L_sys, 17), no ref
+
+    header_ids = tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
+    header_grid = np.full((len(header_ids), 17), 1024, dtype=np.int64)
+    header_grid[:, 0] = header_ids
+
+    text_ids_only = tokenizer.encode(text, add_special_tokens=False)
+    cur = min(len(text_ids_only), _REALTIME_PREFILL_MAX_TEXT)
+    text_grid = np.full((cur, 17), 1024, dtype=np.int64)
+    text_grid[:, 0] = text_ids_only[:cur]
+    text_grid[-1, 1] = 1025  # audio_bos at the last prefilled text token
+
+    grid = np.concatenate([system_grid, header_grid, text_grid], axis=0)
+    info: dict = {
+        "codes": {"ref": torch.from_numpy(grid[:, 1:].astype(np.int64).copy())},  # (L, 16)
+        "seed": [seed],
+    }
+    remaining = list(text_ids_only[cur:])
+    if remaining:
+        info["ids"] = {"all": remaining}
+    return {"prompt_token_ids": grid[:, 0].tolist(), "additional_information": info}
 
 
 @pytest.fixture(scope="module")
 def realtime_engine():
-    return Omni(model=_REALTIME_MODEL, stage_init_timeout=300)
+    # Same single-GPU memory split + prefix-cache-off rationale as delay_engine.
+    return Omni(
+        model=_REALTIME_MODEL,
+        stage_init_timeout=300,
+        stage_overrides={
+            "0": {"gpu_memory_utilization": 0.4, "enable_prefix_caching": False},
+            "1": {"gpu_memory_utilization": 0.4},
+        },
+    )
 
 
-@_REALTIME_SKIP
 @pytest.mark.omni
 @hardware_test(res={"cuda": "L4"})
-def test_moss_tts_realtime_english(realtime_engine, ref_audio_path):
-    """MossTTSRealtime: English voice_clone produces non-empty 24 kHz audio."""
-    req = _build_request("This is a real-time TTS streaming test.", ref_audio_path)
-    audio, sr = _collect_audio(realtime_engine, req)
+def test_moss_tts_realtime_english(realtime_engine):
+    """MossTTSRealtime: English text produces non-empty, non-silent 24 kHz audio."""
+    req = _build_realtime_request("This is a real-time text to speech test.")
+    audio, sr = _collect_audio(realtime_engine, req, [_REALTIME_TALKER_SP, _REALTIME_CODEC_SP])
 
     assert sr == SAMPLE_RATE, f"Expected {SAMPLE_RATE} Hz, got {sr}"
     assert audio.numel() > 0, "Audio tensor is empty"
     assert not torch.all(audio == 0), "Audio is silence"
 
 
-@_REALTIME_SKIP
 @pytest.mark.omni
 @hardware_test(res={"cuda": "L4"})
-def test_moss_tts_realtime_deterministic(realtime_engine, ref_audio_path):
-    """MossTTSRealtime: same seed yields identical waveforms."""
-    req = _build_request("Determinism check for realtime model.", ref_audio_path, seed=7)
-    audio1, _ = _collect_audio(realtime_engine, req)
-    audio2, _ = _collect_audio(realtime_engine, req)
+def test_moss_tts_realtime_deterministic(realtime_engine):
+    """MossTTSRealtime: same seed yields identical waveforms (Bug #3 — seeded
+    local-transformer sampling)."""
+    sp = [_REALTIME_TALKER_SP, _REALTIME_CODEC_SP]
+    audio1, _ = _collect_audio(realtime_engine, _build_realtime_request("Determinism check for realtime.", seed=7), sp)
+    audio2, _ = _collect_audio(realtime_engine, _build_realtime_request("Determinism check for realtime.", seed=7), sp)
 
-    assert audio1.shape == audio2.shape
-    assert torch.allclose(audio1, audio2, atol=1e-4)
+    assert audio1.shape == audio2.shape, f"Shapes differ: {audio1.shape} vs {audio2.shape}"
+    assert torch.allclose(audio1, audio2, atol=1e-4), "Same seed produced different audio"
+
+
+@pytest.mark.omni
+@hardware_test(res={"cuda": "L4"})
+def test_moss_tts_realtime_batch(realtime_engine):
+    """MossTTSRealtime: two concurrent requests with different text produce
+    distinct audio (regression guard for Bug #1 broadcast + Bug #2 row
+    misalignment on the realtime talker)."""
+    requests = [
+        _build_realtime_request("Hello, how are you today?", seed=42),
+        _build_realtime_request("The weather is sunny and warm.", seed=42),
+    ]
+    sampling = [_REALTIME_TALKER_SP, _REALTIME_CODEC_SP]
+    chunks_by_req: dict[int, list[torch.Tensor]] = {}
+    for omni_out in realtime_engine.generate(requests, sampling):
+        idx = int(omni_out.request_id.split("_", 1)[0])
+        chunk = _audio_from_mm(omni_out.multimodal_output)
+        if chunk is not None and chunk.numel() > 0:
+            chunks_by_req.setdefault(idx, []).append(chunk)
+
+    assert set(chunks_by_req) == {0, 1}, f"Expected audio for requests 0 and 1, got {sorted(chunks_by_req)}"
+    a = torch.cat(chunks_by_req[0], dim=0)
+    b = torch.cat(chunks_by_req[1], dim=0)
+    assert a.numel() > 0 and b.numel() > 0, "An output is empty"
+    if a.numel() == b.numel():
+        assert not torch.equal(a, b), "Both requests returned identical audio (batch concurrency bug)"
