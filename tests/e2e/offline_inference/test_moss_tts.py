@@ -218,8 +218,12 @@ def test_moss_tts_delay_deterministic(delay_engine, delay_processor):
     # Build a FRESH request per run: the engine consumes ``codes.ref`` /
     # ``audio_state`` from ``additional_information`` in place, so reusing one
     # dict would let the first run's mutations leak into the second.
-    audio1, _ = _collect_audio(delay_engine, _build_voicegen_request(delay_processor, "Reproducibility check.", seed=99))
-    audio2, _ = _collect_audio(delay_engine, _build_voicegen_request(delay_processor, "Reproducibility check.", seed=99))
+    audio1, _ = _collect_audio(
+        delay_engine, _build_voicegen_request(delay_processor, "Reproducibility check.", seed=99)
+    )
+    audio2, _ = _collect_audio(
+        delay_engine, _build_voicegen_request(delay_processor, "Reproducibility check.", seed=99)
+    )
 
     assert audio1.shape == audio2.shape, "Shapes differ across identical seeds"
     assert torch.allclose(audio1, audio2, atol=1e-4), "Waveforms differ across identical seeds"
