@@ -136,7 +136,7 @@ def delay_engine():
     # memory check. Disable prefix caching so two identical-seed runs are
     # bit-reproducible (the cached-prefill path can perturb logits enough to
     # shift sampling/EOS) — required by ``test_moss_tts_delay_deterministic``.
-    return Omni(
+    omni = Omni(
         model=_DELAY_MODEL,
         stage_init_timeout=300,
         stage_overrides={
@@ -144,6 +144,12 @@ def delay_engine():
             "1": {"gpu_memory_utilization": 0.4},
         },
     )
+    yield omni
+    # Tear down the stage engines so their GPU memory is released before the
+    # next module-scoped engine starts; otherwise the leaked StageEngineCoreProc
+    # processes hold the card and the next engine fails its startup memory check
+    # ("StageEngineCoreProc died during READY", issue #4087).
+    omni.shutdown()
 
 
 @pytest.fixture(scope="module")
@@ -358,7 +364,7 @@ def _build_realtime_request(text: str, seed: int = 42) -> dict:
 @pytest.fixture(scope="module")
 def realtime_engine():
     # Same single-GPU memory split + prefix-cache-off rationale as delay_engine.
-    return Omni(
+    omni = Omni(
         model=_REALTIME_MODEL,
         stage_init_timeout=300,
         stage_overrides={
@@ -366,6 +372,9 @@ def realtime_engine():
             "1": {"gpu_memory_utilization": 0.4},
         },
     )
+    yield omni
+    # Release stage-engine GPU memory before the next module (see issue #4087).
+    omni.shutdown()
 
 
 @hardware_test(res={"cuda": "L4"})
@@ -391,7 +400,6 @@ def test_moss_tts_realtime_deterministic(realtime_engine):
     assert torch.allclose(audio1, audio2, atol=1e-4), "Same seed produced different audio"
 
 
-@pytest.mark.omni
 @hardware_test(res={"cuda": "L4"})
 def test_moss_tts_realtime_batch(realtime_engine):
     """MossTTSRealtime: two concurrent requests with different text produce

@@ -66,7 +66,11 @@ def ref_audio_path(tmp_path_factory) -> str:
 
 @pytest.fixture(scope="module")
 def v15_engine():
-    return Omni(model=_MODEL, stage_init_timeout=600)
+    omni = Omni(model=_MODEL, stage_init_timeout=600)
+    yield omni
+    # Release stage-engine GPU memory on teardown so a leaked StageEngineCoreProc
+    # doesn't starve the next test's engine init (issue #4087).
+    omni.shutdown()
 
 
 def _build_request(text: str, ref_audio_path: str) -> dict:
