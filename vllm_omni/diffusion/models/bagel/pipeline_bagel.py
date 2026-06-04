@@ -777,7 +777,12 @@ class BagelPipeline(nn.Module, SupportsComponentDiscovery, DiffusionPipelineProf
             if torch.is_tensor(v):
                 generation_input[k] = v.to(self.device)
 
-        self._regen_init_noise_on_device(generation_input, req.sampling_params.seed)
+        # NOTE: Bagel deliberately keeps the seeded CPU/fp32 global-RNG noise built by
+        # ``prepare_vae_latent`` above (seeded at L743-746). That noise is device-agnostic
+        # and therefore reproduces bit-for-bit across CUDA and ROCm/AMD, matching upstream
+        # BAGEL. Lance overrides this via ``_regen_init_noise_on_device`` in its own forward
+        # paths to match upstream Lance's on-device (CUDA+bf16) sampling; we intentionally do
+        # NOT do that here for Bagel.
 
         # text cfg
         generation_input_cfg_text = self.bagel.prepare_vae_latent_cfg(
