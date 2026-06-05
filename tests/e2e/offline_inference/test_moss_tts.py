@@ -247,6 +247,20 @@ def test_moss_tts_delay_batch(delay_engine, delay_processor):
     a bare assistant prompt would leave every request identical and the bug
     invisible. Audio sampling is seeded (deterministic), so the distinctness
     here reflects genuine per-request content, not RNG noise.
+
+    Coverage limitation — this does NOT exercise the mixed prefill+decode case.
+    Both requests are submitted together via ``generate(requests, ...)``, so the
+    scheduler prefills then decodes them in lockstep: every step is either
+    all-prefill or all-decode, and each request contributes the same number of
+    rows. The uniform ``rows_per_req`` fallback in ``_request_row_spans`` happens
+    to be exact there, so it would still pass even if ``query_start_loc`` recovery
+    were broken. The genuinely dangerous case — request A in decode (1 row) while
+    request B prefills (N rows) in the SAME batch, where a uniform split
+    misattributes A's hidden states — requires staggered submission (start A,
+    let it reach decode, then submit B). The synchronous ``Omni.generate()`` batch
+    API cannot inject a request into an in-flight batch, so that path is covered
+    only indirectly by the ``query_start_loc`` recovery in ``_request_row_spans``
+    and its unit-level reasoning, not by this end-to-end test.
     """
     requests = [
         _build_voicegen_request(delay_processor, "First sentence."),
@@ -403,7 +417,12 @@ def test_moss_tts_realtime_deterministic(realtime_engine):
 def test_moss_tts_realtime_batch(realtime_engine):
     """MossTTSRealtime: two concurrent requests with different text produce
     distinct audio (regression guard for Bug #1 broadcast + Bug #2 row
-    misalignment on the realtime talker)."""
+    misalignment on the realtime talker).
+
+    Same coverage limitation as ``test_moss_tts_delay_batch``: synchronous
+    submission yields only all-prefill / all-decode steps, so it does not
+    exercise the mixed prefill+decode row-misalignment path (see that test's
+    docstring)."""
     requests = [
         _build_realtime_request("Hello, how are you today?", seed=42),
         _build_realtime_request("The weather is sunny and warm.", seed=42),
