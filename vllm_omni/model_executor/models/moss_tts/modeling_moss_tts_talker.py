@@ -1085,7 +1085,7 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
                     generator=_seeded_generator(state.get("audio_seed"), int(state.get("step", 0)), last_h.device),
                 ).squeeze(0)  # (n_vq,)
                 if int(state.get("step", 0)) < 5 or int(state.get("step", 0)) % 50 == 0:
-                    logger.info(
+                    logger.debug(
                         "[MossTTSRealtime make_omni] step=%d ch0=%d cursor=%d/%d",
                         int(state.get("step", 0)),
                         int(new_codes[0].item()),
