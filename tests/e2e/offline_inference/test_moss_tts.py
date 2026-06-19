@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""E2E offline inference tests for MOSS-TTS two-stage pipeline.
+"""E2E offline inference tests for the MOSS-TTS two-stage pipeline (delay model).
 
 Tests the MossTTSDelayModel path using MOSS-VoiceGenerator (1.7B) — the
 smallest MossTTSDelayModel variant — so the test runs on a single A10G or L4
 without requiring an 80 GB GPU.
 
-A second test class covers MOSS-TTS-Realtime (1.7B, MossTTSRealtime) to
-exercise the local-transformer generation path.
-
-Both classes use a module-scoped engine so the model is loaded once per test
-module execution.  Do NOT add a second engine fixture in this file — that
-triggers mid-module teardown races (see skill invariant I4).
+The MOSS-TTS-Realtime variant lives in the sibling file
+test_moss_tts_realtime.py.  Use a single module-scoped engine per file; do NOT
+add a second engine fixture here — that triggers mid-module teardown races
+(see skill invariant I4).
 """
 
 from __future__ import annotations
@@ -291,153 +289,5 @@ def test_moss_tts_delay_batch(delay_engine, delay_processor):
     # Different text must not yield identical audio. Identical output here is
     # the signature of the broadcast / row-misalignment concurrency bugs.
     a, b = results
-    if a.numel() == b.numel():
-        assert not torch.equal(a, b), "Both requests returned identical audio (batch concurrency bug)"
-
-
-# ---------------------------------------------------------------------------
-# MossTTSRealtime — MOSS-TTS-Realtime 1.7B
-# (tests the local-transformer generation path)
-# ---------------------------------------------------------------------------
-
-_REALTIME_MODEL = os.environ.get("MOSS_TTS_REALTIME_MODEL", "OpenMOSS-Team/MOSS-TTS-Realtime")
-
-# Realtime talker + codec sampling. The codec stage is decoded greedily
-# (temperature 0) so the determinism assertion isn't subject to codec-stage RNG;
-# the talker keeps the family-standard sampling.
-_REALTIME_TALKER_SP = SamplingParams(temperature=1.7, top_p=0.8, top_k=25, max_tokens=512, seed=42, detokenize=False)
-_REALTIME_CODEC_SP = SamplingParams(temperature=0.0, top_p=1.0, top_k=-1, max_tokens=65536, seed=42, detokenize=True)
-_REALTIME_PREFILL_MAX_TEXT = 12  # upstream MossTTSRealtimeInference._build_prefill_batch
-
-
-def _build_realtime_request(text: str, seed: int = 42) -> dict:
-    """Build a MOSS-TTS-Realtime request the way ``end2end.py`` does.
-
-    Realtime uses a different prompt format than the delay variants: a system
-    prompt grid + ``<|im_start|>assistant`` header + the first
-    ``_REALTIME_PREFILL_MAX_TEXT`` text tokens (with ``audio_bos`` on the last),
-    as a ``(L, 1+16)`` int grid (col 0 = text/special, cols 1..16 = RVQ codes).
-    The remaining text tokens are streamed one-per-step during decode via
-    ``additional_information["ids"]["all"]``.
-
-    The upstream ``MossTTSRealtimeProcessor`` isn't auto-discovered by
-    ``AutoProcessor`` (no ``processor_config.json``), so we import it directly
-    from the snapshot. We pass ``prompt_audio_tokens=None`` (no reference clip):
-    text alone conditions the content, which is all the concurrency/seeding
-    guards need (a reference clip only adds voice timbre and requires the
-    multi-GB MOSS-Audio-Tokenizer).
-    """
-    import importlib.util
-    import os as _os
-    import sys as _sys
-
-    import numpy as np
-    from transformers import AutoTokenizer
-
-    model = _REALTIME_MODEL
-    if _os.path.isdir(model):
-        snap_dir = model
-    else:
-        from huggingface_hub import snapshot_download
-
-        snap_dir = snapshot_download(repo_id=model)
-    proc_path = _os.path.join(snap_dir, "processing_mossttsrealtime.py")
-
-    spec = importlib.util.spec_from_file_location("_moss_rt_proc", proc_path)
-    mod = importlib.util.module_from_spec(spec)
-    _sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-
-    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    proc = mod.MossTTSRealtimeProcessor(tokenizer=tokenizer)
-
-    system_grid = proc.make_ensemble(prompt_audio_tokens=None)  # (L_sys, 17), no ref
-
-    header_ids = tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
-    header_grid = np.full((len(header_ids), 17), 1024, dtype=np.int64)
-    header_grid[:, 0] = header_ids
-
-    text_ids_only = tokenizer.encode(text, add_special_tokens=False)
-    cur = min(len(text_ids_only), _REALTIME_PREFILL_MAX_TEXT)
-    text_grid = np.full((cur, 17), 1024, dtype=np.int64)
-    text_grid[:, 0] = text_ids_only[:cur]
-    text_grid[-1, 1] = 1025  # audio_bos at the last prefilled text token
-
-    grid = np.concatenate([system_grid, header_grid, text_grid], axis=0)
-    info: dict = {
-        "codes": {"ref": torch.from_numpy(grid[:, 1:].astype(np.int64).copy())},  # (L, 16)
-        "seed": [seed],
-    }
-    remaining = list(text_ids_only[cur:])
-    if remaining:
-        info["ids"] = {"all": remaining}
-    return {"prompt_token_ids": grid[:, 0].tolist(), "additional_information": info}
-
-
-@pytest.fixture(scope="module")
-def realtime_engine():
-    # Same single-GPU memory split + prefix-cache-off rationale as delay_engine.
-    omni = Omni(
-        model=_REALTIME_MODEL,
-        stage_init_timeout=300,
-        stage_overrides={
-            "0": {"gpu_memory_utilization": 0.4, "enable_prefix_caching": False},
-            "1": {"gpu_memory_utilization": 0.4},
-        },
-    )
-    yield omni
-    # Release stage-engine GPU memory before the next module (see issue #4087).
-    omni.shutdown()
-
-
-@hardware_test(res={"cuda": "L4"})
-def test_moss_tts_realtime_english(realtime_engine):
-    """MossTTSRealtime: English text produces non-empty, non-silent 24 kHz audio."""
-    req = _build_realtime_request("This is a real-time text to speech test.")
-    audio, sr = _collect_audio(realtime_engine, req, [_REALTIME_TALKER_SP, _REALTIME_CODEC_SP])
-
-    assert sr == SAMPLE_RATE, f"Expected {SAMPLE_RATE} Hz, got {sr}"
-    assert audio.numel() > 0, "Audio tensor is empty"
-    assert not torch.all(audio == 0), "Audio is silence"
-
-
-@hardware_test(res={"cuda": "L4"})
-def test_moss_tts_realtime_deterministic(realtime_engine):
-    """MossTTSRealtime: same seed yields identical waveforms (Bug #3 — seeded
-    local-transformer sampling)."""
-    sp = [_REALTIME_TALKER_SP, _REALTIME_CODEC_SP]
-    audio1, _ = _collect_audio(realtime_engine, _build_realtime_request("Determinism check for realtime.", seed=7), sp)
-    audio2, _ = _collect_audio(realtime_engine, _build_realtime_request("Determinism check for realtime.", seed=7), sp)
-
-    assert audio1.shape == audio2.shape, f"Shapes differ: {audio1.shape} vs {audio2.shape}"
-    assert torch.allclose(audio1, audio2, atol=1e-4), "Same seed produced different audio"
-
-
-@hardware_test(res={"cuda": "L4"})
-def test_moss_tts_realtime_batch(realtime_engine):
-    """MossTTSRealtime: two concurrent requests with different text produce
-    distinct audio (regression guard for Bug #1 broadcast + Bug #2 row
-    misalignment on the realtime talker).
-
-    Same coverage limitation as ``test_moss_tts_delay_batch``: synchronous
-    submission yields only all-prefill / all-decode steps, so it does not
-    exercise the mixed prefill+decode row-misalignment path (see that test's
-    docstring)."""
-    requests = [
-        _build_realtime_request("Hello, how are you today?", seed=42),
-        _build_realtime_request("The weather is sunny and warm.", seed=42),
-    ]
-    sampling = [_REALTIME_TALKER_SP, _REALTIME_CODEC_SP]
-    chunks_by_req: dict[int, list[torch.Tensor]] = {}
-    for omni_out in realtime_engine.generate(requests, sampling):
-        idx = int(omni_out.request_id.split("_", 1)[0])
-        chunk = _audio_from_mm(omni_out.multimodal_output)
-        if chunk is not None and chunk.numel() > 0:
-            chunks_by_req.setdefault(idx, []).append(chunk)
-
-    assert set(chunks_by_req) == {0, 1}, f"Expected audio for requests 0 and 1, got {sorted(chunks_by_req)}"
-    a = torch.cat(chunks_by_req[0], dim=0)
-    b = torch.cat(chunks_by_req[1], dim=0)
-    assert a.numel() > 0 and b.numel() > 0, "An output is empty"
     if a.numel() == b.numel():
         assert not torch.equal(a, b), "Both requests returned identical audio (batch concurrency bug)"

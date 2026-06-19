@@ -591,9 +591,7 @@ class MossTTSDelayTalkerForGeneration(nn.Module):
                 )
             probs = torch.softmax(active_logits, dim=-1)
             # Per-request seeded draw so identical seeds reproduce codes.
-            codes[active_idx] = torch.multinomial(
-                probs, num_samples=1, generator=generator
-            ).squeeze(-1).long()
+            codes[active_idx] = torch.multinomial(probs, num_samples=1, generator=generator).squeeze(-1).long()
             return codes
 
         # Fallback: per-head loop (used before load_weights() completes).
