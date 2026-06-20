@@ -179,7 +179,7 @@ def encode_realtime_reference(
     codec_path: str,
     sr_target: int = 24000,
     n_vq: int = 16,
-) -> "torch.Tensor":
+) -> torch.Tensor:
     """Blocking: encode a reference waveform into ``(T, n_vq)`` RVQ codes.
 
     Mirrors upstream ``StreamingTextToAudio.set_voice_prompt`` (resample →

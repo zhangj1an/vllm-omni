@@ -1831,9 +1831,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                         )
                         self._speaker_cache.put(ref_key, {"codes": ref_tokens.detach().cpu()})
                 except Exception:
-                    logger.warning(
-                        "MOSS-TTS-Realtime: reference encoding failed; using default voice", exc_info=True
-                    )
+                    logger.warning("MOSS-TTS-Realtime: reference encoding failed; using default voice", exc_info=True)
                     ref_tokens = None
             prompt_token_ids, info = await asyncio.to_thread(
                 build_realtime_prompt,
