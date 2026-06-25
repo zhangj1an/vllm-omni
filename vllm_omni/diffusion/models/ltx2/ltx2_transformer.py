@@ -17,12 +17,13 @@ import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed
 import torch.nn as nn
 import torch.nn.functional as F
+from cache_dit import ForwardPattern
 from diffusers.models.embeddings import PixArtAlphaCombinedTimestepSizeEmbeddings, PixArtAlphaTextProjection
 from diffusers.utils import (
     BaseOutput,
@@ -39,8 +40,12 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 from vllm_omni.diffusion.attention.layer import Attention
+from vllm_omni.diffusion.cache.cache_dit_backend import CacheDiTAdapterConfig
 from vllm_omni.diffusion.distributed.hsdp_utils import is_transformer_block_module
 from vllm_omni.diffusion.distributed.sp_plan import SequenceParallelInput, SequenceParallelOutput
 from vllm_omni.diffusion.forward_context import get_forward_context, is_forward_context_available
@@ -59,18 +64,35 @@ def _make_rms_norm(hidden_size: int, *, eps: float, elementwise_affine: bool) ->
         kwargs["has_weight"] = elementwise_affine
     elif not elementwise_affine:
         raise TypeError("RMSNorm backend does not support disabling affine weights.")
-    return RMSNorm(hidden_size, **kwargs)
+    norm = RMSNorm(hidden_size, **kwargs)
+    weight = getattr(norm, "weight", None)
+    if (
+        not elementwise_affine
+        and isinstance(weight, torch.Tensor)
+        and not isinstance(weight, nn.Parameter)
+        and "weight" not in dict(norm.named_buffers())
+    ):
+        delattr(norm, "weight")
+        norm.register_buffer("weight", weight, persistent=False)
+    return norm
 
 
 def apply_interleaved_rotary_emb(x: torch.Tensor, freqs: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
     cos, sin = freqs
-    x_real, x_imag = x.unflatten(2, (-1, 2)).unbind(-1)  # [B, S, C // 2]
+    # Concrete pair count instead of -1 keeps SDPA shape static under torch.compile.
+    x_real, x_imag = x.unflatten(2, (x.shape[2] // 2, 2)).unbind(-1)  # [B, S, C // 2]
     x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(2)
     out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
     return out
 
 
-def apply_split_rotary_emb(x: torch.Tensor, freqs: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+def apply_split_rotary_emb(
+    x: torch.Tensor,
+    freqs: tuple[torch.Tensor, torch.Tensor],
+    *,
+    head_dim: int,
+) -> torch.Tensor:
+    # `head_dim` is plumbed in (not inferred via `-1`) so SDPA shape stays static under torch.compile.
     cos, sin = freqs
 
     x_dtype = x.dtype
@@ -80,7 +102,7 @@ def apply_split_rotary_emb(x: torch.Tensor, freqs: tuple[torch.Tensor, torch.Ten
         # The cos/sin batch dim may only be broadcastable, so take batch size from x
         b = x.shape[0]
         _, h, t, _ = cos.shape
-        x = x.reshape(b, t, h, -1).swapaxes(1, 2)
+        x = x.reshape(b, t, h, head_dim).swapaxes(1, 2)
         needs_reshape = True
 
     # Split last dim (2*r) into (d=2, r)
@@ -107,7 +129,7 @@ def apply_split_rotary_emb(x: torch.Tensor, freqs: tuple[torch.Tensor, torch.Ten
     out = out.reshape(*out.shape[:-2], last)
 
     if needs_reshape:
-        out = out.swapaxes(1, 2).reshape(b, t, -1)
+        out = out.swapaxes(1, 2).reshape(b, t, h * head_dim)
 
     out = out.to(dtype=x_dtype)
     return out
@@ -173,7 +195,16 @@ class LTX2AdaLayerNormSingle(nn.Module):
 
 
 class ColumnParallelApproxGELU(nn.Module):
-    def __init__(self, dim_in: int, dim_out: int, *, approximate: str, bias: bool = True):
+    def __init__(
+        self,
+        dim_in: int,
+        dim_out: int,
+        *,
+        approximate: str,
+        bias: bool = True,
+        quant_config: "QuantizationConfig | None" = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.proj = ColumnParallelLinear(
             dim_in,
@@ -181,6 +212,8 @@ class ColumnParallelApproxGELU(nn.Module):
             bias=bias,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj" if prefix else "proj",
         )
         self.approximate = approximate
 
@@ -200,6 +233,8 @@ class LTX2FeedForward(nn.Module):
         bias: bool = True,
         dropout: float = 0.0,
         final_dropout: bool = False,
+        quant_config: "QuantizationConfig | None" = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -211,13 +246,22 @@ class LTX2FeedForward(nn.Module):
         dropout_layer: nn.Module = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         layers: list[nn.Module] = [
-            ColumnParallelApproxGELU(dim, inner_dim, approximate="tanh", bias=bias),
+            ColumnParallelApproxGELU(
+                dim,
+                inner_dim,
+                approximate="tanh",
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.net.0" if prefix else "net.0",
+            ),
             dropout_layer,
             RowParallelLinear(
                 inner_dim,
                 dim_out,
                 input_is_parallel=True,
                 return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.net.2" if prefix else "net.2",
             ),
         ]
         if final_dropout:
@@ -463,12 +507,14 @@ class LTX2AudioVideoAttnProcessor:
                     key, key_rotary_emb if key_rotary_emb is not None else query_rotary_emb
                 )
             elif attn.rope_type == "split":
-                query = apply_split_rotary_emb(query, query_rotary_emb)
-                key = apply_split_rotary_emb(key, key_rotary_emb if key_rotary_emb is not None else query_rotary_emb)
+                query = apply_split_rotary_emb(query, query_rotary_emb, head_dim=attn.head_dim)
+                key = apply_split_rotary_emb(
+                    key, key_rotary_emb if key_rotary_emb is not None else query_rotary_emb, head_dim=attn.head_dim
+                )
 
-        query = query.unflatten(2, (attn.heads, -1))
-        key = key.unflatten(2, (attn.heads, -1))
-        value = value.unflatten(2, (attn.heads, -1))
+        query = query.unflatten(2, (attn.heads, attn.head_dim))
+        key = key.unflatten(2, (attn.heads, attn.head_dim))
+        value = value.unflatten(2, (attn.heads, attn.head_dim))
 
         attn_metadata = AttentionMetadata(attn_mask=attention_mask) if attention_mask is not None else None
         hidden_states = attn.attn(query, key, value, attn_metadata)
@@ -477,7 +523,7 @@ class LTX2AudioVideoAttnProcessor:
 
         # LTX-2.3: per-head gated attention
         if attn.to_gate_logits is not None:
-            hidden_states = hidden_states.unflatten(2, (attn.heads, -1))  # [B, T, H, D]
+            hidden_states = hidden_states.unflatten(2, (attn.heads, attn.head_dim))  # [B, T, H, D]
             # 2.0 * sigmoid so zero-init gates produce 1.0 (identity)
             gates = 2.0 * torch.sigmoid(gate_logits)  # [B, T, H]
             hidden_states = hidden_states * gates.unsqueeze(-1)
@@ -515,6 +561,9 @@ class LTX2Attention(torch.nn.Module):
         rope_type: str = "interleaved",
         apply_gated_attention: bool = False,
         processor=None,
+        quant_config: "QuantizationConfig | None" = None,
+        prefix: str = "",
+        disable_kv_quant: bool = False,
     ):
         super().__init__()
         # LTX-2 uses "rms_norm_across_heads", LTX-2.3 uses "rms_norm" -- both
@@ -548,6 +597,8 @@ class LTX2Attention(torch.nn.Module):
                 head_size=self.head_dim,
                 total_num_heads=heads,
                 bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.to_qkv" if prefix else "to_qkv",
             )
             self.query_num_heads = self.to_qkv.num_heads
             self.kv_num_heads = self.to_qkv.num_kv_heads
@@ -562,6 +613,8 @@ class LTX2Attention(torch.nn.Module):
                 bias=bias,
                 gather_output=False,
                 return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.to_q" if prefix else "to_q",
             )
             self.to_k = ColumnParallelLinear(
                 self.cross_attention_dim,
@@ -569,6 +622,8 @@ class LTX2Attention(torch.nn.Module):
                 bias=bias,
                 gather_output=False,
                 return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.to_k" if prefix else "to_k",
             )
             self.to_v = ColumnParallelLinear(
                 self.cross_attention_dim,
@@ -576,6 +631,8 @@ class LTX2Attention(torch.nn.Module):
                 bias=bias,
                 gather_output=False,
                 return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.to_v" if prefix else "to_v",
             )
 
         self.heads = self.query_num_heads
@@ -617,6 +674,8 @@ class LTX2Attention(torch.nn.Module):
                     bias=out_bias,
                     input_is_parallel=True,
                     return_bias=False,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.to_out.0" if prefix else "to_out.0",
                 ),
                 torch.nn.Dropout(dropout) if dropout > 0 else torch.nn.Identity(),
             ]
@@ -627,11 +686,14 @@ class LTX2Attention(torch.nn.Module):
             num_kv_heads=self.kv_num_heads,
             softmax_scale=1.0 / (dim_head**0.5),
             causal=False,
+            prefix=prefix,
+            disable_kv_quant=disable_kv_quant,
         )
 
         # LTX-2.3: per-head gated attention
+        # leave unquantized for this linear
         if apply_gated_attention:
-            self.to_gate_logits = nn.Linear(query_dim, heads, bias=True)
+            self.to_gate_logits = nn.Linear(query_dim, self.query_num_heads, bias=True)
         else:
             self.to_gate_logits = None
 
@@ -748,6 +810,8 @@ class LTX2VideoTransformerBlock(nn.Module):
         elementwise_affine: bool = False,
         rope_type: str = "interleaved",
         perturbed_attn: bool = False,
+        quant_config: "QuantizationConfig | None" = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.video_cross_attn_adaln = video_cross_attn_adaln
@@ -767,6 +831,8 @@ class LTX2VideoTransformerBlock(nn.Module):
             qk_norm=qk_norm,
             rope_type=rope_type,
             apply_gated_attention=video_gated_attn,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn1" if prefix else "attn1",
         )
 
         self.audio_norm1 = _make_rms_norm(audio_dim, eps=eps, elementwise_affine=elementwise_affine)
@@ -781,6 +847,8 @@ class LTX2VideoTransformerBlock(nn.Module):
             qk_norm=qk_norm,
             rope_type=rope_type,
             apply_gated_attention=audio_gated_attn,
+            quant_config=quant_config,
+            prefix=f"{prefix}.audio_attn1" if prefix else "audio_attn1",
         )
 
         # 2. Prompt Cross-Attention
@@ -796,6 +864,9 @@ class LTX2VideoTransformerBlock(nn.Module):
             qk_norm=qk_norm,
             rope_type=rope_type,
             apply_gated_attention=video_gated_attn,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn2" if prefix else "attn2",
+            disable_kv_quant=True,
         )
 
         self.audio_norm2 = _make_rms_norm(audio_dim, eps=eps, elementwise_affine=elementwise_affine)
@@ -810,9 +881,14 @@ class LTX2VideoTransformerBlock(nn.Module):
             qk_norm=qk_norm,
             rope_type=rope_type,
             apply_gated_attention=audio_gated_attn,
+            quant_config=quant_config,
+            prefix=f"{prefix}.audio_attn2" if prefix else "audio_attn2",
+            disable_kv_quant=True,
         )
 
         # 3. Audio-to-Video (a2v) and Video-to-Audio (v2a) Cross-Attention
+        # K/V here come from the other modality's latents (long sequences),
+        # so KV-cache quant remains enabled.
         self.audio_to_video_norm = _make_rms_norm(dim, eps=eps, elementwise_affine=elementwise_affine)
         self.audio_to_video_attn = LTX2Attention(
             query_dim=dim,
@@ -825,6 +901,8 @@ class LTX2VideoTransformerBlock(nn.Module):
             qk_norm=qk_norm,
             rope_type=rope_type,
             apply_gated_attention=video_gated_attn,
+            quant_config=quant_config,
+            prefix=f"{prefix}.audio_to_video_attn" if prefix else "audio_to_video_attn",
         )
 
         self.video_to_audio_norm = _make_rms_norm(audio_dim, eps=eps, elementwise_affine=elementwise_affine)
@@ -839,14 +917,26 @@ class LTX2VideoTransformerBlock(nn.Module):
             qk_norm=qk_norm,
             rope_type=rope_type,
             apply_gated_attention=audio_gated_attn,
+            quant_config=quant_config,
+            prefix=f"{prefix}.video_to_audio_attn" if prefix else "video_to_audio_attn",
         )
 
         # 4. Feedforward layers
         self.norm3 = _make_rms_norm(dim, eps=eps, elementwise_affine=elementwise_affine)
-        self.ff = LTX2FeedForward(dim, activation_fn=activation_fn)
+        self.ff = LTX2FeedForward(
+            dim,
+            activation_fn=activation_fn,
+            quant_config=quant_config,
+            prefix=f"{prefix}.ff" if prefix else "ff",
+        )
 
         self.audio_norm3 = _make_rms_norm(audio_dim, eps=eps, elementwise_affine=elementwise_affine)
-        self.audio_ff = LTX2FeedForward(audio_dim, activation_fn=activation_fn)
+        self.audio_ff = LTX2FeedForward(
+            audio_dim,
+            activation_fn=activation_fn,
+            quant_config=quant_config,
+            prefix=f"{prefix}.audio_ff" if prefix else "audio_ff",
+        )
 
         # 5. Per-Layer Modulation Parameters
         # LTX-2.3 with cross_attn_adaln uses 9 params (extra 3 for cross-attn modulation);
@@ -1322,9 +1412,11 @@ class LTX2AudioVideoRotaryPosEmbed(nn.Module):
             # Reshape freqs to be compatible with multi-head attention
             b = cos_freq.shape[0]
             t = cos_freq.shape[1]
+            # Concrete per-head dim instead of -1 — see apply_split_rotary_emb
+            r = self.dim // self.num_attention_heads // 2
 
-            cos_freq = cos_freq.reshape(b, t, self.num_attention_heads, -1)
-            sin_freq = sin_freq.reshape(b, t, self.num_attention_heads, -1)
+            cos_freq = cos_freq.reshape(b, t, self.num_attention_heads, r)
+            sin_freq = sin_freq.reshape(b, t, self.num_attention_heads, r)
 
             cos_freqs = torch.swapaxes(cos_freq, 1, 2)  # (B,H,T,D//2)
             sin_freqs = torch.swapaxes(sin_freq, 1, 2)  # (B,H,T,D//2)
@@ -1359,12 +1451,23 @@ class LTX2VideoTransformer3DModel(nn.Module):
             The normalization layer to use.
     """
 
+    _cache_dit_adapter_config = CacheDiTAdapterConfig(
+        block_forward_patterns={
+            "transformer_blocks": ForwardPattern.Pattern_0,
+        },
+        has_separate_cfg=True,
+        check_forward_pattern=False,
+    )
+
     _supports_gradient_checkpointing = True
     _skip_layerwise_casting_patterns = ["norm"]
     _repeated_blocks = ["LTX2VideoTransformerBlock"]
     _layerwise_offload_blocks_attrs = ["transformer_blocks"]
     _hsdp_shard_conditions = [is_transformer_block_module]
     _sp_plan: dict[str, Any] | None = None
+    packed_modules_mapping = {
+        "to_qkv": ["to_q", "to_k", "to_v"],
+    }
 
     @staticmethod
     def _build_sp_plan(rope_type: str) -> dict[str, Any]:
@@ -1453,6 +1556,7 @@ class LTX2VideoTransformer3DModel(nn.Module):
         cross_attn_mod: bool = False,
         audio_gated_attn: bool = False,
         audio_cross_attn_mod: bool = False,
+        quant_config: "QuantizationConfig | None" = None,
     ) -> None:
         super().__init__()
         self.perturbed_attn = perturbed_attn
@@ -1647,8 +1751,10 @@ class LTX2VideoTransformer3DModel(nn.Module):
                     elementwise_affine=norm_elementwise_affine,
                     rope_type=rope_type,
                     perturbed_attn=perturbed_attn,
+                    quant_config=quant_config,
+                    prefix=f"transformer_blocks.{layer_idx}",
                 )
-                for _ in range(num_layers)
+                for layer_idx in range(num_layers)
             ]
         )
 
@@ -1864,10 +1970,6 @@ class LTX2VideoTransformer3DModel(nn.Module):
         # 5. Run transformer blocks
         for block in self.transformer_blocks:
             block_kwargs = {
-                "hidden_states": hidden_states,
-                "audio_hidden_states": audio_hidden_states,
-                "encoder_hidden_states": encoder_hidden_states,
-                "audio_encoder_hidden_states": audio_encoder_hidden_states,
                 "temb": temb,
                 "temb_audio": temb_audio,
                 "temb_ca_scale_shift": video_cross_attn_scale_shift,
@@ -1883,11 +1985,27 @@ class LTX2VideoTransformer3DModel(nn.Module):
                 "encoder_attention_mask": encoder_attention_mask,
                 "audio_encoder_attention_mask": audio_encoder_attention_mask,
             }
+            # NOTE: We intentionally pass the first 4 args here positionally,
+            # because CacheDiT expects the first 2 args to be hidden_states
+            # and encoder_hidden_states, so passing them as kwargs will cause
+            # positional / keywords arg collisions.
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-                hidden_states, audio_hidden_states = self._gradient_checkpointing_func(block, **block_kwargs)
+                hidden_states, audio_hidden_states = self._gradient_checkpointing_func(
+                    block,
+                    hidden_states,
+                    audio_hidden_states,
+                    encoder_hidden_states,
+                    audio_encoder_hidden_states,
+                    **block_kwargs,
+                )
             else:
-                hidden_states, audio_hidden_states = block(**block_kwargs)
-
+                hidden_states, audio_hidden_states = block(
+                    hidden_states,
+                    audio_hidden_states,
+                    encoder_hidden_states,
+                    audio_encoder_hidden_states,
+                    **block_kwargs,
+                )
         # 6. Output layers (including unpatchification)
         scale_shift_values = self.scale_shift_table[None, None] + embedded_timestep[:, :, None]
         shift, scale = scale_shift_values[:, :, 0], scale_shift_values[:, :, 1]

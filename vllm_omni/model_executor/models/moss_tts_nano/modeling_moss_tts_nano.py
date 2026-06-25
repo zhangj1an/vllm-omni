@@ -13,12 +13,15 @@ Streaming is supported via the VoxCPM-style generator pattern:
   - compute_logits() emits EOS only when the last chunk has been yielded,
     telling the AR scheduler to finish the request.
 
-Weight loading deliberately happens inside load_weights() -- NOT __init__ --
-so that vLLM initialises distributed state before any CUDA allocations occur.
+The AR LM and audio tokenizer are constructed eagerly in __init__ so that
+``load_format: dummy`` works (DummyModelLoader skips ``load_weights``) and
+to avoid OOM from vLLM's post-init KV-cache profiling. Mirrors qwen3_tts
+(PR #3117).
 """
 
 from __future__ import annotations
 
+import contextlib
 import tempfile
 import threading
 from collections.abc import Iterable
@@ -31,8 +34,47 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 from vllm_omni.model_executor.models.output_templates import OmniOutput
+from vllm_omni.model_executor.models.utils import (
+    reinit_rotary_inv_freq,
+    transformers_keys_to_ignore_compat,
+)
+from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
+
+
+@contextlib.contextmanager
+def _hf_load_without_tp_warmup():
+    """Work around a transformers 5.8.x crash loading some trust_remote_code LMs.
+
+    ``caching_allocator_warmup`` does ``len(model._tp_plan)`` when
+    ``torch.distributed`` is initialized, but the MOSS-TTS-Nano remote model
+    leaves ``_tp_plan`` as ``None`` (it survives ``PreTrainedModel.__init__``),
+    so the warmup raises ``TypeError: object of type 'NoneType' has no len()``.
+    vLLM initializes ``torch.distributed`` even at TP=1, so the crash fires.
+
+    MOSS-TTS-Nano runs single-GPU (no tensor parallelism), so forcing the
+    warmup down its non-distributed branch is byte-for-byte equivalent and
+    sidesteps the ``None`` plan. Scoped to the wrapped ``from_pretrained`` call.
+
+    Targets the private ``transformers.modeling_utils._is_torch_distributed_initialized``.
+    Guarded by ``hasattr`` so that if a future transformers renames or removes it
+    (and presumably the crash with it), we no-op instead of raising AttributeError.
+    """
+    import transformers.modeling_utils as _tmu
+
+    if not hasattr(_tmu, "_is_torch_distributed_initialized"):
+        # Internal hook gone (transformers refactor); assume the upstream crash
+        # is gone too and run the load unpatched.
+        yield
+        return
+
+    original = _tmu._is_torch_distributed_initialized
+    _tmu._is_torch_distributed_initialized = lambda: False
+    try:
+        yield
+    finally:
+        _tmu._is_torch_distributed_initialized = original
 
 
 def _patch_torchaudio_load() -> None:
@@ -85,11 +127,29 @@ _DEFAULT_AUDIO_TOP_P = 0.95
 _DEFAULT_AUDIO_TOP_K = 25
 _DEFAULT_AUDIO_REPETITION_PENALTY = 1.2
 _DEFAULT_MAX_NEW_FRAMES = 375
-_DEFAULT_VOICE = "Junhao"
-# "voice_clone" mirrors the mode used by offline examples and tests:
-# built-in voices (e.g. "Junhao") are backed by preset reference audio
-# upstream, so the default produces the expected voice timbre.
+# MOSS-TTS-Nano upstream supports two modes (voice_clone / continuation).
+# voice_clone is the recommended workflow; the serving layer routes by
+# whether ref_text was supplied (see _build_moss_tts_params in
+# vllm_omni/entrypoints/openai/serving_speech.py).
 _DEFAULT_MODE = "voice_clone"
+
+
+def _to_mono_1d(waveform: Any) -> torch.Tensor:
+    """Convert an upstream waveform event to a 1-D float32 mono tensor.
+
+    The MOSS audio tokenizer is configured for stereo (number_channels=2)
+    and emits ``(channels, samples)`` tensors. The downstream serving path
+    writes a single-channel WAV at the tokenizer's sample rate, so we mix
+    multi-channel audio down to mono via mean. Naively flattening with
+    ``.T.reshape(-1)`` interleaves L/R into a 2N-length stream that gets
+    re-interpreted at 1× the sample rate — playback ends up 2× too slow.
+    """
+    chunk = torch.as_tensor(waveform, dtype=torch.float32).cpu()
+    if chunk.ndim == 2:
+        if chunk.shape[0] > 1:
+            return chunk.mean(dim=0).contiguous()
+        return chunk.reshape(-1)
+    return chunk.reshape(-1)
 
 
 def _pick(info: dict, key: str, default):
@@ -113,7 +173,6 @@ class MossTTSNanoForGeneration(nn.Module):
     has_preprocess = False
     has_postprocess = False
     enable_update_additional_information = True
-    inject_omni_request_id_into_runtime_info = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -121,9 +180,84 @@ class MossTTSNanoForGeneration(nn.Module):
         self.config = vllm_config.model_config.hf_config
         self.model_path: str = vllm_config.model_config.model
 
-        self._lm: nn.Module | None = None
-        self._audio_tokenizer: nn.Module | None = None
-        self._device: torch.device | None = None
+        # Eager construction (not in load_weights) -- see module docstring.
+        _patch_torchaudio_load()
+
+        device = current_omni_platform.get_torch_device()
+        self._device: torch.device = device
+
+        if device.type == "cuda" and torch.cuda.is_bf16_supported():
+            tts_dtype = torch.bfloat16
+        elif device.type == "cuda":
+            tts_dtype = torch.float16
+        else:
+            tts_dtype = torch.float32
+
+        logger.info("Loading MOSS-TTS-Nano LM from %s (dtype=%s)", self.model_path, tts_dtype)
+        from transformers import AutoModelForCausalLM, PreTrainedModel
+
+        # Shim _tp_plan to prevent TypeError in transformers when loading remote-code models
+        if getattr(PreTrainedModel, "_tp_plan", None) is None:
+            PreTrainedModel._tp_plan = {}
+
+        # Two orthogonal trust_remote_code transformers fixes:
+        #  - _hf_load_without_tp_warmup: tp_plan=None warmup crash (transformers 5.8.x)
+        #  - transformers_keys_to_ignore_compat: keys list-vs-set (transformers 5.9)
+        with _hf_load_without_tp_warmup(), transformers_keys_to_ignore_compat():
+            lm = AutoModelForCausalLM.from_pretrained(
+                self.model_path,
+                trust_remote_code=True,
+                torch_dtype=tts_dtype,
+            )
+        if device.type == "cuda":
+            try:
+                import flash_attn  # noqa: F401
+
+                lm._set_attention_implementation("flash_attention_2")
+                logger.info("MOSS-TTS-Nano using flash_attention_2")
+            except ImportError:
+                lm._set_attention_implementation("sdpa")
+                logger.info("MOSS-TTS-Nano using sdpa (flash_attn not installed)")
+        lm.to(device=device)
+        lm.eval()
+
+        # ``trust_remote_code`` custom RoPE classes that register
+        # ``inv_freq`` with ``persistent=False`` and aren't in
+        # ``ROPE_INIT_FUNCTIONS`` come out of ``from_pretrained``'s
+        # post-init chain holding garbage (~ -1.7e38 / 9.9e33). The
+        # very first text-LM forward then emits NaN logits.
+        # See vllm_omni.model_executor.models.utils.reinit_rotary_inv_freq
+        # for the full mechanism and reproduction.
+        n_fixed = reinit_rotary_inv_freq(lm, base=10000.0)
+        if n_fixed > 0:
+            logger.info("MOSS-TTS-Nano: re-initialised %d rotary_emb.inv_freq buffers", n_fixed)
+
+        self._lm: nn.Module = lm
+        logger.info("MOSS-TTS-Nano LM loaded on %s", device)
+
+        codec_path: str = getattr(
+            self.config,
+            "audio_tokenizer_pretrained_name_or_path",
+            "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano",
+        )
+        logger.info("Loading MOSS-Audio-Tokenizer-Nano from %s", codec_path)
+        from transformers import AutoModel
+
+        # Two orthogonal trust_remote_code transformers fixes:
+        #  - _hf_load_without_tp_warmup: tp_plan=None warmup crash (transformers 5.8.x)
+        #  - transformers_keys_to_ignore_compat: keys list-vs-set (transformers 5.9)
+        with _hf_load_without_tp_warmup(), transformers_keys_to_ignore_compat():
+            audio_tokenizer = AutoModel.from_pretrained(
+                codec_path,
+                trust_remote_code=True,
+                torch_dtype=torch.float32,
+            )
+        audio_tokenizer.to(device=device)
+        audio_tokenizer.eval()
+        self._audio_tokenizer: nn.Module = audio_tokenizer
+        logger.info("MOSS-Audio-Tokenizer-Nano loaded on %s", device)
+
+        # Kept for API compat; vLLM worker init is single-threaded.
         self._lock = threading.Lock()
 
         # Per-request streaming generators (VoxCPM pattern).
@@ -139,77 +273,19 @@ class MossTTSNanoForGeneration(nn.Module):
     # ------------------------------------------------------------------
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        with self._lock:
-            if self._lm is not None:
-                return set()
-            _patch_torchaudio_load()
-
-            try:
-                device = next(self.parameters()).device
-            except StopIteration:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self._device = device
-
-            if device.type == "cuda" and torch.cuda.is_bf16_supported():
-                tts_dtype = torch.bfloat16
-            elif device.type == "cuda":
-                tts_dtype = torch.float16
-            else:
-                tts_dtype = torch.float32
-
-            logger.info("Loading MOSS-TTS-Nano LM from %s (dtype=%s)", self.model_path, tts_dtype)
-            from transformers import AutoModelForCausalLM
-
-            lm = AutoModelForCausalLM.from_pretrained(
-                self.model_path,
-                trust_remote_code=True,
-                torch_dtype=tts_dtype,
-            )
-            if device.type == "cuda":
-                try:
-                    import flash_attn  # noqa: F401
-
-                    lm._set_attention_implementation("flash_attention_2")
-                    logger.info("MOSS-TTS-Nano using flash_attention_2")
-                except ImportError:
-                    lm._set_attention_implementation("sdpa")
-                    logger.info("MOSS-TTS-Nano using sdpa (flash_attn not installed)")
-            lm.to(device=device)
-            lm.eval()
-            self._lm = lm
-            logger.info("MOSS-TTS-Nano LM loaded on %s", device)
-
-            codec_path: str = getattr(
-                self.config,
-                "audio_tokenizer_pretrained_name_or_path",
-                "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano",
-            )
-            logger.info("Loading MOSS-Audio-Tokenizer-Nano from %s", codec_path)
-            from transformers import AutoModel
-
-            audio_tokenizer = AutoModel.from_pretrained(
-                codec_path,
-                trust_remote_code=True,
-                torch_dtype=torch.float32,
-            )
-            audio_tokenizer.to(device=device)
-            audio_tokenizer.eval()
-            self._audio_tokenizer = audio_tokenizer
-            logger.info("MOSS-Audio-Tokenizer-Nano loaded on %s", device)
-
-        # MOSS-TTS-Nano loads weights inline via from_pretrained() above;
-        # vLLM's weight-loading protocol still requires us to exhaust the
-        # iterator so the underlying stream is closed cleanly.
+        # Weights are populated in __init__ via from_pretrained; drain the
+        # iterator and report all params as loaded. Not called under
+        # load_format=dummy (DummyModelLoader randomises params in place).
         for _ in weights:
             pass
-        return set()
+        return {name for name, _ in self.named_parameters()}
 
     # ------------------------------------------------------------------
     # Dummy run support
     # ------------------------------------------------------------------
 
     def get_dummy_runtime_additional_information(self, num_reqs: int) -> list[dict]:
-        return [{"text": "hello", "voice": _DEFAULT_VOICE, "_is_dummy": True}] * num_reqs
+        return [{"text": "hello", "_is_dummy": True}] * num_reqs
 
     # ------------------------------------------------------------------
     # Streaming generator management
@@ -316,11 +392,7 @@ class MossTTSNanoForGeneration(nn.Module):
                 if event_type == "audio":
                     waveform = event.get("waveform")
                     if waveform is not None:
-                        chunk = torch.as_tensor(waveform, dtype=torch.float32).cpu()
-                        if chunk.ndim == 2:
-                            chunk = chunk.T.reshape(-1)
-                        else:
-                            chunk = chunk.reshape(-1)
+                        chunk = _to_mono_1d(waveform)
                         audio_chunks.append(chunk)
                         # Yield each chunk as it arrives (is_last=False).
                         yield chunk, False
@@ -328,7 +400,7 @@ class MossTTSNanoForGeneration(nn.Module):
                     if not audio_chunks:
                         waveform = event.get("waveform")
                         if waveform is not None:
-                            chunk = torch.as_tensor(waveform, dtype=torch.float32).cpu().reshape(-1)
+                            chunk = _to_mono_1d(waveform)
                             yield chunk, True
                             return
         except Exception:
@@ -391,9 +463,6 @@ class MossTTSNanoForGeneration(nn.Module):
                 },
             )
 
-        if self._lm is None or self._audio_tokenizer is None:
-            raise RuntimeError("MOSS-TTS-Nano model not loaded.  Was load_weights() called?")
-
         outputs: list[torch.Tensor] = []
         srs: list[torch.Tensor] = []
         last_chunk_flags: list[bool] = []
@@ -405,7 +474,16 @@ class MossTTSNanoForGeneration(nn.Module):
                 last_chunk_flags.append(True)
                 continue
 
-            request_key = str(info.get("_omni_req_id", "0"))
+            # Per-request key so concurrent / consecutive requests don't
+            # share a generator. ``global_request_id`` is set by the engine
+            # (see info keys ``['text', 'mode', 'prompt_audio_array',
+            # 'global_request_id', 'omni_final_stage_id', 'generated_len']``).
+            # ``_omni_req_id`` is a legacy fallback that is never set in
+            # the current engine; falling back to a constant collapses all
+            # requests onto one generator and lets a stale generator from
+            # request N replay its remaining chunks for request N+1, which
+            # surfaces as request N+1's audio matching request N's input.
+            request_key = str(info.get("global_request_id") or info.get("_omni_req_id") or id(info))
 
             # Create generator on first call for this request.
             if request_key not in self._stream_gens:

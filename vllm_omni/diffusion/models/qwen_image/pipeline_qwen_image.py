@@ -26,12 +26,16 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl_qwenimage import DistributedAutoencoderKLQwenImage
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
+from vllm_omni.diffusion.model_loader.hub_prefetch import from_pretrained_with_prefetch, prefetch_subfolders
+from vllm_omni.diffusion.models.dmd2 import DMD2PipelineMixin
+from vllm_omni.diffusion.models.interface import SupportsComponentDiscovery
 from vllm_omni.diffusion.models.qwen_image.cfg_parallel import (
     QwenImageCFGParallelMixin,
 )
 from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
     QwenImageTransformer2DModel,
 )
+from vllm_omni.diffusion.models.qwen_image.rope_utils import txt_seq_lens_from_embeds
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.utils.prompt_utils import (
@@ -43,6 +47,7 @@ from vllm_omni.diffusion.utils.size_utils import (
 from vllm_omni.diffusion.utils.tf_utils import get_transformer_config_kwargs
 
 if TYPE_CHECKING:
+    from vllm_omni.diffusion.worker.input_batch import InputBatch
     from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from vllm_omni.model_executor.model_loader.weight_utils import (
@@ -247,7 +252,13 @@ def apply_rotary_emb_qwen(
         return x_out.type_as(x)
 
 
-class QwenImagePipeline(nn.Module, QwenImageCFGParallelMixin, DiffusionPipelineProfilerMixin):
+class QwenImagePipeline(
+    nn.Module, QwenImageCFGParallelMixin, DiffusionPipelineProfilerMixin, SupportsComponentDiscovery
+):
+    _dit_modules: ClassVar[list[str]] = ["transformer"]
+    _encoder_modules: ClassVar[list[str]] = ["text_encoder"]
+    _vae_modules: ClassVar[list[str]] = ["vae"]
+
     supports_step_execution: ClassVar[bool] = True
 
     def __init__(
@@ -272,16 +283,51 @@ class QwenImagePipeline(nn.Module, QwenImageCFGParallelMixin, DiffusionPipelineP
         self.device = get_local_device()
         model = od_config.model
         # Check if model is a local path
-        local_files_only = os.path.exists(model)
+        local_files_only = os.path.isdir(model)
+
+        # See pipeline_qwen_image_edit_plus: guard against transformers v5
+        # multi-worker race on partial subfolder shard sets (Buildkite #1043).
+        qwen_subfolders = ["scheduler", "text_encoder", "vae", "tokenizer"]
+        prefetch_subfolders(
+            model,
+            qwen_subfolders,
+        )
 
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             model, subfolder="scheduler", local_files_only=local_files_only
         )
-        self.text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model, subfolder="text_encoder", local_files_only=local_files_only
-        ).to(self.device)
-        self.vae = DistributedAutoencoderKLQwenImage.from_pretrained(
-            model, subfolder="vae", local_files_only=local_files_only
+        # ``from_pretrained_with_prefetch`` re-prefetches and retries on a
+        # half-written cache (missing-shard ``OSError`` *and* the default
+        # -config size-mismatch ``RuntimeError`` that ``retry_on_missing_shard``
+        # could not recover) instead of crashing the worker.
+        self.text_encoder = from_pretrained_with_prefetch(
+            Qwen2_5_VLForConditionalGeneration.from_pretrained,
+            model,
+            subfolder="text_encoder",
+            prefetch_list=qwen_subfolders,
+            local_files_only=local_files_only,
+        )
+        # Qwen2.5-VL ships a vision tower that text-to-image does not use.
+        # Drop it while the model is still on CPU, before moving to GPU, so
+        # the vision tower never consumes GPU memory. Handle both transformers
+        # layouts: newer puts visual under .model, older puts it directly on
+        # the model.
+        visual_owner = None
+        if hasattr(self.text_encoder, "model") and hasattr(self.text_encoder.model, "visual"):
+            visual_owner = self.text_encoder.model
+        elif hasattr(self.text_encoder, "visual"):
+            visual_owner = self.text_encoder
+        if visual_owner is not None:
+            del visual_owner.visual
+        else:
+            logger.warning("Qwen-Image: vision tower not found on text encoder; skipping drop")
+        self.text_encoder = self.text_encoder.to(self.device)
+        self.vae = from_pretrained_with_prefetch(
+            DistributedAutoencoderKLQwenImage.from_pretrained,
+            model,
+            subfolder="vae",
+            prefetch_list=qwen_subfolders,
+            local_files_only=local_files_only,
         ).to(self.device)
         transformer_kwargs = get_transformer_config_kwargs(od_config.tf_model_config, QwenImageTransformer2DModel)
         self.transformer = QwenImageTransformer2DModel(
@@ -692,10 +738,8 @@ class QwenImagePipeline(nn.Module, QwenImageCFGParallelMixin, DiffusionPipelineP
         else:
             guidance = None
 
-        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
-        negative_txt_seq_lens = (
-            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
-        )
+        txt_seq_lens = txt_seq_lens_from_embeds(prompt_embeds)
+        negative_txt_seq_lens = txt_seq_lens_from_embeds(negative_prompt_embeds)
 
         return {
             "prompt_embeds": prompt_embeds,
@@ -855,54 +899,48 @@ class QwenImagePipeline(nn.Module, QwenImageCFGParallelMixin, DiffusionPipelineP
 
     def denoise_step(
         self,
-        state: "DiffusionRequestState",
+        input_batch: "InputBatch",
         **kwargs: Any,
     ) -> torch.Tensor | None:
-        """One denoise step: read from *state*, delegate to CFGParallelMixin.
+        """One denoise step: read from *input_batch*, delegate to CFGParallelMixin.
 
         Reuses ``predict_noise_maybe_with_cfg`` so that CFG-parallel,
         sequential-CFG, and no-CFG paths are handled identically to
         ``diffuse()``.
         """
+        del kwargs
         if self.interrupt:
             return None
 
-        t = state.current_timestep
+        t = input_batch.timesteps
         self._current_timestep = t
-        self.transformer.do_true_cfg = state.do_true_cfg
-
-        # Normalize timestep to [batch_size] tensor
-        if not torch.is_tensor(t):
-            t = torch.tensor(t, device=state.latents.device, dtype=state.latents.dtype)
+        self.transformer.do_true_cfg = input_batch.do_true_cfg
 
         positive_kwargs, negative_kwargs, output_slice = self._build_denoise_kwargs(
-            latents=state.latents,
+            latents=input_batch.latents,
             timestep=t,
-            guidance=state.guidance,
-            prompt_embeds=state.prompt_embeds,
-            prompt_embeds_mask=state.prompt_embeds_mask,
-            img_shapes=state.img_shapes,
-            txt_seq_lens=state.txt_seq_lens,
-            do_true_cfg=state.do_true_cfg,
-            negative_prompt_embeds=state.negative_prompt_embeds,
-            negative_prompt_embeds_mask=state.negative_prompt_embeds_mask,
-            negative_txt_seq_lens=state.negative_txt_seq_lens,
-            image_latents=state.sampling.image_latent,
+            guidance=input_batch.guidance,
+            prompt_embeds=input_batch.prompt_embeds,
+            prompt_embeds_mask=input_batch.prompt_embeds_mask,
+            img_shapes=input_batch.img_shapes,
+            txt_seq_lens=input_batch.txt_seq_lens,
+            do_true_cfg=input_batch.do_true_cfg,
+            negative_prompt_embeds=input_batch.negative_prompt_embeds,
+            negative_prompt_embeds_mask=input_batch.negative_prompt_embeds_mask,
+            negative_txt_seq_lens=input_batch.negative_txt_seq_lens,
+            image_latents=input_batch.image_latents,
             extra_transformer_kwargs={
                 "attention_kwargs": self.attention_kwargs,
                 "return_dict": False,
             },
         )
 
-        true_cfg_scale = state.sampling.true_cfg_scale or 4.0
-        cfg_normalize = state.sampling.cfg_normalize
-
         return self.predict_noise_maybe_with_cfg(
-            state.do_true_cfg,
-            true_cfg_scale,
+            input_batch.do_true_cfg,
+            input_batch.true_cfg_scale,
             positive_kwargs,
             negative_kwargs,
-            cfg_normalize,
+            input_batch.cfg_normalize,
             output_slice,
         )
 
@@ -1031,3 +1069,11 @@ class QwenImagePipeline(nn.Module, QwenImageCFGParallelMixin, DiffusionPipelineP
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+
+class QwenImageDMD2Pipeline(DMD2PipelineMixin, QwenImagePipeline):
+    """QwenImage pipeline for FastGen DMD2-distilled models."""
+
+    def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
+        super().__init__(od_config=od_config, prefix=prefix)
+        self.__init_dmd2__()

@@ -12,7 +12,12 @@ Coverage:
 import pytest
 
 from tests.helpers.mark import hardware_marks
-from tests.helpers.runtime import OmniServer, OmniServerParams, OpenAIClientHandler
+from tests.helpers.runtime import (
+    OmniServer,
+    OmniServerParams,
+    OpenAIClientHandler,
+    dummy_messages_from_mix_data,
+)
 
 pytestmark = [pytest.mark.diffusion, pytest.mark.full_model]
 
@@ -26,6 +31,19 @@ NEGATIVE_PROMPT = "blurry, low quality"
 # cross-feature compatibility more generally.
 def _get_diffusion_feature_cases(model: str):
     return [
+        # CPU offload + TP=2 (model needs TP=2)
+        pytest.param(
+            OmniServerParams(
+                model=model,
+                server_args=[
+                    "--enable-cpu-offload",
+                    "--tensor-parallel-size",
+                    "2",
+                ],
+            ),
+            id="cpu_offload",
+            marks=FOUR_CARD_FEATURE_MARKS,
+        ),
         # FP8 / Hybrid sequence parallelism
         pytest.param(
             OmniServerParams(
@@ -96,9 +114,10 @@ def _get_diffusion_feature_cases(model: str):
     indirect=True,
 )
 def test_flux2_klein(omni_server: OmniServer, openai_client: OpenAIClientHandler):
+    messages = dummy_messages_from_mix_data(content_text=POSITIVE_PROMPT)
     request_config = {
         "model": omni_server.model,
-        "messages": [{"role": "user", "content": POSITIVE_PROMPT}],
+        "messages": messages,
         "extra_body": {
             "height": 512,
             "width": 512,

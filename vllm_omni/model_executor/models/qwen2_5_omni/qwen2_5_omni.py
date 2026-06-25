@@ -81,7 +81,6 @@ class Qwen2_5OmniForConditionalGeneration(
             # Initialize thinker model (multimodal processing)
             self.thinker = init_vllm_registered_model(
                 vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "thinker"),
                 hf_config=thinker_config,
                 # Use registry architecture key
                 architectures=["Qwen2_5OmniThinkerModel"],
@@ -91,19 +90,18 @@ class Qwen2_5OmniForConditionalGeneration(
             self.token2wav = None
 
         elif self.model_stage == "talker":
-            # register the process function for the talker stage
+            multimodal_config.skip_mm_profiling = True
             self.has_preprocess = True
             self.set_custom_preprocess(self.talker_preprocess)
             self.thinker = None
             # Initialize talker model wrapper (handles projection + LM)
-            self.talker = init_vllm_registered_model(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "talker"),
-                hf_config=talker_config,
-                # Use registry architecture key
-                architectures=["Qwen2_5OmniTalkerModel"],
-            )
-            self.talker.init_multi_modal(thinker_config)
+            with self._mark_language_model(vllm_config=vllm_config):
+                self.talker = init_vllm_registered_model(
+                    vllm_config=vllm_config,
+                    prefix=maybe_prefix(prefix, "talker"),
+                    hf_config=talker_config,
+                    architectures=["Qwen2_5OmniTalkerModel"],
+                )
             self.model = self.talker
             self.token2wav = None
             # set suppress start id according to token2wav
@@ -124,18 +122,20 @@ class Qwen2_5OmniForConditionalGeneration(
             self._init_special_tokens_embeddings()
 
         elif self.model_stage == "code2wav":
+            multimodal_config.skip_mm_profiling = True
             self.thinker = None
             self.talker = None
             # Initialize token2wav (code->mel->wav) like thinker/talker
             self.token2wav_config = getattr(config, "token2wav_config", None)
             self.token2wav = None
             if self.token2wav_config is not None:
-                self.token2wav = init_vllm_registered_model(
-                    vllm_config=vllm_config,
-                    prefix=maybe_prefix(prefix, "token2wav"),
-                    hf_config=self.token2wav_config,
-                    architectures=["Qwen2_5OmniToken2WavModel"],
-                )
+                with self._mark_language_model(vllm_config=vllm_config):
+                    self.token2wav = init_vllm_registered_model(
+                        vllm_config=vllm_config,
+                        prefix=maybe_prefix(prefix, "token2wav"),
+                        hf_config=self.token2wav_config,
+                        architectures=["Qwen2_5OmniToken2WavModel"],
+                    )
             # voice resources (loaded on demand)
             self._token2wav_conds: dict[str, torch.Tensor] = {}
             self._token2wav_ref_mels: dict[str, torch.Tensor] = {}
@@ -148,6 +148,18 @@ class Qwen2_5OmniForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             (self.thinker.make_empty_intermediate_tensors) if self.model_stage == "thinker" else lambda: None
         )
+
+    def get_language_model(self) -> nn.Module:
+        """Return the language model for MoE detection in upstream load_model.
+
+        Upstream GPUModelRunner.load_model() calls get_language_model() to find
+        the MoE model inside VLM wrappers. For thinker (which IS MoE), delegate
+        to the child. For talker/code2wav (not MoE, not SupportsMultiModal),
+        return self.model directly to avoid NotImplementedError.
+        """
+        if hasattr(self.model, "get_language_model"):
+            return self.model.get_language_model()
+        return self.model
 
     # -------------------- Device utilities --------------------
     @staticmethod
@@ -197,6 +209,8 @@ class Qwen2_5OmniForConditionalGeneration(
     ) -> torch.Tensor:
         if self.model_stage == "code2wav":
             return torch.zeros_like(input_ids).reshape(-1, 1).repeat(1, self.vllm_config.model_config.get_hidden_size())
+        if self.model_stage == "talker":
+            return self.model.embed_input_ids(input_ids)
         return self.model.embed_input_ids(
             input_ids=input_ids, multimodal_embeddings=multimodal_embeddings, is_multimodal=is_multimodal
         )
@@ -351,10 +365,12 @@ class Qwen2_5OmniForConditionalGeneration(
                 )
             )
 
-            code = code[:-1] if code[-1] == TALKER_CODEC_EOS_TOKEN_ID else code
-            code = code[1:] if code[0] == TALKER_CODEC_BOS_TOKEN_ID else code
+            if code.numel() and code[-1] == TALKER_CODEC_EOS_TOKEN_ID:
+                code = code[:-1]
+            if code.numel() and code[0] == TALKER_CODEC_BOS_TOKEN_ID:
+                code = code[1:]
 
-            audio_tensor = self.generate_audio(code, voice_type)
+            audio_tensor = self.generate_audio(code, voice_type) if code.numel() else torch.zeros(0, device=code.device)
             return OmniOutput(text_hidden_states=None, multimodal_outputs={"model_outputs": audio_tensor})
 
         return OmniOutput(

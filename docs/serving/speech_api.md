@@ -5,7 +5,16 @@ vLLM-Omni provides an OpenAI-compatible API for text-to-speech (TTS) generation.
 - **Qwen3-TTS** (`Qwen/Qwen3-TTS-12Hz-*`) -- Qwen3-based TTS with CustomVoice, VoiceDesign, and Base (voice cloning) task types. Output: 24 kHz.
 - **Fish Speech S2 Pro** (`fishaudio/s2-pro`) -- Dual-AR TTS with DAC codec. Supports text-to-speech and voice cloning via reference audio. Output: 44.1 kHz.
 - **Voxtral TTS** (`mistralai/Voxtral-4B-TTS-2603`) -- AR + FlowMatching TTS with preset voices. Output: 24 kHz.
-- **VoxCPM2** (`openbmb/VoxCPM2`) -- Single-stage AR + DiT/CFM TTS. Three synthesis modes: Voice Design (text-only voice description), Controllable Cloning (reference audio + style instructions), and Hi-Fi Cloning (reference audio + transcript for tightest identity match; aka "Ultimate Cloning" in the Gradio demo). Output: 48 kHz.
+- **CosyVoice3** (`FunAudioLLM/Fun-CosyVoice3-0.5B-2512`) -- 2-stage talker + flow-matching code2wav. Voice cloning via `ref_audio` + `ref_text` (no presets). Output: 24 kHz.
+
+See the [Supported Models](#supported-models) section below for the full list, including OmniVoice, VoxCPM2, and MOSS-TTS-Nano.
+
+!!! tip "Deployment recipes"
+    TTS deployment recipes are published at
+    [recipes.vllm.ai](https://recipes.vllm.ai) (e.g.
+    [Qwen3-TTS](https://recipes.vllm.ai/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice),
+    [Higgs-Audio v3](https://recipes.vllm.ai/bosonai/higgs-audio-v3-tts-4b)).
+    The in-repo runbooks live under [`recipes/`](https://github.com/vllm-project/vllm-omni/tree/main/recipes).
 
 Each server instance runs a single model (specified at startup via `vllm serve <model> --omni`).
 
@@ -28,8 +37,9 @@ vllm serve fishaudio/s2-pro --omni --port 8091
 # Voxtral TTS
 vllm serve mistralai/Voxtral-4B-TTS-2603 --omni --port 8091
 
-# VoxCPM2
-vllm serve openbmb/VoxCPM2 --omni --port 8091
+# CosyVoice3 (voice cloning only — supply ref_audio + ref_text per request)
+vllm serve FunAudioLLM/Fun-CosyVoice3-0.5B-2512 \
+    --omni --port 8091 --trust-remote-code
 ```
 
 ### Generate Speech
@@ -111,9 +121,10 @@ Content-Type: application/json
 | `instructions` | string | "" | Voice style/emotion instructions |
 | `max_new_tokens` | integer | 2048 | Maximum tokens to generate |
 | `initial_codec_chunk_frames` | integer | null | Per-request initial chunk size override for TTFA tuning. When null, IC is computed dynamically based on server load. |
+| `non_streaming_mode` | bool | null | Qwen3-TTS prompt construction mode override. Does not affect HTTP response streaming or async-chunk pipelining. When null, Qwen3-TTS uses model defaults: Base=false, CustomVoice/VoiceDesign=true. |
 | `stream` | bool | false | Stream raw PCM chunks as they are decoded (requires `response_format="pcm"`) |
 
-**Supported languages:** Auto, Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian
+**Supported languages:** Only applicable to Qwen3-TTS. Derived from the model configuration (`talker_config.codec_language_id` in the checkpoint's `config.json`), plus `Auto`, which is always accepted. Official Qwen3-TTS checkpoints support: Auto, Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian.
 
 #### Voice Clone Parameters (Base task)
 
@@ -122,16 +133,6 @@ Content-Type: application/json
 | `ref_audio` | string | null | Reference audio (HTTP URL, base64 data URL, or `file://` URI with `--allowed-local-media-path`) |
 | `ref_text` | string | null | Transcript of reference audio |
 | `x_vector_only_mode` | bool | null | Use speaker embedding only (no ICL) |
-
-#### VoxCPM2-specific Parameters
-
-VoxCPM2 reuses the shared `extra_params: dict` field (introduced in #2338 for Voxtral TTS) for model-specific knobs rather than adding new top-level fields:
-
-| Key (inside `extra_params`) | Type | Default | Description |
-|-----------------------------|------|---------|-------------|
-| `cfg_value` | float | 2.0 | Classifier-free guidance scale for the CFM decoder. Range `0.1`–`10.0`; typical useful range is `1.5`–`3.0`. Higher values track the text more strictly at the cost of naturalness. |
-
-Send as e.g. `{"input": "...", "extra_params": {"cfg_value": 2.5}}`. VoxCPM2 also reuses the standard `instructions`, `ref_audio`, and `ref_text` fields, see the mode table below for how they combine.
 
 ### Response Format
 
@@ -339,7 +340,8 @@ curl -X POST http://localhost:8091/v1/audio/speech \
         "input": "Hello, this is a cloned voice",
         "task_type": "Base",
         "ref_audio": "https://example.com/reference.wav",
-        "ref_text": "Original transcript of the reference audio"
+        "ref_text": "Original transcript of the reference audio",
+        "non_streaming_mode": true
     }' --output cloned.wav
 ```
 
@@ -372,6 +374,69 @@ curl -X POST http://localhost:8091/v1/audio/speech \
     }' --output cloned.wav
 ```
 
+### Voice Storage & Caching
+
+Uploaded voices are persisted to disk as a single `.safetensors` file per voice
+(audio samples + metadata — name, consent, ref_text, sample_rate, created_at —
+in the file header). On server restart the directory is scanned and all
+previously uploaded voices are restored automatically, so uploads survive
+process restarts.
+
+Uploading an existing name overwrites the previous entry (a warning is logged).
+
+Feature extraction artifacts (ref_code, speaker_embedding, DAC codes, etc.)
+are cached in-process with a shared LRU so repeated requests with the same
+`voice=...` skip the extraction pipeline. The cache is a true singleton across
+all TTS model types; deleting a voice invalidates every model-type slot at
+once.
+
+### Precomputed Custom Voices
+
+Qwen3-TTS Base and VoxCPM2 can load offline-precomputed voices at startup.
+Generate a directory containing `custom_voice_manifest.json` plus one
+`.safetensors` file per voice, then set the pipeline-wide deploy config field:
+
+```yaml
+custom_voice_dir: /path/to/custom_voices
+```
+
+Qwen3-TTS profiles are created with:
+
+```bash
+python examples/online_serving/text_to_speech/qwen3_tts/precompute_custom_voice.py \
+  --model Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+  --voice-name alice \
+  --ref-audio /path/to/reference.wav \
+  --ref-text "Original transcript of the reference audio" \
+  --mode icl \
+  --output-dir /path/to/custom_voices
+```
+
+VoxCPM2 profiles are created with:
+
+```bash
+python examples/online_serving/text_to_speech/voxcpm2/precompute_custom_voice.py \
+  --model openbmb/VoxCPM2 \
+  --voice-name alice \
+  --ref-audio /path/to/reference.wav \
+  --mode ref_continuation \
+  --prompt-text "Original transcript of the reference audio" \
+  --output-dir /path/to/custom_voices
+```
+
+Only profiles whose safetensors payload can be loaded and validated are exposed
+by `GET /v1/audio/voices`. Valid precomputed voices can be used in
+`POST /v1/audio/speech` by passing `voice="alice"` without `ref_audio`.
+
+**Configuration (environment variables):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SPEAKER_SAMPLES_DIR` | `~/.cache/vllm-omni/speakers` | Directory for persisted uploaded speakers (`.safetensors` files). |
+| `SPEAKER_MAX_UPLOADED` | `1000` | Maximum number of uploaded speakers kept on disk. Upload requests past the cap return 400. |
+
+The in-memory LRU has a fixed 512 MiB byte budget.
+
 ## Batch Speech Generation
 
 The batch endpoint synthesizes multiple texts in a single request, returning all results as JSON with base64-encoded audio.
@@ -398,6 +463,7 @@ Content-Type: application/json
 | `ref_audio` | string | null | Default reference audio (Base task) |
 | `ref_text` | string | null | Default reference transcript (Base task) |
 | `max_new_tokens` | integer | null | Default max tokens |
+| `non_streaming_mode` | bool | null | Default Qwen3-TTS prompt construction mode override. Does not affect HTTP response streaming or async-chunk pipelining. When null, Qwen3-TTS uses model defaults: Base=false, CustomVoice/VoiceDesign=true. |
 
 Each item in the `items` array requires only `input` (the text). All other fields are optional and override the batch-level defaults when set:
 
@@ -413,6 +479,7 @@ Each item in the `items` array requires only `input` (the text). All other field
 | `ref_audio` | string | Override reference audio |
 | `ref_text` | string | Override reference transcript |
 | `max_new_tokens` | integer | Override max tokens |
+| `non_streaming_mode` | bool | Override Qwen3-TTS prompt construction mode. Does not affect HTTP response streaming or async-chunk pipelining. When null, inherits the batch-level value (then the model default). |
 
 ### Response Format
 
@@ -520,16 +587,18 @@ for result in response.json()["results"]:
 
 All items are fanned out to `generate()` concurrently. The engine's stage worker automatically batches them up to the configured `max_batch_size` and queues the rest — no client-side throttling needed.
 
-For best throughput, set both stages' `max_num_seqs` to ≥4 via `--stage-overrides`:
+For best throughput, set both stages' `max_num_seqs` above 1 via `--stage-overrides`. On the current Qwen3-TTS CustomVoice benchmark, stage 1 performed best at `max_num_seqs: 10`:
 
 ```bash
 vllm serve Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
     --omni --port 8091 --trust-remote-code --enforce-eager \
-    --stage-overrides '{"0":{"max_num_seqs":4,"gpu_memory_utilization":0.2},
-                        "1":{"max_num_seqs":4,"gpu_memory_utilization":0.2}}'
+    --stage-overrides '{"0":{"max_num_seqs":10,"gpu_memory_utilization":0.2},
+                        "1":{"max_num_seqs":10,"gpu_memory_utilization":0.2}}'
 ```
 
-The bundled `qwen3_tts.yaml` uses `max_num_seqs: 1` (single request) on both stages. Bumping to 4 yields roughly 4× throughput on the talker and lets stage 1 batch chunks across in-flight requests.
+The bundled `qwen3_tts.yaml` uses a multi-request default and lets stage 1 batch chunks across in-flight requests. For latency-sensitive deployments, avoid forcing stage 1 back to `max_num_seqs: 1`; benchmark before reducing it below `10`.
+
+The bundled config also sets `initial_codec_chunk_frames: 1`. This emits only the first audio chunk early for lower TTFA, then returns to the normal `codec_chunk_frames` window so Code2Wav does not repeatedly decode tiny overlapping chunks.
 
 ## Supported Models
 
@@ -549,7 +618,7 @@ The bundled `qwen3_tts.yaml` uses `max_num_seqs: 1` (single request) on both sta
 |-------|-------------|
 | `fishaudio/s2-pro` | 4B dual-AR TTS with DAC codec (44.1 kHz). Supports text-to-speech and voice cloning. |
 
-Fish Speech uses `ref_audio` and `ref_text` for voice cloning (no `task_type` needed). The `voice` field should be set to `"default"`. See the [Fish Speech online serving example](../user_guide/examples/online_serving/fish_speech.md) for details.
+Fish Speech uses `ref_audio` and `ref_text` for voice cloning (no `task_type` needed). The `voice` field should be set to `"default"`. See the [Fish Speech section of the online TTS hub](../user_guide/examples/online_serving/text_to_speech.md#fish-speech-s2-pro) for details.
 
 ### Voxtral TTS
 
@@ -557,63 +626,29 @@ Fish Speech uses `ref_audio` and `ref_text` for voice cloning (no `task_type` ne
 |-------|-------------|
 | `mistralai/Voxtral-4B-TTS-2603` | 3B AR + FlowMatching TTS. Supports text-to-speech with preset voices. |
 
+### CosyVoice3
+
+| Model | Description |
+|-------|-------------|
+| `FunAudioLLM/Fun-CosyVoice3-0.5B-2512` | Voice cloning from `ref_audio` + `ref_text`. No built-in voice presets — upload a voice or pass `ref_audio`/`ref_text` per request. |
+
+### OmniVoice
+
+| Model | Description |
+|-------|-------------|
+| `k2-fsa/OmniVoice` | Pure-diffusion TTS. Supports voice cloning via `ref_audio` (with optional `ref_text`); no built-in voice presets. |
+
 ### VoxCPM2
 
 | Model | Description |
 |-------|-------------|
-| `openbmb/VoxCPM2` | Single-stage AR + DiT/CFM TTS. 48 kHz output, multilingual (primary EN/ZH, usable cross-lingual identity transfer via Ultimate Cloning). |
+| `openbmb/VoxCPM2` | TTS + voice cloning with built-in speaker presets and uploaded-voice support. Accepts `voice` (preset or uploaded) or `ref_audio` + optional `ref_text`. |
 
-VoxCPM2 exposes three synthesis modes through the same `/v1/audio/speech` endpoint — the mode is inferred from which fields are present in the request.
+### MOSS-TTS-Nano
 
-| Mode | Required fields | Optional fields | Notes |
-|------|-----------------|-----------------|-------|
-| **Voice Design** | `input` | `instructions`, `extra_params.cfg_value` | Synthesize a voice from a text description alone. `instructions` is prepended to the target text as `(instructions)input` following `voxcpm.cli.build_final_text`. Both English and Chinese instructions are supported. |
-| **Controllable Cloning** | `input`, `ref_audio` | `instructions`, `extra_params.cfg_value` | Clone the reference speaker's timbre; use `instructions` to steer emotion, pace, or other style attributes while preserving identity. |
-| **Hi-Fi Cloning** | `input`, `ref_audio`, `ref_text` | `extra_params.cfg_value` | The model treats `ref_audio` + `ref_text` as a spoken prefix and continues from it. Reproduces every vocal nuance of the reference. Per the canonical VoxCPM2 docs, when Hi-Fi mode is enabled the control instruction is ignored; the server drops `instructions` in this mode automatically if present. |
-
-Reference audio guidelines: 16 kHz mono, at least 5 seconds recommended for a good clone (1 second hard minimum, 30 seconds hard maximum). Clean, non-reverberant speech; the same `ref_audio` can be reused across Controllable and Hi-Fi modes.
-
-Inline non-verbal tags in `input` are passed through as regular text and recognized by the model when present (for example `[laughing]`, `[sigh]`, `[Uhm]`, `[Question-ah]`). See the upstream [VoxCPM2 cookbook](https://voxcpm.readthedocs.io/en/latest/cookbook.html) for the full tag list and usage tips.
-
-**Examples**
-
-Voice Design (no reference, pure text description):
-
-```bash
-curl -X POST http://localhost:8091/v1/audio/speech \
-    -H "Content-Type: application/json" \
-    -d '{
-        "input": "Hello everyone. Today I want to talk about open source AI.",
-        "instructions": "A warm young woman with a gentle, friendly voice",
-        "extra_params": {"cfg_value": 2.5}
-    }' --output voice_design.wav
-```
-
-Controllable Cloning (reference audio + style instructions):
-
-```bash
-curl -X POST http://localhost:8091/v1/audio/speech \
-    -H "Content-Type: application/json" \
-    -d '{
-        "input": "Good morning, let me tell you a short story.",
-        "ref_audio": "https://example.com/reference.wav",
-        "instructions": "Warm storyteller, slow cadence, dramatic pauses",
-        "extra_params": {"cfg_value": 2.5}
-    }' --output controllable_cloning.wav
-```
-
-Hi-Fi Cloning (reference audio + transcript; tightest identity):
-
-```bash
-curl -X POST http://localhost:8091/v1/audio/speech \
-    -H "Content-Type: application/json" \
-    -d '{
-        "input": "Welcome everyone. I will give a brief update on the project today.",
-        "ref_audio": "https://example.com/reference.wav",
-        "ref_text": "Transcript of what the reference speaker is saying in the reference clip.",
-        "extra_params": {"cfg_value": 2.5}
-    }' --output ultimate_cloning.wav
-```
+| Model | Description |
+|-------|-------------|
+| `OpenMOSS-Team/MOSS-TTS-Nano` | Voice cloning only. Requires `ref_audio` (or an uploaded `voice`); no built-in voice presets. `ref_text` is accepted but ignored — upstream's `voice_clone` mode does not consume a transcript. |
 
 ## Error Responses
 

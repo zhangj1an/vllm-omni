@@ -21,10 +21,10 @@ from message_convert import (
     to_prompt,
 )
 from vllm import SamplingParams
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from vllm_omni.entrypoints.omni import Omni
 from vllm_omni.inputs.data import OmniTokensPrompt
+from vllm_omni.utils.tracking_parser import TrackingArgumentParser
 
 SEED = 42
 
@@ -342,7 +342,7 @@ def main(args):
 
 
 def parse_args():
-    parser = FlexibleArgumentParser(description="Demo on using vLLM for offline inference with audio language models")
+    parser = TrackingArgumentParser(description="Demo on using vLLM for offline inference with audio language models")
     parser.add_argument(
         "--model-name",
         "-m",

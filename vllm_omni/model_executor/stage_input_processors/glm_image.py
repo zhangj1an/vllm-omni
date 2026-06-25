@@ -4,6 +4,7 @@
 
 import math
 import time
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -23,7 +24,7 @@ def _has_source_image(mm_data: Any) -> bool:
     - `img2img`: legacy single-image key
     - `images`: list or single image
     """
-    if not isinstance(mm_data, dict):
+    if not isinstance(mm_data, Mapping):
         return False
     if mm_data.get("image") is not None:
         return True
@@ -35,7 +36,7 @@ def _has_source_image(mm_data: Any) -> bool:
 
 def _first_source_image(mm_data: Any) -> Any:
     """Get first source image from normalized multimodal keys."""
-    if not isinstance(mm_data, dict):
+    if not isinstance(mm_data, Mapping):
         return None
 
     image = mm_data.get("image")
@@ -212,25 +213,20 @@ def _parse_generated_tokens(
 
 
 def ar2diffusion(
-    stage_list: list[Any],
-    engine_input_source: list[int],
+    source_outputs: list[Any],
     prompt: OmniTokensPrompt | TextPrompt | list | None = None,
     requires_multimodal_data: bool = False,
+    streaming_context: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Process AR stage outputs to create Diffusion stage inputs."""
+    """Process AR stage outputs to create Diffusion stage inputs.
+
+    This processor accepts the stage-pool transition interface:
+    ``ar2diffusion(source_outputs, prompt, requires_multimodal_data)``.
+    """
+    del streaming_context
+
     _t_total = time.perf_counter()
-
-    if not engine_input_source:
-        raise ValueError("engine_input_source cannot be empty")
-
-    source_stage_id = engine_input_source[0]
-    if source_stage_id >= len(stage_list):
-        raise IndexError(f"Invalid stage_id: {source_stage_id}")
-
-    if stage_list[source_stage_id].engine_outputs is None:
-        raise RuntimeError(f"Stage {source_stage_id} has no outputs yet")
-
-    ar_outputs = stage_list[source_stage_id].engine_outputs
+    ar_outputs = source_outputs
     diffusion_inputs = []
 
     # Normalize prompt to list
@@ -290,7 +286,7 @@ def ar2diffusion(
 
         if hasattr(ar_output, "multimodal_output") and ar_output.multimodal_output:
             mm_output = ar_output.multimodal_output
-            if isinstance(mm_output, dict) and mm_output.get("ids", {}).get("prior_image") is not None:
+            if isinstance(mm_output, Mapping) and mm_output.get("ids", {}).get("prior_image") is not None:
                 is_i2i = True
         _dt_mode = (time.perf_counter() - _t_mode) * 1000
 
@@ -327,7 +323,7 @@ def ar2diffusion(
         # Check ar_output (RequestOutput) for multimodal_output - this is the correct location
         if hasattr(ar_output, "multimodal_output") and ar_output.multimodal_output:
             mm_output = ar_output.multimodal_output
-            if isinstance(mm_output, dict):
+            if isinstance(mm_output, Mapping):
                 raw_prior_image_ids = mm_output.get("ids", {}).get("prior_image")
                 if raw_prior_image_ids is not None:
                     # Handle different formats:
@@ -353,7 +349,7 @@ def ar2diffusion(
             if hasattr(output, "multimodal_output") and output.multimodal_output:
                 mm_output = output.multimodal_output
                 logger.debug(f"[ar2diffusion] Request {i}: found multimodal_output on CompletionOutput (fallback)")
-                if isinstance(mm_output, dict):
+                if isinstance(mm_output, Mapping):
                     raw_prior_image_ids = mm_output.get("ids", {}).get("prior_image")
                     if raw_prior_image_ids is not None:
                         if isinstance(raw_prior_image_ids, torch.Tensor):

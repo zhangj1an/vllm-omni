@@ -33,6 +33,20 @@ def test_tensor_serialization():
     assert torch.equal(tensor, deserialized)
 
 
+def test_noncontiguous_tensor_serialization():
+    """Test torch.Tensor serialization for strided views."""
+    import torch
+
+    tensor = torch.arange(40, dtype=torch.long).reshape(4, 10).transpose(0, 1)
+    assert not tensor.is_contiguous()
+    assert tensor.stride(-1) != 1
+
+    serialized = OmniSerializer.serialize({"codes": tensor})
+    deserialized = OmniSerializer.deserialize(serialized)
+
+    assert torch.equal(tensor, deserialized["codes"])
+
+
 def test_ndarray_serialization():
     """Test numpy.ndarray serialization."""
     import numpy as np
@@ -61,18 +75,21 @@ def test_create_unknown_connector():
 
 @pytest.fixture
 def shm_connector():
-    config = {"shm_threshold_bytes": 100}  # Small threshold for testing
+    config = {"shm_threshold_bytes": 100, "inline_small_payloads": True}
     return SharedMemoryConnector(config)
 
 
 def test_put_get_inline(shm_connector):
-    """Test transfer for small data (currently always uses SHM)."""
+    """Test inline transfer for small data."""
     data = {"small": "data"}
 
     success, size, metadata = shm_connector.put("stage_0", "stage_1", "req_1", data)
     assert success is True
-    assert "shm" in metadata
+    assert "inline_bytes" in metadata
+    assert "shm" not in metadata
     assert "size" in metadata
+    assert shm_connector._metrics["inline_writes"] == 1
+    assert shm_connector._metrics["shm_writes"] == 0
 
     # Retrieve
     retrieved_data, ret_size = shm_connector.get("stage_0", "stage_1", "req_1", metadata)

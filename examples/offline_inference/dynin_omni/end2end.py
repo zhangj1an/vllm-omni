@@ -878,8 +878,8 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--stage-config-path",
         type=str,
-        default=str(repo_root / "vllm_omni/model_executor/stage_configs/dynin_omni.yaml"),
-        help="Path to stage config yaml.",
+        default=str(repo_root / "vllm_omni/deploy/dynin_omni.yaml"),
+        help="Path to deploy config yaml.",
     )
     parser.add_argument(
         "--dynin-config-path",
@@ -970,9 +970,6 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument("--vq-model-audio-local-files-only", action=argparse.BooleanOptionalAction, default=None)
 
     parser.add_argument("--disable-hf-xet", action=argparse.BooleanOptionalAction, default=True)
-    from vllm_omni.engine.arg_utils import nullify_stage_engine_defaults
-
-    nullify_stage_engine_defaults(parser)
     return parser.parse_args()
 
 

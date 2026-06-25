@@ -19,15 +19,28 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import ColumnParallelLinear, QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import (
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+)
+from vllm.sequence import IntermediateTensors
 
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 from vllm_omni.diffusion.attention.layer import Attention
+from vllm_omni.diffusion.distributed.parallel_state import (
+    get_pipeline_parallel_world_size,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
+)
 from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelInput,
     SequenceParallelOutput,
 )
-from vllm_omni.diffusion.forward_context import get_forward_context
+from vllm_omni.diffusion.forward_context import build_local_sp_padding_mask, get_forward_context
 from vllm_omni.diffusion.layers.adalayernorm import AdaLayerNorm
 from vllm_omni.diffusion.layers.norm import LayerNorm, RMSNorm
 from vllm_omni.diffusion.layers.rope import RotaryEmbeddingWan
@@ -56,8 +69,7 @@ class DistributedRMSNorm(nn.Module):
         local_count = x.shape[-1]
 
         if tp_size > 1:
-            global_sum_sq = local_sum_sq.clone()
-            tensor_model_parallel_all_reduce(global_sum_sq)
+            global_sum_sq = tensor_model_parallel_all_reduce(local_sum_sq)
             global_count = local_count * tp_size
         else:
             global_sum_sq = local_sum_sq
@@ -72,7 +84,16 @@ class DistributedRMSNorm(nn.Module):
 class ColumnParallelGELU(nn.Module):
     """Column parallel linear with GELU activation."""
 
-    def __init__(self, dim_in: int, dim_out: int, *, approximate: str = "tanh", bias: bool = True):
+    def __init__(
+        self,
+        dim_in: int,
+        dim_out: int,
+        *,
+        approximate: str = "tanh",
+        bias: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.proj = ColumnParallelLinear(
             dim_in,
@@ -80,6 +101,8 @@ class ColumnParallelGELU(nn.Module):
             bias=bias,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj" if prefix else "proj",
         )
         self.approximate = approximate
 
@@ -100,12 +123,21 @@ class WanFeedForward(nn.Module):
         inner_dim: int,
         dim_out: int | None = None,
         bias: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         dim_out = dim_out or dim
 
         # ColumnParallel: scatter to each tp_rank
-        self.net_0 = ColumnParallelGELU(dim, inner_dim, approximate="tanh", bias=bias)
+        self.net_0 = ColumnParallelGELU(
+            dim,
+            inner_dim,
+            approximate="tanh",
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.net_0" if prefix else "net_0",
+        )
         # Placeholder for weight loading compatibility
         self.net_1 = nn.Identity()
         # RowParallel: gather from each tp_rank
@@ -115,6 +147,8 @@ class WanFeedForward(nn.Module):
             bias=bias,
             input_is_parallel=True,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.net_2" if prefix else "net_2",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -329,6 +363,8 @@ class WanSelfAttention(nn.Module):
         head_dim: int,
         eps: float = 1e-5,
         dropout: float = 0.0,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -343,6 +379,8 @@ class WanSelfAttention(nn.Module):
             head_size=head_dim,
             total_num_heads=num_heads,
             bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_qkv" if prefix else "to_qkv",
         )
 
         self.num_heads = self.to_qkv.num_heads
@@ -363,8 +401,12 @@ class WanSelfAttention(nn.Module):
             bias=True,
             input_is_parallel=True,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_out" if prefix else "to_out",
         )
         self.dropout = nn.Dropout(dropout)
+
+        self.rotary_embedding = RotaryEmbeddingWan(is_neox_style=False, half_head_dim=True)
 
         # Unified attention layer
         self.attn = Attention(
@@ -373,13 +415,15 @@ class WanSelfAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             softmax_scale=1.0 / (head_dim**0.5),
             causal=False,
+            role="self",
+            prefix=prefix,
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
-        attn_mask: torch.Tensor | None = None,
+        attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         # Fused QKV projection
         qkv, _ = self.to_qkv(hidden_states)
@@ -399,15 +443,9 @@ class WanSelfAttention(nn.Module):
 
         # Apply rotary embeddings
         if rotary_emb is not None:
-            self.rotary_embedding = RotaryEmbeddingWan(is_neox_style=False, half_head_dim=True)
             freqs_cos, freqs_sin = rotary_emb
             query = self.rotary_embedding(query, freqs_cos, freqs_sin)
             key = self.rotary_embedding(key, freqs_cos, freqs_sin)
-
-        # Create attention metadata if mask is provided
-        attn_metadata = None
-        if attn_mask is not None:
-            attn_metadata = AttentionMetadata(attn_mask=attn_mask)
 
         # Compute attention using unified attention layer
         hidden_states = self.attn(query, key, value, attn_metadata)
@@ -435,6 +473,8 @@ class WanCrossAttention(nn.Module):
         eps: float = 1e-5,
         dropout: float = 0.0,
         added_kv_proj_dim: int | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -451,6 +491,8 @@ class WanCrossAttention(nn.Module):
             bias=True,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_q" if prefix else "to_q",
         )
 
         # Separate K and V projections for cross-attention
@@ -460,6 +502,8 @@ class WanCrossAttention(nn.Module):
             bias=True,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_k" if prefix else "to_k",
         )
 
         self.to_v = ColumnParallelLinear(
@@ -468,6 +512,8 @@ class WanCrossAttention(nn.Module):
             bias=True,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_v" if prefix else "to_v",
         )
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -491,6 +537,8 @@ class WanCrossAttention(nn.Module):
                 bias=True,
                 gather_output=False,
                 return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.add_k_proj" if prefix else "add_k_proj",
             )
             self.add_v_proj = ColumnParallelLinear(
                 added_kv_proj_dim,
@@ -498,6 +546,8 @@ class WanCrossAttention(nn.Module):
                 bias=True,
                 gather_output=False,
                 return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.add_v_proj" if prefix else "add_v_proj",
             )
             if get_tensor_model_parallel_world_size() > 1:
                 self.norm_added_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
@@ -515,6 +565,8 @@ class WanCrossAttention(nn.Module):
             bias=True,
             input_is_parallel=True,
             return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_out" if prefix else "to_out",
         )
         self.dropout = nn.Dropout(dropout)
 
@@ -525,13 +577,21 @@ class WanCrossAttention(nn.Module):
             num_kv_heads=self.num_heads,
             softmax_scale=1.0 / (head_dim**0.5),
             causal=False,
+            role="cross",
+            qkv_layout="BSND",
+            prefix=prefix,
             skip_sequence_parallel=True,
+            # Wan2.2 cross-attn operates on short text-encoder sequences; per-block
+            # FP8 quant offers no perf win and degrades quality. Opt out until a
+            # dedicated quant backend handles this case.
+            disable_kv_quant=True,
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
+        attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         # Handle I2V case where encoder_hidden_states contains both image and text
         encoder_hidden_states_img = None
@@ -565,12 +625,12 @@ class WanCrossAttention(nn.Module):
             key_img = key_img.unflatten(2, (self.num_heads, self.head_dim))
             value_img = value_img.unflatten(2, (self.num_heads, self.head_dim))
 
-            hidden_states_img = self.attn(query, key_img, value_img)
+            hidden_states_img = self.attn(query, key_img, value_img, attn_metadata)
             hidden_states_img = hidden_states_img.flatten(2, 3)
             hidden_states_img = hidden_states_img.type_as(query)
 
         # Main cross-attention using unified attention layer
-        hidden_states = self.attn(query, key, value)
+        hidden_states = self.attn(query, key, value, attn_metadata)
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
 
@@ -599,6 +659,8 @@ class WanTransformerBlock(nn.Module):
         eps: float = 1e-6,
         added_kv_proj_dim: int | None = None,
         cross_attn_norm: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -611,6 +673,8 @@ class WanTransformerBlock(nn.Module):
             num_heads=num_heads,
             head_dim=head_dim,
             eps=eps,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn1" if prefix else "attn1",
         )
 
         # 2. Cross-attention
@@ -620,11 +684,19 @@ class WanTransformerBlock(nn.Module):
             head_dim=head_dim,
             eps=eps,
             added_kv_proj_dim=added_kv_proj_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn2" if prefix else "attn2",
         )
         self.norm2 = LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
 
         # 3. Feed-forward
-        self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim)
+        self.ffn = WanFeedForward(
+            dim=dim,
+            inner_dim=ffn_dim,
+            dim_out=dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.ffn" if prefix else "ffn",
+        )
         self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
 
         # Scale-shift table for modulation
@@ -657,12 +729,13 @@ class WanTransformerBlock(nn.Module):
 
         # 1. Self-attention
         norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa).type_as(hidden_states)
-        attn_output = self.attn1(norm_hidden_states, rotary_emb, hidden_states_mask)
+        self_attn_metadata = AttentionMetadata(attn_mask=hidden_states_mask)
+        attn_output = self.attn1(norm_hidden_states, rotary_emb, self_attn_metadata)
         hidden_states = (hidden_states + attn_output * gate_msa).type_as(hidden_states)
 
         # 2. Cross-attention
         norm_hidden_states = self.norm2(hidden_states).type_as(hidden_states)
-        attn_output = self.attn2(norm_hidden_states, encoder_hidden_states)
+        attn_output = self.attn2(norm_hidden_states, encoder_hidden_states, None)
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
@@ -726,7 +799,7 @@ class WanTransformer3DModel(nn.Module):
     # The _sp_plan specifies sharding/gathering at module boundaries:
     # - rope: Split both RoPE outputs (freqs_cos, freqs_sin) via split_output=True
     # - timestep_proj_prepare: Split timestep_proj for TI2V models (4D tensor)
-    # - blocks.0: Split hidden_states input at the first transformer block
+    # - _sp_shard_point: Split hidden_states before CacheDiT-wrapped transformer blocks
     # - proj_out: Gather outputs after the final projection layer
     #
     # Note: _sp_plan corresponds to diffusers' _cp_plan (Context Parallelism)
@@ -749,10 +822,10 @@ class WanTransformer3DModel(nn.Module):
                 split_dim=1, expected_dims=4, split_output=True, auto_pad=True
             ),  # [B, seq, 6, dim]
         },
-        # Shard hidden_states at first transformer block input
-        # (after patch_embedding + flatten + transpose)
-        "blocks.0": {
-            "hidden_states": SequenceParallelInput(split_dim=1, expected_dims=3, auto_pad=True),  # [B, seq, dim]
+        # Shard hidden_states before entering transformer blocks. This keeps
+        # CacheDiT block wrappers aligned with the local SP shard.
+        "_sp_shard_point": {
+            0: SequenceParallelInput(split_dim=1, expected_dims=3, split_output=True, auto_pad=True),
         },
         # Shard output scale/shift for TI2V (3D); T2V outputs 2D and skips sharding
         "output_scale_shift_prepare": {
@@ -780,9 +853,9 @@ class WanTransformer3DModel(nn.Module):
         added_kv_proj_dim: int | None = None,
         rope_max_seq_len: int = 1024,
         pos_embed_seq_len: int | None = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
-
         # Store config for compatibility
         self.config = type(
             "Config",
@@ -809,14 +882,23 @@ class WanTransformer3DModel(nn.Module):
         inner_dim = num_attention_heads * attention_head_dim
         out_channels = out_channels or in_channels
 
+        if get_pipeline_parallel_world_size() == 0 and not is_pipeline_first_stage():
+            raise RuntimeError(
+                "`initialize_model_parallel()` must be called before constructing `WanTransformer3DModel`"
+            )
+
         # 1. Patch & position embedding
         self.rope = WanRotaryPosEmbed(attention_head_dim, patch_size, rope_max_seq_len)
-        self.patch_embedding = Conv3dLayer(
-            in_channels=in_channels,
-            out_channels=inner_dim,
-            kernel_size=patch_size,
-            stride=patch_size,
-        )
+        # Patch embedding only on first PP stage; other stages receive hidden_states via P2P
+        if is_pipeline_first_stage():
+            self.patch_embedding = Conv3dLayer(
+                in_channels=in_channels,
+                out_channels=inner_dim,
+                kernel_size=patch_size,
+                stride=patch_size,
+            )
+        else:
+            self.patch_embedding = PPMissingLayer()
 
         # 2. Condition embeddings
         self.condition_embedder = WanTimeTextImageEmbedding(
@@ -828,21 +910,40 @@ class WanTransformer3DModel(nn.Module):
             pos_embed_seq_len=pos_embed_seq_len,
         )
 
-        # 3. Transformer blocks
-        self.blocks = nn.ModuleList(
-            [
-                WanTransformerBlock(inner_dim, ffn_dim, num_attention_heads, eps, added_kv_proj_dim, cross_attn_norm)
-                for _ in range(num_layers)
-            ]
+        # 3. Transformer blocks — partitioned across PP stages via vLLM's `make_layers`.
+        # It computes the [start_layer, end_layer) slice for this rank and fills the remaining slots
+        # with PPMissingLayer so that weight names stay globally consistent.
+        self.start_layer, self.end_layer, self.blocks = make_layers(
+            num_layers,
+            lambda prefix: WanTransformerBlock(
+                inner_dim,
+                ffn_dim,
+                num_attention_heads,
+                eps,
+                added_kv_proj_dim,
+                cross_attn_norm,
+                quant_config=quant_config,
+                prefix=prefix,
+            ),
+            prefix="blocks",
         )
 
-        # 4. Output norm & projection
-        self.norm_out = AdaLayerNorm(inner_dim, elementwise_affine=False, eps=eps)
-        self.proj_out = nn.Linear(inner_dim, out_channels * math.prod(patch_size))
+        # 4. Output norm & projection — only on the last PP stage
+        if is_pipeline_last_stage():
+            self.norm_out = AdaLayerNorm(inner_dim, elementwise_affine=False, eps=eps)
+            self.proj_out = nn.Linear(inner_dim, out_channels * math.prod(patch_size))
+        else:
+            self.norm_out, self.proj_out = PPMissingLayer(), PPMissingLayer()
 
         # SP helper modules
         self.timestep_proj_prepare = TimestepProjPrepare()
-        self.output_scale_shift_prepare = OutputScaleShiftPrepare(inner_dim)
+        self._sp_shard_point = nn.Identity()
+        if is_pipeline_last_stage():
+            self.output_scale_shift_prepare = OutputScaleShiftPrepare(inner_dim)
+        else:
+            self.output_scale_shift_prepare = PPMissingLayer()
+
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(["hidden_states"], inner_dim)
 
         # ROPE helper
         self._cached_rope_emb = None
@@ -859,9 +960,10 @@ class WanTransformer3DModel(nn.Module):
         timestep: torch.LongTensor,
         encoder_hidden_states: torch.Tensor,
         encoder_hidden_states_image: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
         return_dict: bool = True,
         attention_kwargs: dict[str, Any] | None = None,
-    ) -> torch.Tensor | Transformer2DModelOutput:
+    ) -> torch.Tensor | Transformer2DModelOutput | IntermediateTensors:
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
         p_t, p_h, p_w = self.config.patch_size
         post_patch_num_frames = num_frames // p_t
@@ -878,18 +980,26 @@ class WanTransformer3DModel(nn.Module):
             self._hidden_states_shape = hidden_states.shape
             self._cached_rope_emb = rotary_emb
 
-        # Patch embedding and flatten to sequence
-        # (hidden_states is sharded at blocks.0 input by _sp_plan)
-        hidden_states = self.patch_embedding(hidden_states)
-        hidden_states = hidden_states.flatten(2).transpose(1, 2)
+        if is_pipeline_first_stage():
+            # Patch embedding and flatten to sequence. SP sharding happens at
+            # _sp_shard_point so downstream block wrappers see local tensors.
+            hidden_states = self.patch_embedding(hidden_states)
+            hidden_states = hidden_states.flatten(2).transpose(1, 2)
+            hidden_states = self._sp_shard_point(hidden_states)
+        else:
+            if intermediate_tensors is None:
+                raise RuntimeError("intermediate_tensors must be provided for non-first PP stages")
+            hidden_states = intermediate_tensors["hidden_states"]
 
-        # Handle timestep shape
+        # Handle timestep shape (2-D for TI2V, 1-D for T2V)
         if timestep.ndim == 2:
             ts_seq_len = timestep.shape[1]
             timestep = timestep.flatten()
         else:
             ts_seq_len = None
 
+        # Compute conditioning on all PP stages.
+        # Each stage needs temb/timestep_proj for scale-shift modulation in its local blocks.
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
             timestep, encoder_hidden_states, encoder_hidden_states_image, timestep_seq_len=ts_seq_len
         )
@@ -901,32 +1011,46 @@ class WanTransformer3DModel(nn.Module):
         if encoder_hidden_states_image is not None:
             encoder_hidden_states = torch.concat([encoder_hidden_states_image, encoder_hidden_states], dim=1)
 
-        # Check for SP auto_pad: create attention mask dynamically if padding was applied
-        hidden_states_mask = None  # default
-        config = get_forward_context().omni_diffusion_config
-        parallel_config = config.parallel_config
-        if parallel_config is not None and parallel_config.sequence_parallel_size > 1:
-            ctx = get_forward_context()
-            if ctx.sp_original_seq_len is not None and ctx.sp_padding_size > 0:
-                # Create mask for the full (padded) sequence
-                # valid positions = True, padding positions = False
-                batch_size = hidden_states.shape[0]
-                padded_seq_len = ctx.sp_original_seq_len + ctx.sp_padding_size
-                hidden_states_mask = torch.ones(
-                    batch_size,
-                    padded_seq_len,
-                    dtype=torch.bool,
-                    device=hidden_states.device,
-                )
-                hidden_states_mask[:, ctx.sp_original_seq_len :] = False
-
-        # if mask is all true, set it to None
-        if hidden_states_mask is not None and hidden_states_mask.all():
-            hidden_states_mask = None
+        hidden_states_mask = None
+        ctx = get_forward_context()
+        parallel_config = ctx.omni_diffusion_config.parallel_config
+        if (
+            parallel_config is not None
+            and parallel_config.sequence_parallel_size > 1
+            and parallel_config.mask_sp_padding
+        ):
+            hidden_states_mask = build_local_sp_padding_mask(
+                hidden_states.shape[0],
+                hidden_states.shape[1],
+                hidden_states.device,
+            )
+            if hidden_states_mask.all():
+                hidden_states_mask = None
+        elif (
+            parallel_config is not None
+            and parallel_config.sequence_parallel_size > 1
+            and not parallel_config.mask_sp_padding
+            and ctx.sp_original_seq_len is not None
+            and ctx.sp_padding_size > 0
+        ):
+            logger.warning_once(
+                "SP auto-padding applied %d token(s) (seq_len=%d, ulysses_degree=%d). "
+                "Padding tokens are not masked from attention (mask_sp_padding=False), "
+                "which avoids the varlen attention path but may produce minor numerical differences. "
+                "Set parallel_config.mask_sp_padding=True to restore strict masking.",
+                ctx.sp_padding_size,
+                ctx.sp_original_seq_len,
+                parallel_config.sequence_parallel_size,
+            )
 
         # Transformer blocks
-        for block in self.blocks:
+        for block in self.blocks[self.start_layer : self.end_layer]:
             hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, hidden_states_mask)
+
+        if not is_pipeline_last_stage():
+            # Non-last PP stage: hand the token sequence to the caller via IntermediateTensors.
+            # predict_noise will broadcast it to the next stage before calling that stage's forward.
+            return IntermediateTensors({"hidden_states": hidden_states})
 
         # Output norm, projection & unpatchify
         shift, scale = self.output_scale_shift_prepare(temb)
@@ -990,11 +1114,16 @@ class WanTransformer3DModel(nn.Module):
             original_name = name
             lookup_name = name
 
-            # Handle QKV fusion
+            # Handle QKV fusion for weight tensors (separate to_q/k/v → fused to_qkv).
+            # Pre-fused to_qkv tensors (from offline MXFP8 merged checkpoint) fall
+            # through to the else branch and are loaded directly.
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in original_name:
                     continue
                 lookup_name = original_name.replace(weight_name, param_name)
+                # Skip weights that belong to PP stages other than this one
+                if is_pp_missing_parameter(lookup_name, self) or lookup_name not in params_dict:
+                    break
                 param = params_dict[lookup_name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -1016,6 +1145,10 @@ class WanTransformer3DModel(nn.Module):
                     modulation_alias = lookup_name[: -len(".modulation")] + ".scale_shift_table"
                     if modulation_alias in params_dict:
                         lookup_name = modulation_alias
+
+                # Skip weights that belong to PP stages other than this one
+                if is_pp_missing_parameter(lookup_name, self):
+                    continue
 
                 if lookup_name not in params_dict:
                     logger.warning(f"Skipping weight {original_name} -> {lookup_name}")

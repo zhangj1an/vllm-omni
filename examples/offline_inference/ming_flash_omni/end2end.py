@@ -17,13 +17,13 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset, video_to_ndarrays
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.media.audio import load_audio
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 import vllm_omni
 from vllm_omni.entrypoints.omni import Omni
 
 # Imports the processor also registers itself
 from vllm_omni.transformers_utils.processors.ming import MingFlashOmniProcessor  # noqa: F401
+from vllm_omni.utils.tracking_parser import TrackingArgumentParser
 
 SEED = 42
 MODEL_NAME = "Jonathan1909/Ming-flash-omni-2.0"
@@ -302,14 +302,10 @@ def main(args):
     else:
         query_result = query_func(processor)
 
-    # Initialize Omni (with thinker-only stage config)
-    omni = Omni(
-        model=MODEL_NAME,
-        stage_configs_path=args.stage_configs_path,
-        log_stats=args.log_stats,
-        init_timeout=args.init_timeout,
-        stage_init_timeout=args.stage_init_timeout,
-    )
+    omni_kwargs = vars(args).copy()
+    # override CLI --model with derived model_name
+    omni_kwargs["model"] = MODEL_NAME
+    omni = Omni(**omni_kwargs)
 
     # Thinker sampling params
     thinker_sampling_params = SamplingParams(
@@ -400,7 +396,7 @@ def main(args):
 
 
 def parse_args():
-    parser = FlexibleArgumentParser(description="Ming-flash-omni 2.0 offline inference example")
+    parser = TrackingArgumentParser(description="Ming-flash-omni 2.0 offline inference example")
     parser.add_argument(
         "--query-type",
         "-q",
@@ -410,10 +406,10 @@ def parse_args():
         help="Query type.",
     )
     parser.add_argument(
-        "--stage-configs-path",
+        "--deploy-config",
         type=str,
         default=None,
-        help="Path to a stage configs YAML file.",
+        help="Path to a deploy YAML; leave unset to auto-load full thinker+talker. Pass custom for text-only",
     )
     parser.add_argument(
         "--log-stats",

@@ -17,8 +17,12 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
 from vllm_omni.diffusion.executor.multiproc_executor import MultiprocDiffusionExecutor
+from vllm_omni.diffusion.ipc import DIFFUSION_RPC_RESULT_ENVELOPE
 from vllm_omni.diffusion.sched import RequestScheduler
 from vllm_omni.diffusion.stage_diffusion_proc import StageDiffusionProc
+from vllm_omni.diffusion.worker.diffusion_worker import WorkerProc
+from vllm_omni.diffusion.worker.utils import RunnerOutput
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.outputs import OmniRequestOutput
 
 pytestmark = [pytest.mark.diffusion, pytest.mark.core_model, pytest.mark.cpu]
@@ -34,7 +38,11 @@ def _tagged_output(tag: str) -> DiffusionOutput:
 
 def _mock_request(tag: str):
     """Return a lightweight request object identifiable by *tag*."""
-    return SimpleNamespace(request_ids=[tag])
+    return SimpleNamespace(
+        request_id=tag,
+        prompts=[f"prompt_{tag}"],
+        sampling_params=OmniDiffusionSamplingParams(num_inference_steps=1),
+    )
 
 
 def _make_executor(num_gpus: int = 1):
@@ -42,7 +50,7 @@ def _make_executor(num_gpus: int = 1):
 
     Returns ``(executor, request_queue, result_queue)``.
     """
-    od_cfg = SimpleNamespace(num_gpus=num_gpus)
+    od_cfg = SimpleNamespace(num_gpus=num_gpus, streaming_output=False)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(MultiprocDiffusionExecutor, "_init_executor", lambda self: None)
     executor = MultiprocDiffusionExecutor(od_cfg)
@@ -68,11 +76,16 @@ def _make_engine(num_gpus: int = 1):
     """Create a lightweight ``DiffusionEngine`` wired to mocked executor."""
     executor, req_q, res_q = _make_executor(num_gpus)
     engine = DiffusionEngine.__new__(DiffusionEngine)
+    engine.od_config = SimpleNamespace(streaming_output=False)
     sched = RequestScheduler()
     sched.initialize(SimpleNamespace())
     engine.scheduler = sched
     engine.executor = executor
     engine._rpc_lock = threading.RLock()
+    engine._cv = threading.Condition(engine._rpc_lock)
+    engine._closed = False
+    engine._loop_started = False
+    engine._rpc_queue = queue.Queue()
     engine.abort_queue = queue.Queue()
     engine.execute_fn = executor.execute_request
     return engine, executor, req_q, res_q
@@ -88,8 +101,8 @@ def _start_worker(req_q, res_q, count=2):
             req = req_q.get(timeout=10)
             method = req.get("method", "")
             args = req.get("args", ())
-            if method in {"generate", "execute_model"} and args and hasattr(args[0], "request_ids"):
-                tag = f"result_for_{args[0].request_ids[0]}"
+            if method in {"generate", "execute_model"} and args and hasattr(args[0], "request_id"):
+                tag = f"result_for_{args[0].request_id}"
             elif args:
                 tag = f"result_for_{args[0]}"
             else:
@@ -296,6 +309,80 @@ class TestSerialEngineOperations:
         assert len(results) == 1
         assert results[0].error == "rank0"
 
+    def test_collective_rpc_all_rank_status_error_propagation(self):
+        engine, _, _, res_q = _make_engine(num_gpus=2)
+
+        res_q.put(
+            {
+                "type": DIFFUSION_RPC_RESULT_ENVELOPE,
+                "method": "add_lora",
+                "result": True,
+                "rank_statuses": [
+                    {"rank": 0, "ok": True, "bool_result": True},
+                    {
+                        "rank": 1,
+                        "ok": False,
+                        "error": "rank1 boom",
+                        "error_type": "RuntimeError",
+                        "traceback": "rank1 traceback",
+                    },
+                ],
+            }
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            engine.collective_rpc("add_lora")
+        error = str(excinfo.value)
+        assert "rank 1" in error
+        assert "rank1 boom" in error
+        assert "rank1 traceback" in error
+
+    def test_collective_rpc_all_rank_bool_false_is_aggregated(self):
+        engine, _, _, res_q = _make_engine(num_gpus=2)
+
+        res_q.put(
+            {
+                "type": DIFFUSION_RPC_RESULT_ENVELOPE,
+                "method": "remove_lora",
+                "result": True,
+                "rank_statuses": [
+                    {"rank": 0, "ok": True, "bool_result": True},
+                    {"rank": 1, "ok": True, "bool_result": False},
+                ],
+            }
+        )
+
+        assert engine.collective_rpc("remove_lora") == [False]
+
+    def test_collective_rpc_collects_rank_status_only_for_control_plane_all_rank_rpc(self):
+        executor, req_q, res_q = _make_executor(num_gpus=2)
+
+        res_q.put(_tagged_output("forward"))
+        result = executor.collective_rpc(
+            "execute_stepwise",
+            unique_reply_rank=0,
+            exec_all_ranks=True,
+        )
+        forward_rpc = req_q.get_nowait()
+
+        assert result.error == "forward"
+        assert forward_rpc["exec_all_ranks"] is True
+        assert forward_rpc["collect_rank_status"] is False
+
+        res_q.put(
+            {
+                "type": DIFFUSION_RPC_RESULT_ENVELOPE,
+                "method": "remove_lora",
+                "result": True,
+                "rank_statuses": [{"rank": 0, "ok": True, "bool_result": True}],
+            }
+        )
+        assert executor.collective_rpc("remove_lora") == [True]
+        control_rpc = req_q.get_nowait()
+
+        assert control_rpc["exec_all_ranks"] is True
+        assert control_rpc["collect_rank_status"] is True
+
     def test_serial_add_req_then_collective_rpc(self):
         engine, _, req_q, res_q = _make_engine()
         wt = _start_worker(req_q, res_q, count=2)
@@ -339,106 +426,113 @@ class TestSerialEngineOperations:
             engine.collective_rpc("anything")
 
 
-# ─────────── timeout regression: RPC must not block on a stalled lock ─────
+class TestWorkerProcRpcRankStatus:
+    def _make_worker_proc(self, has_result_mq: bool = True):
+        proc = object.__new__(WorkerProc)
+        proc.gpu_id = 0
+        proc.result_mq = object() if has_result_mq else None
+        proc.worker = SimpleNamespace(execute_method=Mock(return_value=True))
+        return proc
 
+    def test_execute_rpc_returns_rank_status_envelope(self, monkeypatch):
+        proc = self._make_worker_proc()
 
-class TestCollectiveRpcTimeoutWhileLockHeld:
-    """``collective_rpc(timeout=...)`` must honour its timeout even when
-    another thread holds ``engine._rpc_lock`` indefinitely (e.g. request
-    execution stalled on ``add_req_and_wait_for_response`` → ``execute_fn``
-    → ``collective_rpc`` while blocked on an unresponsive worker).
-    """
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
 
-    def test_rpc_times_out_when_lock_held_directly(self):
-        """Simplest case: lock is manually held by another thread."""
-        engine, _, _, _ = _make_engine()
+        def _all_gather_object(out, local):
+            out[0] = local
+            out[1] = {
+                "rank": 1,
+                "ok": False,
+                "error": "rank1 boom",
+                "error_type": "RuntimeError",
+                "traceback": "trace",
+                "bool_result": None,
+            }
 
-        stall_started = threading.Event()
+        monkeypatch.setattr(torch.distributed, "all_gather_object", _all_gather_object)
 
-        def _hold_lock():
-            engine._rpc_lock.acquire()
-            stall_started.set()
-            # Hold the lock far longer than the RPC timeout.
-            threading.Event().wait(30)
-            engine._rpc_lock.release()
-
-        stall_thread = threading.Thread(target=_hold_lock, daemon=True)
-        stall_thread.start()
-        stall_started.wait(5)
-
-        # collective_rpc should raise TimeoutError, NOT block forever.
-        with pytest.raises(TimeoutError):
-            engine.collective_rpc("health", timeout=0.5)
-
-    def test_rpc_times_out_when_request_execution_stalled_on_worker(self):
-        """Real-world scenario the bot flagged:
-
-        The scheduler/execute path holds ``_rpc_lock`` while blocked on
-        ``executor._result_mq.dequeue()`` because the worker never replies.
-        A concurrent ``collective_rpc(timeout=...)`` must still time out
-        instead of hanging forever waiting for the lock.
-        """
-        engine, executor, _, _ = _make_engine()
-
-        add_req_blocked = threading.Event()
-
-        # Patch dequeue: signal once entered, then block indefinitely
-        # (simulates a worker that never sends a result).
-        orig_dequeue = executor._result_mq.dequeue
-
-        def _hanging_dequeue(timeout=None):
-            add_req_blocked.set()
-            # Block forever — the worker is "hung".
-            threading.Event().wait(30)
-            return orig_dequeue(timeout=timeout)
-
-        executor._result_mq.dequeue = _hanging_dequeue
-
-        # Thread running request execution — acquires the lock, enqueues, then
-        # blocks on dequeue forever (worker hang).
-        def _stalled_request_execution():
-            try:
-                engine.add_req_and_wait_for_response(_mock_request("stalled"))
-            except Exception:
-                pass
-
-        t = threading.Thread(target=_stalled_request_execution, daemon=True)
-        t.start()
-
-        # Wait until request execution is truly inside the lock and blocking.
-        add_req_blocked.wait(5)
-
-        # collective_rpc should time out at lock acquisition, not hang.
-        with pytest.raises(TimeoutError):
-            engine.collective_rpc("health_check", timeout=0.5)
-
-    def test_rpc_without_timeout_still_waits_for_lock(self):
-        """When no timeout is given, ``collective_rpc`` should still wait
-        for the lock (blocking) — existing behaviour preserved.
-        """
-        engine, _, _, res_q = _make_engine()
-
-        def _hold_and_release():
-            engine._rpc_lock.acquire()
-            # Hold for a short time then release.
-            threading.Event().wait(0.3)
-            engine._rpc_lock.release()
-
-        # Pre-populate a result so collective_rpc succeeds after lock.
-        res_q.put(_tagged_output("ok"))
-
-        t = threading.Thread(target=_hold_and_release, daemon=True)
-        t.start()
-
-        # No timeout -> should block until lock is released, then succeed.
-        result = engine.collective_rpc(
-            "ping",
-            args=("wait",),
-            unique_reply_rank=0,
+        result, should_reply = proc.execute_rpc(
+            {
+                "method": "remove_lora",
+                "args": (),
+                "kwargs": {},
+                "output_rank": 0,
+                "exec_all_ranks": True,
+                "collect_rank_status": True,
+            }
         )
-        t.join(5)
 
-        assert result.error == "ok"
+        assert should_reply is True
+        assert result["type"] == DIFFUSION_RPC_RESULT_ENVELOPE
+        assert result["result"] is True
+        assert result["rank_statuses"][0]["rank"] == 0
+        assert result["rank_statuses"][1]["rank"] == 1
+        assert result["rank_statuses"][1]["ok"] is False
+
+    def test_execute_rpc_local_exception_is_reported_in_envelope(self, monkeypatch):
+        proc = self._make_worker_proc()
+        proc.worker.execute_method = Mock(side_effect=RuntimeError("local boom"))
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+
+        result, should_reply = proc.execute_rpc(
+            {
+                "method": "add_lora",
+                "args": (),
+                "kwargs": {},
+                "output_rank": 0,
+                "exec_all_ranks": True,
+                "collect_rank_status": True,
+            }
+        )
+
+        assert should_reply is True
+        assert result["type"] == DIFFUSION_RPC_RESULT_ENVELOPE
+        assert len(result["rank_statuses"]) == 1
+        status = result["rank_statuses"][0]
+        assert status["rank"] == 0
+        assert status["ok"] is False
+        assert status["error"] == "local boom"
+        assert status["error_type"] == "RuntimeError"
+        assert status["bool_result"] is None
+        assert "local boom" in status["traceback"]
+
+    def test_execute_rpc_rejects_collect_rank_status_without_all_ranks(self):
+        proc = self._make_worker_proc()
+
+        with pytest.raises(ValueError, match="collect_rank_status requires exec_all_ranks=True"):
+            proc.execute_rpc(
+                {
+                    "method": "ping",
+                    "args": (),
+                    "kwargs": {},
+                    "output_rank": 0,
+                    "exec_all_ranks": False,
+                    "collect_rank_status": True,
+                }
+            )
+
+        proc.worker.execute_method.assert_not_called()
+
+    def test_execute_rpc_non_collect_exception_preserves_original_type(self):
+        proc = self._make_worker_proc()
+        original = ValueError("local boom")
+        proc.worker.execute_method = Mock(side_effect=original)
+
+        with pytest.raises(ValueError) as excinfo:
+            proc.execute_rpc(
+                {
+                    "method": "bad",
+                    "args": (),
+                    "kwargs": {},
+                    "output_rank": 0,
+                    "exec_all_ranks": False,
+                    "collect_rank_status": False,
+                }
+            )
+
+        assert excinfo.value is original
 
 
 # ───────── error handling: EngineDeadError propagation through layers ─────
@@ -489,6 +583,58 @@ class TestMultiprocExecutorRaisesEngineDeadError:
             )
 
 
+class TestMultiprocExecutorStepStreamingOutput:
+    """Streaming output uses step execution and one worker reply per step."""
+
+    def test_execute_step_allows_streaming_output_mode(self):
+        executor, req_q, res_q = _make_executor()
+        executor.od_config = SimpleNamespace(streaming_output=True)  # pyright: ignore[reportAttributeAccessIssue]
+        runner_outputs = [
+            RunnerOutput(
+                request_id="sched-stream",
+                step_index=1,
+                finished=False,
+                result=DiffusionOutput(output={"chunk": 0}, finished=False, chunk_index=0, total_chunks=2),
+            ),
+            RunnerOutput(
+                request_id="sched-stream",
+                step_index=2,
+                finished=True,
+                result=DiffusionOutput(output={"chunk": 1}, finished=True, chunk_index=1, total_chunks=2),
+            ),
+        ]
+        scheduler_output = SimpleNamespace(
+            scheduled_request_ids=["sched-stream"],
+        )
+
+        def _worker():
+            for runner_output in runner_outputs:
+                req_q.get(timeout=10)
+                res_q.put(runner_output)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+
+        first: RunnerOutput = MultiprocDiffusionExecutor.execute_step(  # pyright: ignore[reportAssignmentType]
+            executor,
+            scheduler_output,  # pyright: ignore[reportArgumentType]
+        )
+        second: RunnerOutput = MultiprocDiffusionExecutor.execute_step(  # pyright: ignore[reportAssignmentType]
+            executor,
+            scheduler_output,  # pyright: ignore[reportArgumentType]
+        )
+
+        assert first is runner_outputs[0]
+        assert first.result is not None
+        assert first.result.output == {"chunk": 0}
+        assert first.finished is False
+        assert second is runner_outputs[1]
+        assert second.result is not None
+        assert second.result.output == {"chunk": 1}
+        assert second.finished is True
+        thread.join(timeout=2)
+
+
 class TestDiffusionEngineDeadErrorPassthrough:
     """``DiffusionEngine.add_req_and_wait_for_response`` re-raises
     ``EngineDeadError`` from executor and wraps other errors."""
@@ -533,11 +679,11 @@ class TestStageDiffusionClientErrorPropagation:
         client._tasks = {}
         client._shutting_down = False
         client._engine_dead = engine_dead
-        client._owns_process = True
-        client._proc = MagicMock(
+        proc = MagicMock(
             is_alive=MagicMock(return_value=proc_alive),
             exitcode=1,
         )
+        client._proc_manager = SimpleNamespace(proc=proc)
         client._request_socket = MagicMock()
         client._response_socket = MagicMock()
         client._encoder = MagicMock()
@@ -580,7 +726,7 @@ class TestStageDiffusionClientErrorPropagation:
         assert client.get_diffusion_output_nowait() is None
 
     def test_check_health_raises_when_proc_dead(self):
-        """``check_health`` detects a dead subprocess via ``_proc.is_alive()``
+        """``check_health`` detects a dead subprocess via the manager's proc
         and raises ``EngineDeadError``, setting ``_engine_dead`` as a
         side effect."""
         client = self._make_client(proc_alive=False)
@@ -607,7 +753,7 @@ class TestStageDiffusionClientErrorPropagation:
         ``get_diffusion_output_nowait`` returns ``None`` and sets
         ``_shutting_down`` instead of raising."""
         client = self._make_client(proc_alive=False)
-        client._proc.exitcode = 137  # SIGKILL (128 + 9)
+        client._proc_manager.proc.exitcode = 137  # SIGKILL (128 + 9)
         client._response_socket.recv.side_effect = zmq.Again
 
         result = client.get_diffusion_output_nowait()
@@ -615,6 +761,61 @@ class TestStageDiffusionClientErrorPropagation:
         assert result is None
         assert client._shutting_down is True
         assert client._engine_dead is True
+
+    def test_initialize_client_requires_replica_id(self):
+        from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
+
+        client = object.__new__(StageDiffusionClient)
+        metadata = SimpleNamespace(
+            stage_id=0,
+            final_output=True,
+            final_output_type="image",
+            default_sampling_params=None,
+            requires_multimodal_data=False,
+            custom_process_input_func=None,
+            engine_input_source=[],
+        )
+
+        with pytest.raises(AttributeError, match="replica_id"):
+            client._initialize_client(
+                metadata,
+                "tcp://req",
+                "tcp://resp",
+                batch_size=1,
+            )
+
+    @pytest.mark.asyncio
+    async def test_collective_rpc_async_returns_none_result(self, monkeypatch):
+        client = self._make_client()
+        client._owns_process = False
+        client._proc = None
+        client._encoder.encode.return_value = b"encoded-rpc"
+
+        async def _unexpected_poll(*_, **__):
+            raise AssertionError("collective_rpc_async should not keep polling after a None rpc_result arrives")
+
+        client._response_poller = SimpleNamespace(poll=_unexpected_poll)
+
+        rpc_id = "rpc-none"
+        monkeypatch.setattr(
+            "vllm_omni.diffusion.stage_diffusion_client.uuid.uuid4",
+            lambda: SimpleNamespace(hex=rpc_id),
+        )
+
+        def _drain() -> None:
+            client._rpc_results[rpc_id] = None
+
+        client._drain_responses = _drain
+
+        result = await client.collective_rpc_async(
+            method="profile",
+            timeout=0.01,
+            args=(False, None),
+        )
+
+        assert result is None
+        client._request_socket.send.assert_called_once_with(b"encoded-rpc")
+        assert rpc_id not in client._pending_rpcs
 
 
 # ───────── monitor thread & death sentinel integration tests ─────────
@@ -721,7 +922,7 @@ class TestStageDiffusionClientProcMonitor:
         client._engine_dead = False
 
         proc = _make_short_lived_process()
-        client._proc = proc
+        client._proc_manager = SimpleNamespace(proc=proc)
 
         client._start_proc_monitor()
         proc.join(5)

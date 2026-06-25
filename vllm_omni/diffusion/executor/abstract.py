@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
-from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.data import OmniDiffusionConfig
 
 if TYPE_CHECKING:
     from vllm_omni.diffusion.sched.interface import DiffusionSchedulerOutput
-    from vllm_omni.diffusion.worker.utils import RunnerOutput
+    from vllm_omni.diffusion.worker.utils import BaseRunnerOutput
 
 
 class DiffusionExecutor(ABC):
@@ -69,17 +69,12 @@ class DiffusionExecutor(ABC):
         pass
 
     @abstractmethod
-    def add_req(self, requests: OmniDiffusionRequest) -> DiffusionOutput:
-        """Add requests to the execution queue."""
-        pass
-
-    @abstractmethod
-    def execute_request(self, scheduler_output: DiffusionSchedulerOutput) -> RunnerOutput:
+    def execute_request(self, scheduler_output: DiffusionSchedulerOutput) -> BaseRunnerOutput:
         """Execute request-mode work from a scheduler output."""
         pass
 
     @abstractmethod
-    def execute_step(self, scheduler_output: DiffusionSchedulerOutput) -> RunnerOutput:
+    def execute_step(self, scheduler_output: DiffusionSchedulerOutput) -> BaseRunnerOutput:
         """Execute step-mode work from a scheduler output."""
         pass
 
@@ -100,6 +95,14 @@ class DiffusionExecutor(ABC):
     def check_health(self) -> None:
         """Check if the executor and workers are healthy."""
         pass
+
+    def register_failure_callback(self, callback: Callable[[], None]) -> None:
+        """Register a callback invoked when the executor fatally fails.
+
+        Executors without a background failure monitor can keep the default
+        no-op implementation.
+        """
+        return None
 
     @abstractmethod
     def shutdown(self) -> None:

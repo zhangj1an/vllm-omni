@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import re
 from enum import Enum, Flag, StrEnum, auto
+from typing import Literal, TypeAlias
+
+FinalOutputModalityType: TypeAlias = Literal["text", "image", "audio", "video"]
 
 _MODALITY_ALIASES: dict[str, str] = {
     "speech": "audio",
@@ -18,6 +21,8 @@ _MODALITY_ALIASES: dict[str, str] = {
     "waveform": "audio",
     "pixel_values": "image",
     "pixels": "image",
+    "token_ids": "text",
+    "tokens": "text",
 }
 
 

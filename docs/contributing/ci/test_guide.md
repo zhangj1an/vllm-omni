@@ -80,7 +80,7 @@ Our test scripts use the pytest framework. First, please use `git clone https://
 
     ```bash
     cd tests
-    pytest -s -v -m "full_model and omni and H100" --run-level=full_model
+    pytest -s -v -m "full_model and (omni or tts) and H100" --run-level=full_model
     ```
 
 === "L5 level"
@@ -91,14 +91,26 @@ Our test scripts use the pytest framework. First, please use `git clone https://
     cd tests
 
     # Stability: Qwen3-Omni
-    pytest -s -v dfx/stability/scripts/test_stability_qwen3_omni.py
+    pytest -s -v dfx/stability/scripts/test_stability_qwen3_omni.py -m slow
 
     # Stability: Wan2.2 (v1/videos diffusion benchmark loop)
-    pytest -s -v dfx/stability/scripts/test_stability_wan22.py
+    pytest -s -v dfx/stability/scripts/test_stability_wan22.py -m slow
+
+    # Reliability: Qwen3-Omni (H100 × 2)
+    pytest -s -v dfx/reliability/test_reliability_qwen3_omni.py -m slow
+
+    # Reliability: Wan2.2 (H100)
+    pytest -s -v dfx/reliability/test_reliability_wan22.py -m slow
+
+    # Reliability: HunyuanImage DiT (H100 × 4)
+    pytest -s -v dfx/reliability/test_reliability_hunyuan_image.py -m slow
+
+    # Reliability: VoxCPM2 (L4)
+    pytest -s -v dfx/reliability/test_reliability_voxcpm2.py -m slow
 
     ```
 
-    The latest L5 commands for CI can be found in the [pipeline](https://github.com/vllm-project/vllm-omni/blob/main/.buildkite/test-ready.yml).
+    The latest L5 CI jobs (reliability + invalid-parameter weekly steps) are in [test-weekly.yml](https://github.com/vllm-project/vllm-omni/blob/main/.buildkite/test-weekly.yml).
 
 You can find more information about markers in the documentation: [marker doc](./tests_markers.md)
 

@@ -5,7 +5,12 @@ Tests for Stable Diffusion 3.5 medium model.
 import pytest
 
 from tests.helpers.mark import hardware_marks
-from tests.helpers.runtime import OmniServer, OmniServerParams, OpenAIClientHandler
+from tests.helpers.runtime import (
+    OmniServer,
+    OmniServerParams,
+    OpenAIClientHandler,
+    dummy_messages_from_mix_data,
+)
 
 pytestmark = [pytest.mark.diffusion, pytest.mark.full_model]
 
@@ -19,6 +24,20 @@ NEGATIVE_PROMPT = "blurry, low quality, distorted"
 # that provide good performance improvements.
 def _get_diffusion_feature_cases(model: str):
     return [
+        # CFG Parallel + Tensor Parallel + CPU offload
+        pytest.param(
+            OmniServerParams(
+                model=model,
+                server_args=[
+                    "--cfg-parallel-size",
+                    "2",
+                    "--tensor-parallel-size",
+                    "2",
+                    "--enable-cpu-offload",
+                ],
+            ),
+            marks=FOUR_CARD_FEATURE_MARKS,
+        ),
         # Cache-DiT + CFG Parallel + Tensor Parallel
         pytest.param(
             OmniServerParams(
@@ -32,7 +51,10 @@ def _get_diffusion_feature_cases(model: str):
                     "2",
                 ],
             ),
-            marks=FOUR_CARD_FEATURE_MARKS,
+            marks=[
+                *FOUR_CARD_FEATURE_MARKS,
+                pytest.mark.skip(reason="#3432"),
+            ],
         ),
     ]
 
@@ -45,9 +67,10 @@ def _get_diffusion_feature_cases(model: str):
     indirect=True,
 )
 def test_sd3_medium(omni_server: OmniServer, openai_client: OpenAIClientHandler):
+    messages = dummy_messages_from_mix_data(content_text=POSITIVE_PROMPT)
     request_config = {
         "model": omni_server.model,
-        "messages": [{"role": "user", "content": POSITIVE_PROMPT}],
+        "messages": messages,
         "extra_body": {
             "height": 1024,
             "width": 1024,

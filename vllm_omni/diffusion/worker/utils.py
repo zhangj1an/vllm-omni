@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -37,7 +38,7 @@ class DiffusionRequestState:
     """
 
     # ── Identity / request-level inputs ──
-    req_id: str
+    request_id: str
     sampling: OmniDiffusionSamplingParams
     prompts: list[OmniPromptType] | None = None
 
@@ -53,6 +54,12 @@ class DiffusionRequestState:
     # ── Timestep schedule (set once by prepare_encode) ──
     timesteps: torch.Tensor | list[torch.Tensor] | None = None
     step_index: int = 0
+
+    # ── Optional chunked streaming progress ──
+    chunk_index: int = 0
+    step_in_chunk: int = 0
+    total_chunks: int = 1
+    chunk_num_steps: int | None = None
 
     # ── Per-request scheduler instance (set once by prepare_encode) ──
     scheduler: Any | None = None
@@ -103,14 +110,32 @@ class DiffusionRequestState:
         return self.step_index >= total_steps
 
     @property
+    def chunk_denoise_completed(self) -> bool:
+        if self.chunk_num_steps is None:
+            return False
+        return self.step_in_chunk >= self.chunk_num_steps
+
+    @property
+    def request_denoise_completed(self) -> bool:
+        if self.chunk_num_steps is None:
+            return self.denoise_completed
+        return self.chunk_index >= self.total_chunks
+
+    @property
     def new_request(self) -> bool:
         # TODO: this is only an approximation for current stepwise mode.
         # A real "new request" signal should eventually come from scheduler/runner state transitions.
         return self.step_index == 0 or self.timesteps is None
 
 
+class BaseRunnerOutput(ABC):
+    @abstractmethod
+    def get_request_output(self, request_id: str) -> RunnerOutput | None:
+        pass
+
+
 @dataclass
-class RunnerOutput:
+class RunnerOutput(BaseRunnerOutput):
     """Output of a single denoising step for a request.
 
     NOTE: `latents` may be None when returned through IPC to avoid
@@ -118,7 +143,38 @@ class RunnerOutput:
     _request_state_cache.
     """
 
-    req_id: str
+    request_id: str
     step_index: int | None = None
     finished: bool = False
     result: DiffusionOutput | None = None
+
+    def get_request_output(self, request_id: str) -> RunnerOutput | None:
+        return self if self.request_id == request_id else None
+
+
+@dataclass
+class BatchRunnerOutput(BaseRunnerOutput):
+    runner_outputs: list[RunnerOutput]
+    _id_to_idx: dict[str, int] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._id_to_idx = {out.request_id: i for i, out in enumerate(self.runner_outputs)}
+
+    def __getitem__(self, request_id: str) -> RunnerOutput | None:
+        """access single RunnerOutput by request_id"""
+        idx = self._id_to_idx.get(request_id)
+        return self.runner_outputs[idx] if idx is not None else None
+
+    def get_request_output(self, request_id: str) -> RunnerOutput | None:
+        return self[request_id]
+
+    @property
+    def request_ids(self) -> list[str]:
+        return list(self._id_to_idx.keys())
+
+    def __len__(self) -> int:
+        return len(self.runner_outputs)
+
+    @classmethod
+    def from_list(cls, runner_output_list: list[RunnerOutput]) -> BatchRunnerOutput:
+        return cls(runner_outputs=runner_output_list)

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from vllm_omni.engine.messages import EngineQueueMessage, ErrorMessage, ShutdownRequestMessage
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -37,7 +38,7 @@ def _sampling_params(max_tokens: int = 4):
     return SamplingParams(max_tokens=max_tokens)
 
 
-async def _get_any_output_message(fixture: OrchestratorFixture, *, timeout: float = 2.0) -> dict:
+async def _get_any_output_message(fixture: OrchestratorFixture, *, timeout: float = 2.0) -> EngineQueueMessage:
     """Like _get_output_message but returns any message type (including errors)."""
     deadline = time.monotonic() + timeout
     while True:
@@ -62,7 +63,7 @@ def orchestrator_factory():
 
     for fixture in fixtures:
         if fixture.thread.is_alive():
-            fixture.request_sync_q.put_nowait({"type": "shutdown"})
+            fixture.request_sync_q.put_nowait(ShutdownRequestMessage())
             fixture.thread.join(timeout=5)
         for q in fixture.queues:
             q.close()
@@ -101,10 +102,11 @@ async def test_engine_dead_error_broadcasts_fatal_and_shuts_down(orchestrator_fa
         # Collect the fatal error message.
         msg = await _get_any_output_message(orchestrator_fixture)
 
-        assert msg["type"] == "error"
-        assert msg["fatal"] is True
-        assert msg["request_id"] == "req-dead"
-        assert "Stage-0 engine core is dead" in msg["error"]
+        assert isinstance(msg, ErrorMessage)
+        assert msg.type == "error"
+        assert msg.fatal is True
+        assert msg.request_id == "req-dead"
+        assert "Stage-0 engine core is dead" in msg.error
 
         # The orchestrator thread should exit after the fatal error.
         orchestrator_fixture.thread.join(timeout=5)
@@ -114,7 +116,7 @@ async def test_engine_dead_error_broadcasts_fatal_and_shuts_down(orchestrator_fa
         assert "req-dead" not in orchestrator_fixture.orchestrator.request_states
     finally:
         if orchestrator_fixture.thread.is_alive():
-            orchestrator_fixture.request_sync_q.put_nowait({"type": "shutdown"})
+            orchestrator_fixture.request_sync_q.put_nowait(ShutdownRequestMessage())
             orchestrator_fixture.thread.join(timeout=5)
 
 
@@ -124,8 +126,8 @@ async def test_engine_dead_error_broadcasts_fatal_and_shuts_down(orchestrator_fa
 @pytest.mark.asyncio
 async def test_diffusion_error_output_routed_as_finished(orchestrator_factory) -> None:
     """When a diffusion stage returns an OmniRequestOutput with a non-None
-    error, the orchestrator must route it as a finished output message and
-    clean up the request state.
+    error, the orchestrator must route it as an error message and clean up
+    the request state.
     """
     stage0 = FakeStageClient(stage_type="diffusion", final_output=True, final_output_type="image")
     orchestrator_fixture = orchestrator_factory([stage0])
@@ -148,13 +150,124 @@ async def test_diffusion_error_output_routed_as_finished(orchestrator_factory) -
 
         msg = await _get_any_output_message(orchestrator_fixture)
 
-        assert msg["type"] == "output"
-        assert msg["request_id"] == "req-err"
-        assert msg["finished"] is True
-        assert msg["engine_outputs"].error == "gpu fault"
+        assert isinstance(msg, ErrorMessage)
+        assert msg.type == "error"
+        assert msg.request_id == "req-err"
+        assert msg.stage_id == 0
+        assert msg.error == "gpu fault"
 
         # Request state should be cleaned up.
         await _wait_for(lambda: "req-err" not in orchestrator_fixture.orchestrator.request_states)
     finally:
-        orchestrator_fixture.request_sync_q.put_nowait({"type": "shutdown"})
+        orchestrator_fixture.request_sync_q.put_nowait(ShutdownRequestMessage())
+        orchestrator_fixture.thread.join(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_diffusion_client_error_output_propagates_status_code(orchestrator_factory) -> None:
+    """A client-error OmniRequestOutput (e.g. a guardrail 4xx) from a diffusion
+    stage must surface as an ErrorMessage that carries status_code/error_type,
+    so the frontend can map it to the correct HTTP response instead of a 500.
+    """
+    stage0 = FakeStageClient(stage_type="diffusion", final_output=True, final_output_type="image")
+    orchestrator_fixture = orchestrator_factory([stage0])
+    params = OmniDiffusionSamplingParams()
+
+    try:
+        await _enqueue_add_request(
+            orchestrator_fixture,
+            request_id="req-blocked",
+            prompt={"prompt": "blocked"},
+            original_prompt={"prompt": "blocked"},
+            sampling_params_list=[params],
+            final_stage_id=0,
+        )
+
+        await _wait_for(lambda: len(stage0.add_request_calls) == 1)
+
+        # Push a client-error output from the diffusion stage.
+        stage0.push_diffusion_output(
+            OmniRequestOutput.from_error(
+                "req-blocked",
+                "Input was blocked by Cosmos3 guardrails.",
+                status_code=400,
+                error_type="BadRequestError",
+            )
+        )
+
+        msg = await _get_any_output_message(orchestrator_fixture)
+
+        assert isinstance(msg, ErrorMessage)
+        assert msg.request_id == "req-blocked"
+        assert msg.stage_id == 0
+        assert msg.fatal is False
+        assert msg.status_code == 400
+        assert msg.error_type == "BadRequestError"
+        assert msg.error == "Input was blocked by Cosmos3 guardrails."
+
+        # Request state should be cleaned up.
+        await _wait_for(lambda: "req-blocked" not in orchestrator_fixture.orchestrator.request_states)
+    finally:
+        orchestrator_fixture.request_sync_q.put_nowait(ShutdownRequestMessage())
+        orchestrator_fixture.thread.join(timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "error_type"),
+    [
+        pytest.param(429, "RateLimitError", id="429-too-many-requests"),
+        pytest.param(413, "PayloadTooLargeError", id="413-payload-too-large"),
+        pytest.param(422, "UnprocessableEntityError", id="422-unprocessable-entity"),
+        pytest.param(403, "PermissionDeniedError", id="403-forbidden"),
+    ],
+)
+async def test_diffusion_client_error_output_propagates_non_400_status(
+    orchestrator_factory,
+    status_code: int,
+    error_type: str,
+) -> None:
+    """A diffusion-stage client error with a non-400 4xx status must be serialized
+    into an ErrorMessage that preserves that exact status_code/error_type.
+    """
+    stage0 = FakeStageClient(stage_type="diffusion", final_output=True, final_output_type="image")
+    orchestrator_fixture = orchestrator_factory([stage0])
+    params = OmniDiffusionSamplingParams()
+
+    try:
+        await _enqueue_add_request(
+            orchestrator_fixture,
+            request_id="req-blocked",
+            prompt={"prompt": "blocked"},
+            original_prompt={"prompt": "blocked"},
+            sampling_params_list=[params],
+            final_stage_id=0,
+        )
+
+        await _wait_for(lambda: len(stage0.add_request_calls) == 1)
+
+        # Push a non-400 client-error output from the diffusion stage.
+        stage0.push_diffusion_output(
+            OmniRequestOutput.from_error(
+                "req-blocked",
+                "client error from diffusion stage",
+                status_code=status_code,
+                error_type=error_type,
+            )
+        )
+
+        msg = await _get_any_output_message(orchestrator_fixture)
+
+        assert isinstance(msg, ErrorMessage)
+        assert msg.request_id == "req-blocked"
+        assert msg.stage_id == 0
+        assert msg.fatal is False
+        assert msg.status_code == status_code
+        assert msg.error_type == error_type
+        assert msg.error == "client error from diffusion stage"
+
+        # Request state should be cleaned up.
+        await _wait_for(lambda: "req-blocked" not in orchestrator_fixture.orchestrator.request_states)
+    finally:
+        orchestrator_fixture.request_sync_q.put_nowait(ShutdownRequestMessage())
         orchestrator_fixture.thread.join(timeout=5)

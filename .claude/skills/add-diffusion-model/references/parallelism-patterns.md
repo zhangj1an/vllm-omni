@@ -92,6 +92,7 @@ class TPSelfAttention(nn.Module):
             softmax_scale=1.0 / (self.head_dim ** 0.5),
             causal=False,
             num_kv_heads=self.to_qkv.num_kv_heads,  # Local KV heads per GPU
+            role="self",
         )
 
     def forward(self, x):
@@ -568,4 +569,4 @@ Check which parallelism methods a model supports:
 | **TP** | Uses `ColumnParallelLinear` / `QKVParallelLinear`. Search: `grep -r 'ParallelLinear\|QKVParallel' vllm_omni/diffusion/models/<model>/` |
 | **HSDP** | Transformer defines `_hsdp_shard_conditions`. Search: `grep -r '_hsdp_shard_conditions' vllm_omni/diffusion/models/` |
 
-The canonical per-model support table is in `docs/user_guide/diffusion/parallelism_acceleration.md`.
+The canonical per-model support overview/table is in `docs/user_guide/diffusion/parallelism/overview.md`.
