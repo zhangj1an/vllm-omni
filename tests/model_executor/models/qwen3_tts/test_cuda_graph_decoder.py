@@ -175,6 +175,77 @@ def test_padded_output_bounded(decoder, wrapper, seq_len):
     assert max_diff < 1.0, f"Max diff {max_diff} exceeds bound"
 
 
+@pytest.mark.parametrize("seq_len", [10, 30, 47, 73, 99])
+def test_padded_short_output_decode_length_matches_eager(seq_len):
+    """Streaming ``decode()`` of a shorter-than-nominal decoder must match eager length.
+
+    Regression for #4466: Qwen3-Omni Code2Wav returns fewer samples than
+    ``seq_len * total_upsample``. The graph ``decode()`` path used to trim to the
+    nominal length, so for padded (non-capture-size) chunks it leaked a fixed
+    surplus of stale buffer-tail samples. The streaming concat turned that
+    per-chunk surplus into a ~46 ms "lag in the middle". The trim must instead be
+    relative to the captured output length, matching the eager forward exactly.
+    """
+    short_decoder = ShortOutputDecoder().to(DEVICE).eval()
+    short_wrapper = CUDAGraphDecoderWrapper(
+        decoder=short_decoder,
+        capture_sizes=[25, 50, 100],
+        capture_batch_sizes=[1],
+        num_quantizers=NUM_QUANTIZERS,
+        enabled=True,
+    )
+    short_wrapper.warmup(DEVICE)
+    codes = _random_codes(seq_len)
+    with torch.no_grad():
+        eager_out = short_decoder(codes)
+        graph_out = short_wrapper.decode(codes)
+    surplus = graph_out.shape[-1] - eager_out.shape[-1]
+    assert surplus == 0, (
+        f"graph length {graph_out.shape[-1]} != eager length {eager_out.shape[-1]} "
+        f"(surplus {surplus}); the padded graph output is leaking stale tail samples"
+    )
+    # Interior content (away from the conv receptive-field boundary) must still match.
+    boundary = 3 * TOTAL_UPSAMPLE
+    if eager_out.shape[-1] > boundary:
+        torch.testing.assert_close(graph_out[..., :-boundary], eager_out[..., :-boundary], atol=1e-5, rtol=1e-5)
+
+
+def test_compiled_padded_short_output_length_matches_eager(monkeypatch):
+    """Compiled replay path must also trim short-output decoders to eager length.
+
+    Same regression as the graph path (#4466) but exercising the torch.compile +
+    CUDA Graph branch in ``_decode``. ``torch.compile`` is faked (as in the other
+    compiled-path tests) so the test stays fast and deterministic.
+    """
+
+    def _fake_compile(model, **_kwargs):
+        def _compiled(codes):
+            return model(codes)
+
+        return _compiled
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+
+    short_decoder = ShortOutputDecoder().to(DEVICE).eval()
+    compiled_wrapper = CUDAGraphDecoderWrapper(
+        decoder=short_decoder,
+        capture_sizes=[25, 50],
+        capture_batch_sizes=[1],
+        compile_shapes=[(1, 25), (1, 50)],
+        num_quantizers=NUM_QUANTIZERS,
+        enabled=True,
+    )
+    compiled_wrapper.warmup(DEVICE)
+    codes = _random_codes(30)  # not a capture size -> padded to bucket 50 on the compiled path
+    with torch.no_grad():
+        eager_out = short_decoder(codes)
+        graph_out = compiled_wrapper.decode(codes)
+    surplus = graph_out.shape[-1] - eager_out.shape[-1]
+    assert surplus == 0, (
+        f"compiled graph length {graph_out.shape[-1]} != eager length {eager_out.shape[-1]} (surplus {surplus})"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────
 # 3. Fallback to eager (size exceeds all capture sizes) → bit-identical
 # ──────────────────────────────────────────────────────────────────
@@ -478,19 +549,29 @@ def test_compute_capture_sizes(kwargs, expected_in, not_expected):
     "batch,channels,seq_len",
     [(2, 64, 1000), (1, 32, 1), (1, 32, 7), (1, 32, 128), (1, 32, 1024), (1, 32, 4096)],
 )
-def test_snakebeta_triton_vs_eager(batch, channels, seq_len):
-    """Fused Triton SnakeBeta kernel must match eager PyTorch output."""
+@pytest.mark.parametrize(
+    "dtype,atol,rtol",
+    [
+        (torch.float32, 1e-5, 1e-5),
+        (torch.bfloat16, 1e-2, 1e-2),
+        (torch.float16, 1e-3, 1e-3),
+    ],
+    ids=["fp32", "bf16", "fp16"],
+)
+def test_snakebeta_triton_vs_eager(batch, channels, seq_len, dtype, atol, rtol):
+    """Fused Triton SnakeBeta kernel must match eager PyTorch output across dtypes."""
     from vllm_omni.model_executor.models.common.snake_activation import SnakeBeta
 
     if not SnakeBeta._init_triton():
         pytest.skip("Triton not available")
 
     torch.manual_seed(42)
-    snake = SnakeBeta(in_features=channels).to(DEVICE).eval()
-    x = torch.randn(batch, channels, seq_len, device=DEVICE)
+    snake = SnakeBeta(in_features=channels).to(DEVICE).to(dtype).eval()
+    x = torch.randn(batch, channels, seq_len, device=DEVICE, dtype=dtype)
 
     with torch.no_grad():
         eager_out = snake._eager_forward(x)
         triton_out = snake._triton_forward(x)
 
-    torch.testing.assert_close(triton_out, eager_out, atol=1e-5, rtol=1e-5)
+    assert triton_out.dtype == x.dtype
+    torch.testing.assert_close(triton_out, eager_out, atol=atol, rtol=rtol)

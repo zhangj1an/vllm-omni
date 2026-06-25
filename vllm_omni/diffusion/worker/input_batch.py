@@ -12,7 +12,7 @@ step, and step outputs are scattered back into request states by
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -81,8 +81,8 @@ def _select_states(
     return selected_states, idx_mapping, idx_mapping.detach().cpu().numpy()
 
 
-def _prepare_req_ids(states: Sequence[DiffusionRequestState]) -> list[str]:
-    return [state.req_id for state in states]
+def _prepare_request_ids(states: Sequence[DiffusionRequestState]) -> list[str]:
+    return [state.request_id for state in states]
 
 
 def _prepare_prompt_field_on_state(
@@ -192,11 +192,13 @@ def _get_request_prompt_seq_lens(
         mask_attr=mask_attr,
     )
     if embeds is None:
-        raise ValueError(f"{embeds_attr} is not initialized on request {state.req_id}.")
+        raise ValueError(f"{embeds_attr} is not initialized on request {state.request_id}.")
 
     if mask is not None:
         if mask.shape[0] != embeds.shape[0]:
-            raise ValueError(f"{mask_attr} batch dimension does not match {embeds_attr} for request {state.req_id}.")
+            raise ValueError(
+                f"{mask_attr} batch dimension does not match {embeds_attr} for request {state.request_id}."
+            )
         return _get_seq_lens_from_mask(mask)
 
     seq_lens = getattr(state, seq_lens_attr)
@@ -220,7 +222,7 @@ def _prepare_request_prompt_field(
         mask_attr=mask_attr,
     )
     if embeds is None:
-        raise ValueError(f"{embeds_attr} is not initialized on request {state.req_id}.")
+        raise ValueError(f"{embeds_attr} is not initialized on request {state.request_id}.")
 
     actual_seq_lens = _get_request_prompt_seq_lens(
         state,
@@ -248,11 +250,18 @@ def _prepare_request_prompt_field(
     if current_seq_len > target_seq_len:
         if max_actual_seq_len > target_seq_len:
             raise ValueError(
-                f"{embeds_attr} for request {state.req_id} requires seq_len "
+                f"{embeds_attr} for request {state.request_id} requires seq_len "
                 f"{max_actual_seq_len}, got target {target_seq_len}."
             )
-        return embeds[:, :target_seq_len], None if mask is None else mask[:, :target_seq_len]
+        embeds = embeds[:, :target_seq_len]
+        mask = None if mask is None else mask[:, :target_seq_len]
+        setattr(state, embeds_attr, embeds)
+        if mask is not None:
+            setattr(state, mask_attr, mask)
+        setattr(state, seq_lens_attr, [int(embeds.shape[1])] * int(embeds.shape[0]))
+        return embeds, mask
 
+    setattr(state, seq_lens_attr, [int(embeds.shape[1])] * int(embeds.shape[0]))
     return embeds, mask
 
 
@@ -349,7 +358,7 @@ def _require_state_latents(
 ) -> torch.Tensor:
     latents = state.latents
     if latents is None:
-        raise ValueError(f"Request {state.req_id} has no latents while preparing {for_field}.")
+        raise ValueError(f"Request {state.request_id} has no latents while preparing {for_field}.")
     return latents
 
 
@@ -494,7 +503,7 @@ def _prepare_prompt_embeds(
     *,
     embeds_out: torch.Tensor | None = None,
     mask_out: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     prompt_embeds, prompt_embeds_mask = _prepare_padded_prompt_fields(
         states,
         embeds_attr="prompt_embeds",
@@ -503,8 +512,6 @@ def _prepare_prompt_embeds(
         embeds_out=embeds_out,
         mask_out=mask_out,
     )
-    if prompt_embeds is None:
-        raise ValueError("All requests must have `prompt_embeds` initialized.")
     return prompt_embeds, prompt_embeds_mask
 
 
@@ -526,12 +533,12 @@ def _prepare_negative_prompt_embeds(
 
 def _same_composition(
     cached_batch: InputBatch | None,
-    req_ids: list[str],
+    request_ids: list[str],
     idx_mapping_np: np.ndarray,
 ) -> bool:
     if cached_batch is None:
         return False
-    if cached_batch.req_ids != req_ids:
+    if cached_batch.request_ids != request_ids:
         return False
     return np.array_equal(cached_batch.idx_mapping_np, idx_mapping_np)
 
@@ -579,9 +586,13 @@ class InputBatch:
     source of truth. ``InputBatch`` only assembles a contiguous view for the
     current step and refreshes dynamic fields in-place when composition is
     unchanged.
+
+    ``states`` is a narrow escape hatch for Hunyuan-style state-driven
+    pipelines that need request-private KV/cache metadata during denoise.
+    Other pipelines should continue to use the standard batch fields.
     """
 
-    req_ids: list[str]
+    request_ids: list[str]
     num_reqs: int
     num_reqs_after_padding: int
     idx_mapping: torch.Tensor
@@ -589,7 +600,7 @@ class InputBatch:
 
     latents: torch.Tensor
     timesteps: torch.Tensor
-    prompt_embeds: torch.Tensor
+    prompt_embeds: torch.Tensor | None
     prompt_embeds_mask: torch.Tensor | None
     negative_prompt_embeds: torch.Tensor | None
     negative_prompt_embeds_mask: torch.Tensor | None
@@ -602,11 +613,12 @@ class InputBatch:
     img_shapes: list | None = None
     txt_seq_lens: list[int] | None = None
     negative_txt_seq_lens: list[int] | None = None
+    states: Sequence[DiffusionRequestState] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if len(self.req_ids) != int(self.idx_mapping.numel()):
-            raise ValueError("`req_ids` and `idx_mapping` must have the same length.")
-        if self.num_reqs != len(self.req_ids):
+        if len(self.request_ids) != int(self.idx_mapping.numel()):
+            raise ValueError("`request_ids` and `idx_mapping` must have the same length.")
+        if self.num_reqs != len(self.request_ids):
             raise ValueError("`num_reqs` must match the number of request ids.")
         if self.num_reqs_after_padding < self.num_reqs:
             raise ValueError("`num_reqs_after_padding` must be >= `num_reqs`.")
@@ -646,6 +658,9 @@ class InputBatch:
         self,
         selected_states: Sequence[DiffusionRequestState],
     ) -> None:
+        # Same-composition cache hits reuse static prompt fields; request ids
+        # must keep the same encoded prompt metadata for the batch lifetime.
+        self.states = tuple(selected_states)
         self._refresh_dynamic_fields(selected_states)
 
     def _rebuild(
@@ -653,13 +668,14 @@ class InputBatch:
         selected_states: Sequence[DiffusionRequestState],
         idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
-        req_ids: list[str],
+        request_ids: list[str],
     ) -> InputBatch:
-        self.req_ids = req_ids
-        self.num_reqs = len(req_ids)
-        self.num_reqs_after_padding = len(req_ids)
+        self.request_ids = request_ids
+        self.num_reqs = len(request_ids)
+        self.num_reqs_after_padding = len(request_ids)
         self.idx_mapping = idx_mapping
         self.idx_mapping_np = idx_mapping_np
+        self.states = tuple(selected_states)
         self.latents = _prepare_latents(selected_states, out=self.latents)
         self.timesteps = _prepare_timesteps(selected_states, out=self.timesteps)
         self._refresh_static_fields(selected_states)
@@ -675,9 +691,9 @@ class InputBatch:
     ) -> InputBatch:
         """Build a temporary step-local batch view from request states."""
         selected_states, idx_mapping, idx_mapping_np = _select_states(states, idx_mapping)
-        req_ids = _prepare_req_ids(selected_states)
+        request_ids = _prepare_request_ids(selected_states)
 
-        if _same_composition(cached_batch, req_ids, idx_mapping_np):
+        if _same_composition(cached_batch, request_ids, idx_mapping_np):
             assert cached_batch is not None
             cached_batch._repack_dynamic_fields(selected_states)
             return cached_batch
@@ -687,14 +703,14 @@ class InputBatch:
                 selected_states,
                 idx_mapping,
                 idx_mapping_np,
-                req_ids,
+                request_ids,
             )
 
         prompt_embeds, prompt_embeds_mask = _prepare_prompt_embeds(selected_states)
         negative_prompt_embeds, negative_prompt_embeds_mask = _prepare_negative_prompt_embeds(selected_states)
         do_true_cfg, true_cfg_scale, cfg_normalize = _prepare_cfg_scalars(selected_states)
         return cls(
-            req_ids=req_ids,
+            request_ids=request_ids,
             num_reqs=len(selected_states),
             num_reqs_after_padding=len(selected_states),
             idx_mapping=idx_mapping,
@@ -716,6 +732,7 @@ class InputBatch:
                 selected_states,
                 "negative_txt_seq_lens",
             ),
+            states=tuple(selected_states),
         )
 
 

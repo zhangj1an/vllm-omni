@@ -17,7 +17,7 @@ import logging
 import os
 import re
 from collections.abc import Iterable
-from typing import cast
+from typing import ClassVar, cast
 
 import numpy as np
 import PIL.Image
@@ -46,6 +46,7 @@ from vllm_omni.diffusion.models.glm_image.glm_image_transformer import (
     GlmImageKVCache,
     GlmImageTransformer2DModel,
 )
+from vllm_omni.diffusion.models.interface import SupportsComponentDiscovery
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
@@ -238,7 +239,7 @@ def retrieve_latents(
         raise AttributeError("Could not access latents of provided encoder_output")
 
 
-class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
+class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin, SupportsComponentDiscovery):
     """
     GLM-Image Pipeline for text-to-image and image-to-image generation.
 
@@ -254,6 +255,10 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
     3. DiT performs iterative denoising conditioned on prior tokens
     4. VAE decodes final latents to image
     """
+
+    _dit_modules: ClassVar[list[str]] = ["transformer"]
+    _encoder_modules: ClassVar[list[str]] = ["text_encoder"]
+    _vae_modules: ClassVar[list[str]] = ["vae"]
 
     def __init__(
         self,
@@ -301,10 +306,7 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
 
         # Load transformer (DiT)
         logger.info("Loading GlmImageTransformer2DModel (DiT)...")
-        self.transformer = GlmImageTransformer2DModel(
-            od_config=od_config,
-            quant_config=od_config.quantization_config,
-        )
+        self.transformer = GlmImageTransformer2DModel(od_config=od_config, quant_config=od_config.quantization_config)
 
         # Weight sources for DiT loading
         self.weights_sources = [
@@ -558,6 +560,8 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
                     # Scheduler step
                     latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                    # Re-cast to transformer_dtype before cfg_group.broadcast to avoid dtype mismatches across ranks
+                    latents = latents.to(transformer_dtype)
 
                 # Broadcast updated latents to all ranks
                 cfg_group.broadcast(latents, src=0)
@@ -689,15 +693,11 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
         prompt = first_prompt if isinstance(first_prompt, str) else (first_prompt.get("prompt") or "")
 
         # NOTE: DiffusionEngine does an internal warmup "dummy run" during
-        # initialization. That request has no request_id and does not carry
+        # initialization. That request carries the fixed dummy request_id and does not carry
         # Stage-0 (AR) outputs via req.extra. For GLM-Image, we allow that
         # specific warmup request to proceed by synthesizing minimal prior
         # tokens, while still raising a clear error for real requests.
-        is_dummy_warmup = (
-            not getattr(req, "request_id", None)
-            and prompt == "dummy run"
-            and (req.sampling_params.num_inference_steps == 1)
-        )
+        is_dummy_warmup = req.is_dummy_run()
 
         # Get pre-computed prompt embeddings if provided
         if isinstance(first_prompt, str):
