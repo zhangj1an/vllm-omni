@@ -30,9 +30,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# NPU compatibility: cosmos_guardrail.cosmos_utils.load_model calls
+# NPU/XPU compatibility: cosmos_guardrail.cosmos_utils.load_model calls
 # ``torch.load(path, weights_only=True)`` without ``map_location``.
-# On NPU, ``torch.cuda.is_available()`` is False, so deserializing a
+# On NPU/XPU, ``torch.cuda.is_available()`` is False, so deserializing a
 # CUDA checkpoint with ``weights_only=True`` raises an UnpicklingError.
 # Work around by patching ``torch.load`` to default ``map_location="cpu"``
 # when CUDA is unavailable and no explicit map_location was given.
@@ -41,7 +41,9 @@ _original_torch_load = torch.load
 
 
 def _patched_torch_load(*args, **kwargs):
-    if "map_location" not in kwargs and not torch.cuda.is_available() and current_omni_platform.is_npu():
+    if "map_location" not in kwargs and not torch.cuda.is_available() and (
+        current_omni_platform.is_npu() or current_omni_platform.is_xpu()
+    ):
         kwargs["map_location"] = "cpu"
     return _original_torch_load(*args, **kwargs)
 
