@@ -531,7 +531,6 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync \
   - Guardrails (`cosmos-guardrail`) are not available on Ascend NPU.
   - Transfer V2V with `extra_params` (`edge`/`blur`/`depth`/`seg`/`wsm`) hits a
     resolution-parsing bug; basic V2V without transfer hints works.
-  - Audio generation (T2VS, I2VS) works but output quality is noticeably bad.
   - FP8 online quantization and layerwise offload are not supported on NPU.
 
 ### 1x Ascend 910C / Atlas A3 (Offline generation)
