@@ -41,11 +41,7 @@ _original_torch_load = torch.load
 
 
 def _patched_torch_load(*args, **kwargs):
-    if (
-        "map_location" not in kwargs
-        and not torch.cuda.is_available()
-        and current_omni_platform.is_npu()
-    ):
+    if "map_location" not in kwargs and not torch.cuda.is_available() and current_omni_platform.is_npu():
         kwargs["map_location"] = "cpu"
     return _original_torch_load(*args, **kwargs)
 
