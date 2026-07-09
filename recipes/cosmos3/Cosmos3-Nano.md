@@ -425,20 +425,20 @@ ffprobe -v error -show_entries stream=codec_type,nb_frames,width,height cosmos3_
 
 ## NPU
 
-### 1x Ascend 910C / Atlas A3 (Online serving)
+### 1x Ascend 910B / 910C (Atlas A2 / A3) — Online serving
 
 #### Environment
 
 - OS: Linux (aarch64)
 - Python: 3.12+
-- Driver / runtime: CANN 8.5.1 + NNAL + Ascend 910C
+- Driver / runtime: CANN 8.5.1 + NNAL + Ascend 910B / 910C
 - vLLM version: match the repository requirements from your current checkout
 - vLLM-Ascend version: match the repository requirements from your current checkout
 - vLLM-Omni version or commit: use the commit you are deploying from
 
 #### Command
 
-Requires the `vllm-omni` package (or the `quay.io/atlas-ci/vllm-ascend` A3 container),
+Requires the `vllm-omni` package (or the `quay.io/atlas-ci/vllm-ascend` A2 / A3 container),
 which provides the `vllm serve … --omni` entrypoint used below.
 
 Safety guardrails are **on by default** (NVIDIA Open Model License). They load
@@ -521,7 +521,7 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync \
 
 #### Notes
 
-- **Measured latency (1x Ascend 910C, bf16, guardrails off):**
+- **Measured latency (1x Ascend 910B / 910C, bf16, guardrails off):**
   - T2I 1024² — 10 steps → ~8 s
   - T2V 1280×720 @ 20 steps — 49 frames → ~55 s
   - I2V 1280×720 @ 10 steps — 25 frames → ~25 s
@@ -542,13 +542,13 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync \
     resolution-parsing bug; basic V2V without transfer hints works.
   - FP8 online quantization and layerwise offload are not supported on NPU.
 
-### 1x Ascend 910C / Atlas A3 (Offline generation)
+### 1x Ascend 910B / 910C (Atlas A2 / A3) — Offline generation
 
 #### Environment
 
 - OS: Linux (aarch64)
 - Python: 3.12+
-- Driver / runtime: CANN 8.5.1 + NNAL + Ascend 910C
+- Driver / runtime: CANN 8.5.1 + NNAL + Ascend 910B / 910C
 - vLLM-Omni version or commit: use the commit you are deploying from
 
 #### Command
