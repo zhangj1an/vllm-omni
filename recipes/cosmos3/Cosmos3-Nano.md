@@ -441,19 +441,28 @@ ffprobe -v error -show_entries stream=codec_type,nb_frames,width,height cosmos3_
 Requires the `vllm-omni` package (or the `quay.io/atlas-ci/vllm-ascend` A3 container),
 which provides the `vllm serve … --omni` entrypoint used below.
 
-Safety guardrails are **not supported** on NPU. Use `--no-guardrails`
-(required). The pipeline auto-resolves from `model_index.json`.
+Safety guardrails are **on by default** (NVIDIA Open Model License). They load
+the **gated** `nvidia/Cosmos-1.0-Guardrail` model, so to keep them on you must:
+
+1. `pip install cosmos-guardrail`
+2. Accept the license at <https://huggingface.co/nvidia/Cosmos-1.0-Guardrail>
+3. Export a token with access: `export HF_TOKEN=hf_...`
+
+Then launch the recommended server:
 
 ```bash
 vllm serve nvidia/Cosmos3-Nano \
   --omni \
   --host 0.0.0.0 --port 8000 \
-  --no-guardrails \
   --init-timeout 1800
 ```
 
-For tensor parallel add `--tensor-parallel-size 8`.
-`--quantization fp8` and `--enable-layerwise-offload` are not supported on NPU.
+To run **without** guardrails (you are responsible for license compliance),
+add `--no-guardrails` (no token/`cosmos-guardrail` needed). For tensor parallel
+add `--tensor-parallel-size 8`. `--quantization fp8` and
+`--enable-layerwise-offload` are not supported on NPU.
+The pipeline auto-resolves from `model_index.json`; pass
+`--model-class-name Cosmos3OmniDiffusersPipeline` to force it explicitly.
 
 #### Verification
 
@@ -525,10 +534,10 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync \
 - **Supported sizes (per model card):** 256p / 480p / 720p at 16:9, 4:3, 1:1,
   3:4, 9:16. Defaults: T2I 1024², 50 steps, guidance 7.0; T2V/I2V/V2V
   1280×720, 35 steps, guidance 6.0, `flow_shift=10.0`.
-- **Key flags / params:** `--no-guardrails` (required on NPU), `--init-timeout 1800`
-  (for model loading), and `--tensor-parallel-size 8` for multi-NPU.
+- **Key flags / params:** `--no-guardrails` (optional, to disable guardrails), `--init-timeout 1800`
+  (for model loading), `--tensor-parallel-size 8` for multi-NPU, and
+  `--model-class-name Cosmos3OmniDiffusersPipeline` to force the pipeline class.
 - **Known limitations:**
-  - Guardrails (`cosmos-guardrail`) are not available on Ascend NPU.
   - Transfer V2V with `extra_params` (`edge`/`blur`/`depth`/`seg`/`wsm`) hits a
     resolution-parsing bug; basic V2V without transfer hints works.
   - FP8 online quantization and layerwise offload are not supported on NPU.
@@ -545,7 +554,8 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync \
 #### Command
 
 The same offline task examples run on NPU; pass model-specific knobs via
-`--extra-body`. Guardrails are not supported on NPU — pass `"guardrails": false`.
+`--extra-body`. Guardrails are on by default — pass `"guardrails": false` for a
+quick local run (install `cosmos-guardrail` + accept the gated repo to enable them).
 
 ```bash
 # Text-to-image -> examples/offline_inference/text_to_image
@@ -589,7 +599,8 @@ ffprobe -v error -show_entries stream=codec_type,nb_frames,width,height cosmos3_
 
 #### Notes
 
-- Guardrails are not supported on NPU; `"guardrails": false` is required in
-  `--extra-body` (there is no `--no-guardrails` flag for the offline scripts).
+- Guardrails are on by default on NPU with `cosmos-guardrail` installed. Pass
+  `"guardrails": false` in `--extra-body` to disable them (there is no
+  `--no-guardrails` flag for the offline scripts).
 - Video at the 189-frame default takes ~15 min/clip on 1 NPU; reduce
   `--num-frames` for faster iteration.
