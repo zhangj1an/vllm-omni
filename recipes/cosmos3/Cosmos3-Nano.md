@@ -300,27 +300,6 @@ vllm serve nvidia/Cosmos3-Nano-Policy-DROID \
 #   ws://localhost:8000/v1/realtime/robot/openpi
 # The first server message is policy_server_config. Each infer request sends a
 # msgpack-numpy observation dict and receives a writable float32 action array.
-# Text-to-video-with-sound
-curl -sS -X POST http://localhost:8000/v1/videos/sync \
-  -H "Accept: video/mp4" \
-  -F "model=nvidia/Cosmos3-Nano" \
-  -F "prompt=Ocean waves at sunset with gentle ambient sounds." \
-  -F "size=1280x720" -F "num_frames=49" -F "fps=24" \
-  -F "num_inference_steps=20" -F "guidance_scale=6.0" -F "seed=42" \
-  -F "generate_sound=true" \
-  -o cosmos3_t2vs.mp4
-
-# Image-to-video-with-sound
-curl -sS -X POST http://localhost:8000/v1/videos/sync \
-  -H "Accept: video/mp4" \
-  -F "model=nvidia/Cosmos3-Nano" \
-  -F "prompt=The scene comes to life with natural ambient sounds." \
-  -F "size=1280x720" -F "num_frames=25" -F "fps=8" \
-  -F "num_inference_steps=10" -F "guidance_scale=6.0" -F "seed=42" \
-  -F "generate_sound=true" \
-  -F "input_reference=@/path/to/reference.jpg;type=image/jpeg" \
-  -o cosmos3_i2vs.mp4
-
 ```
 
 #### Notes
@@ -447,22 +426,21 @@ ffprobe -v error -show_entries stream=codec_type,nb_frames,width,height cosmos3_
 
 ## NPU
 
-### 1x Ascend 910C (Atlas A3) — Online serving
+### 1x Ascend 910C / Atlas A3 (Online serving)
 
 #### Environment
 
 - OS: Linux (aarch64)
 - Python: 3.12+
-- Driver / runtime: CANN 8.5.1 + NNAL 8.5.1 + Ascend 910C
+- Driver / runtime: CANN 8.5.1 + NNAL + Ascend 910C
 - vLLM version: match the repository requirements from your current checkout
 - vLLM-Ascend version: match the repository requirements from your current checkout
 - vLLM-Omni version or commit: use the commit you are deploying from
-- Docker image: quay.io/atlas-ci/vllm-ascend (A3 variant)
 
 #### Command
 
 Requires the `vllm-omni` package (or the `quay.io/atlas-ci/vllm-ascend` A3 container),
-which provides the `vllm serve ... --omni` entrypoint used below.
+which provides the `vllm serve … --omni` entrypoint used below.
 
 Safety guardrails are **not supported** on NPU. Use `--no-guardrails`
 (required). The pipeline auto-resolves from `model_index.json`.
@@ -536,24 +514,84 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync \
 #### Notes
 
 - **Measured latency (1x Ascend 910C, bf16, guardrails off):**
-  - T2I 1024^2 — 10 steps → ~8 s
-  - T2V 1280x720 @ 20 steps — 49 frames → ~55 s
-  - I2V 1280x720 @ 10 steps — 25 frames → ~25 s
-  - V2V 480x320 @ 10 steps — 17 frames → ~12 s
-- **Memory:** transformer ~17 GiB (bf16); peak ~46 GiB for 720p video on 1 NPU.
-- **Disk:** full repo (transformer + Wan VAE + Qwen3-VL vision encoder + audio
-  tokenizer) ~33 GB.
+  - T2I 1024² — 10 steps → ~8 s
+  - T2V 1280×720 @ 20 steps — 49 frames → ~55 s
+  - I2V 1280×720 @ 10 steps — 25 frames → ~25 s
+  - V2V 480×320 @ 10 steps — 17 frames → ~12 s
+- **Memory:** transformer ~17 GiB (bf16); peak ~46 GiB for 720p video on 1 NPU;
+  full repo (transformer + Wan VAE + Qwen3-VL vision encoder + audio tokenizer)
+  ~33 GB on disk.
 - **Determinism:** identical seed reproduces identical output on the same
   hardware; outputs are not bit-identical across different GPU/NPU types.
 - **Supported sizes (per model card):** 256p / 480p / 720p at 16:9, 4:3, 1:1,
-  3:4, 9:16. Defaults: T2I 1024^2, 50 steps, guidance 7.0; T2V/I2V/V2V
-  1280x720, 35 steps, guidance 6.0, `flow_shift=10.0`.
-- **Key flags / params:** `--no-guardrails` (required on NPU). `--init-timeout 1800`
-  (for model loading). `--tensor-parallel-size 8` for multi-NPU.
-- **NPU-specific notes:**
-  - Guardrails (`cosmos-guardrail`) not available on Ascend NPU.
-  - Transfer V2V with `extra_params` (edge/blur/depth/seg/wsm) hits a
-    resolution-parsing bug. Basic V2V without transfer hints works.
-  - Audio generation (T2VS, I2VS) works but output quality is noticeably lower
-    than GPU; use at your own discretion.
-  - FP8 online quantization and layerwise offload not supported on NPU.
+  3:4, 9:16. Defaults: T2I 1024², 50 steps, guidance 7.0; T2V/I2V/V2V
+  1280×720, 35 steps, guidance 6.0, `flow_shift=10.0`.
+- **Key flags / params:** `--no-guardrails` (required on NPU), `--init-timeout 1800`
+  (for model loading), and `--tensor-parallel-size 8` for multi-NPU.
+- **Known limitations:**
+  - Guardrails (`cosmos-guardrail`) are not available on Ascend NPU.
+  - Transfer V2V with `extra_params` (`edge`/`blur`/`depth`/`seg`/`wsm`) hits a
+    resolution-parsing bug; basic V2V without transfer hints works.
+  - Audio generation (T2VS, I2VS) works but output quality is noticeably bad.
+  - FP8 online quantization and layerwise offload are not supported on NPU.
+
+### 1x Ascend 910C / Atlas A3 (Offline generation)
+
+#### Environment
+
+- OS: Linux (aarch64)
+- Python: 3.12+
+- Driver / runtime: CANN 8.5.1 + NNAL + Ascend 910C
+- vLLM-Omni version or commit: use the commit you are deploying from
+
+#### Command
+
+The same offline task examples run on NPU; pass model-specific knobs via
+`--extra-body`. Guardrails are not supported on NPU — pass `"guardrails": false`.
+
+```bash
+# Text-to-image -> examples/offline_inference/text_to_image
+python examples/offline_inference/text_to_image/text_to_image.py \
+  --model nvidia/Cosmos3-Nano \
+  --prompt "A photorealistic red sports car at golden hour, cinematic lighting." \
+  --negative-prompt "blurry, distorted, low quality" \
+  --height 1024 --width 1024 --num-inference-steps 50 --guidance-scale 7.0 \
+  --extra-body '{"flow_shift": 3.0, "guardrails": false}' \
+  --output cosmos3_t2i.png
+
+# Text-to-video -> examples/offline_inference/text_to_video
+python examples/offline_inference/text_to_video/text_to_video.py \
+  --model nvidia/Cosmos3-Nano \
+  --prompt "A robot arm is cleaning a plate in the kitchen." \
+  --negative-prompt "blurry, distorted, low quality, jittery, deformed" \
+  --height 720 --width 1280 --num-frames 189 --fps 24 \
+  --num-inference-steps 35 --guidance-scale 6.0 \
+  --extra-body '{"flow_shift": 10.0, "max_sequence_length": 4096, "guardrails": false,
+                 "use_resolution_template": false, "use_duration_template": false}' \
+  --output cosmos3_t2v.mp4
+
+# Image-to-video -> examples/offline_inference/image_to_video
+# (Cosmos3 bundles example frames under assets/; any RGB image works too.)
+python examples/offline_inference/image_to_video/image_to_video.py \
+  --model nvidia/Cosmos3-Nano \
+  --image /path/to/Cosmos3-Nano/assets/example_i2v_input.jpg \
+  --prompt "The scene comes to life with smooth, natural motion." \
+  --height 720 --width 1280 --num-frames 189 --fps 24 \
+  --num-inference-steps 35 --guidance-scale 6.0 \
+  --extra-body '{"flow_shift": 10.0, "max_sequence_length": 4096, "guardrails": false}' \
+  --output cosmos3_i2v.mp4
+```
+
+#### Verification
+
+```bash
+python -c "from PIL import Image; im=Image.open('cosmos3_t2i.png'); print('image', im.size, im.mode)"
+ffprobe -v error -show_entries stream=codec_type,nb_frames,width,height cosmos3_t2v.mp4
+```
+
+#### Notes
+
+- Guardrails are not supported on NPU; `"guardrails": false` is required in
+  `--extra-body` (there is no `--no-guardrails` flag for the offline scripts).
+- Video at the 189-frame default takes ~15 min/clip on 1 NPU; reduce
+  `--num-frames` for faster iteration.
