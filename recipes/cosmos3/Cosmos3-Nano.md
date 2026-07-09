@@ -421,8 +421,7 @@ ffprobe -v error -show_entries stream=codec_type,nb_frames,width,height cosmos3_
 - Model-specific knobs (`flow_shift`, `max_sequence_length`, `condition_*`,
   `generate_sound`/`sound_duration`, `guardrails`, `action_*`, ...) are declared
   once in `vllm_omni/model_extras/cosmos3.py` and forwarded through `--extra-body`;
-
-
+  unknown keys for the model are dropped.
 
 ## NPU
 
