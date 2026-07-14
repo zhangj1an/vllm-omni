@@ -128,12 +128,52 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync -H "Accept: video/mp4" \
 
 ## NPU
 
-Requires the `vllm-omni` package (or the `vllm/vllm-omni:cosmos3` container),
-which provides the `vllm serve … --omni` entrypoint used below.
-
 ### 8× Ascend910 (A2, A3)
 
+#### Environment
+
+- OS: Linux
+- Python: 3.10+
+- Driver / runtime: Ascend NPU driver with CANN toolkit
+- Recommended operator library: **mindie-sd** (Ascend high-performance fused
+  operators — enables `adalayernorm` and other fused kernels automatically upon
+  installation)
+- vLLM version: Match the repository requirements for your checkout
+- vLLM-Omni version or commit: Use the commit you are deploying from
+
+A pre-built Docker image is available on
+[Docker Hub](https://hub.docker.com/r/vllm/vllm-omni) and
+[Quay.io](https://quay.io/ascend/vllm-omni). Ensure the image tag matches your
+vLLM-Omni checkout so that NPU-specific code is in sync with the container.
+
+#### Prerequisites
+
+Install the **mindie-sd** operator library to enable Ascend-optimized fused
+operators (`adalayernorm`, etc.):
+
 ```bash
+git clone https://gitcode.com/Ascend/MindIE-SD.git && cd MindIE-SD
+
+# Comment out the tik_ops build step (not needed for this use case)
+sed -i 's|^\(\s*\)source ${current_script_dir}/build_tik_ops.sh|\1# source ${current_script_dir}/build_tik_ops.sh|' build/build_ops.sh
+
+python setup.py bdist_wheel
+cd dist
+pip install mindiesd-*.whl
+```
+
+After installation, enable the Laser Attention kernel for significant
+long-sequence speedups:
+
+```bash
+export MINDIE_SD_FA_TYPE=ascend_laser_attention
+```
+
+#### Command
+
+```bash
+export MINDIE_SD_FA_TYPE=ascend_laser_attention
+
 vllm serve nvidia/Cosmos3-Super \
   --omni \
   --host 0.0.0.0 --port 8000 \
