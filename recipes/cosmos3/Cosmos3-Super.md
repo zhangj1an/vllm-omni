@@ -131,7 +131,7 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync -H "Accept: video/mp4" \
 Requires the `vllm-omni` package (or the `vllm/vllm-omni:cosmos3` container),
 which provides the `vllm serve … --omni` entrypoint used below.
 
-### 8× Ascend910 (65,536 MB HBM each, verified with CANN 9.0.0)
+### 8× Ascend910 (A2, A3)
 
 ```bash
 vllm serve nvidia/Cosmos3-Super \
