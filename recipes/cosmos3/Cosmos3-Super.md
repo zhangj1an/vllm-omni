@@ -185,33 +185,24 @@ vllm serve nvidia/Cosmos3-Super \
 
 #### Verification
 
-Same requests as the GPU section above. Quick smoke tests:
+Same requests as the GPU section above — all modes (T2I, T2V, I2V, V2V,
+T2VS, I2VS) work identically on NPU. Quick reference with
+`--no-guardrails`:
 
 ```bash
 curl http://localhost:8000/v1/models
 
-# T2I smoke (256², 2 steps, fast check)
+# T2I (1024x1024, 50 steps)
 curl -sS -X POST http://localhost:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -d '{
     "model": "nvidia/Cosmos3-Super",
-    "prompt": "A photorealistic red sports car on a city street at golden hour.",
-    "size": "256x256", "n": 1, "response_format": "b64_json",
-    "num_inference_steps": 2, "guidance_scale": 1.0,
-    "flow_shift": 3.0, "seed": 42
-  }' | python3 -c "import sys,json,base64; open('cosmos3_t2i.png','wb').write(base64.b64decode(json.load(sys.stdin)['data'][0]['b64_json']))"
+    "prompt": "A photorealistic red sports car on a city street at golden hour, cinematic lighting.",
+    "size": "1024x1024", "n": 1, "response_format": "b64_json",
+    "num_inference_steps": 50, "guidance_scale": 7.0, "seed": 42
+  }' | python3 -c "import sys,json,base64; open('cosmos3_super_t2i.png','wb').write(base64.b64decode(json.load(sys.stdin)['data'][0]['b64_json']))"
 
-# T2V smoke (256², 5 frames, 2 steps)
-curl -sS -X POST http://localhost:8000/v1/videos/sync \
-  -H "Accept: video/mp4" \
-  -F "model=nvidia/Cosmos3-Super" \
-  -F "prompt=A robot arm is cleaning a plate in the kitchen" \
-  -F "size=256x256" -F "num_frames=5" -F "fps=1" \
-  -F "num_inference_steps=2" -F "guidance_scale=1.0" \
-  -F "flow_shift=3.0" -F "seed=17" \
-  -o cosmos3_super_t2v.mp4
-
-# Full T2V (1280×720, 189 frames, 35 steps — official params)
+# T2V (1280×720, 189 frames, 35 steps — official params)
 curl -sS -X POST http://localhost:8000/v1/videos/sync -H "Accept: video/mp4" \
   -F "model=nvidia/Cosmos3-Super" -F "prompt=A robot arm is cleaning a plate in the kitchen" \
   -F "size=1280x720" -F "num_frames=189" -F "fps=24" -F "num_inference_steps=35" \
@@ -236,6 +227,25 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync -H "Accept: video/mp4" \
   -F 'extra_params={"condition_frame_indexes_vision":[0,1],"condition_video_keep":"first","guardrails":false}' \
   -F "seed=2222" -F "input_reference=@/path/to/reference.mp4;type=video/mp4" \
   -o cosmos3_super_v2v.mp4
+
+# T2V + sound — add generate_sound/sound_duration (output muxes AAC 48 kHz stereo)
+curl -sS -X POST http://localhost:8000/v1/videos/sync -H "Accept: video/mp4" \
+  -F "model=nvidia/Cosmos3-Super" -F "prompt=A robot arm is cleaning a plate in the kitchen" \
+  -F "size=1280x720" -F "num_frames=189" -F "fps=24" -F "num_inference_steps=35" \
+  -F "guidance_scale=6.0" -F "max_sequence_length=4096" -F "flow_shift=10.0" \
+  -F "generate_sound=true" -F "sound_duration=7.875" \
+  -F 'extra_params={"use_resolution_template":false,"use_duration_template":false,"guardrails":false}' \
+  -F "seed=17" -o cosmos3_super_t2vs.mp4
+
+# I2V + sound — reference image with synchronized audio
+curl -sS -X POST http://localhost:8000/v1/videos/sync -H "Accept: video/mp4" \
+  -F "model=nvidia/Cosmos3-Super" -F "prompt=The scene comes to life with smooth, natural motion and ambient sound." \
+  -F "size=1280x720" -F "num_frames=189" -F "fps=24" -F "num_inference_steps=35" \
+  -F "guidance_scale=6.0" -F "max_sequence_length=4096" -F "flow_shift=10.0" \
+  -F "generate_sound=true" -F "sound_duration=7.875" \
+  -F 'extra_params={"use_resolution_template":false,"use_duration_template":false,"guardrails":false}' \
+  -F "seed=1111" -F "input_reference=@/path/to/reference.jpg;type=image/jpeg" \
+  -o cosmos3_super_i2vs.mp4
 ```
 
 #### Notes
