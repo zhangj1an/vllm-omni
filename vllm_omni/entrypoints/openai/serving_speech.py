@@ -1945,6 +1945,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 model_id,
                 request.input or "",
                 reference_audio_tokens=ref_tokens,
+                seed=request.seed,
                 max_new_frames=request.max_new_tokens,
             )
             params = dict(info)

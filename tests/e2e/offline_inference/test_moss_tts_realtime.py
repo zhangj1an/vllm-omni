@@ -36,6 +36,7 @@ import soundfile as sf
 import torch
 from vllm import SamplingParams
 
+from tests.helpers.audio_output import audio_from_mm, collect_audio_from_outputs
 from tests.helpers.mark import hardware_test
 from tests.helpers.runtime import OmniRunner
 from tests.helpers.stage_config import get_deploy_config_path, modify_stage_config
@@ -246,56 +247,9 @@ def _build_request(ref_audio_path: str, text: str, seed: int = 42) -> dict:
     }
 
 
-def _audio_from_mm(mm: dict | None) -> torch.Tensor | None:
-    """Return a 1-D CPU waveform from one output's multimodal_output, or None.
-
-    Audio arrives under ``audio`` or (pre-consolidation) ``model_outputs``, as a
-    tensor or a list of per-request tensors. Never use ``a or b`` on tensor
-    values — a multi-element tensor raises on truthiness; check ``is None``.
-    """
-    if not mm:
-        return None
-    audio = mm.get("audio")
-    if audio is None:
-        audio = mm.get("model_outputs")
-    if audio is None:
-        return None
-    if isinstance(audio, list):
-        parts = [t.reshape(-1) for t in audio if isinstance(t, torch.Tensor) and t.numel() > 0]
-        if not parts:
-            return None
-        audio = torch.cat(parts, dim=0)
-    if not isinstance(audio, torch.Tensor):
-        return None
-    return audio.reshape(-1).cpu()
-
-
 def _collect_audio(omni_runner: OmniRunner, request: dict) -> tuple[torch.Tensor, int]:
     """Run one request and return (waveform_cpu, sample_rate)."""
-    chunks: list[torch.Tensor] = []
-    sr_final = SAMPLE_RATE
-    for out in omni_runner.omni.generate(request, _SAMPLING):
-        mm = out.multimodal_output
-        if not mm:
-            continue
-        audio = mm.get("audio")
-        if audio is None:
-            audio = mm.get("model_outputs")
-        if audio is None:
-            continue
-        sr = mm.get("sr")
-        if sr is not None:
-            sr_final = int(sr.item() if hasattr(sr, "item") else sr)
-        if isinstance(audio, list):
-            audio = torch.cat(
-                [t.reshape(-1) for t in audio if isinstance(t, torch.Tensor) and t.numel() > 0],
-                dim=0,
-            )
-        if isinstance(audio, torch.Tensor) and audio.numel() > 0:
-            chunks.append(audio.reshape(-1).cpu())
-    if not chunks:
-        raise AssertionError("No audio output received from generate()")
-    return torch.cat(chunks, dim=0), sr_final
+    return collect_audio_from_outputs(omni_runner.omni.generate(request, _SAMPLING), SAMPLE_RATE)
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +328,7 @@ def test_moss_tts_realtime_batch(omni_runner: OmniRunner, ref_audio_path: str) -
     chunks_by_req: dict[int, list[torch.Tensor]] = {}
     for out in omni_runner.omni.generate(requests, _SAMPLING):
         idx = int(out.request_id.split("_", 1)[0])
-        chunk = _audio_from_mm(out.multimodal_output)
+        chunk = audio_from_mm(out.multimodal_output)
         if chunk is not None and chunk.numel() > 0:
             chunks_by_req.setdefault(idx, []).append(chunk)
 

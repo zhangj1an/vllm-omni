@@ -21,6 +21,7 @@ import pytest
 import torch
 from vllm import SamplingParams
 
+from tests.helpers.audio_output import collect_audio_from_outputs
 from tests.helpers.mark import hardware_test
 from tests.helpers.runtime import OmniRunner
 from tests.helpers.stage_config import get_deploy_config_path, modify_stage_config
@@ -156,36 +157,11 @@ def _build_request(processor, text: str, ref_wav: torch.Tensor, seed: int = 42) 
 def _collect_audio(omni: Omni, request: dict) -> tuple[torch.Tensor, int]:
     """Run one request; return (waveform_cpu, sample_rate).
 
-    ``generate()`` returns a flat list of ``OmniRequestOutput`` (one or more per
-    request as audio streams); each exposes ``.multimodal_output`` directly
-    (``.request_output`` is a single inner ``RequestOutput``, not an iterable).
     Sampling params are PER STAGE — MOSS-TTS-v1.5 is a two-stage pipeline
     (talker + codec), so replicate ``_DEFAULT_SAMPLING`` across stages.
     """
     sampling = [_DEFAULT_SAMPLING] * omni.num_stages
-    chunks: list[torch.Tensor] = []
-    sr = SAMPLE_RATE
-    for omni_out in omni.generate(request, sampling):
-        mm = omni_out.multimodal_output
-        if not mm:
-            continue
-        sr_val = mm.get("sr")
-        if sr_val is not None:
-            sr = int(sr_val.item()) if hasattr(sr_val, "item") else int(sr_val)
-        audio = mm.get("audio")
-        if audio is None:
-            audio = mm.get("model_outputs")
-        if audio is None:
-            continue
-        if isinstance(audio, list):
-            audio = torch.cat(
-                [t.reshape(-1) for t in audio if isinstance(t, torch.Tensor) and t.numel() > 0],
-                dim=0,
-            )
-        if isinstance(audio, torch.Tensor) and audio.numel() > 0:
-            chunks.append(audio.reshape(-1).cpu())
-    assert chunks, "No audio received across generate() outputs"
-    return torch.cat(chunks, dim=0), sr
+    return collect_audio_from_outputs(omni.generate(request, sampling), SAMPLE_RATE)
 
 
 @hardware_test(res={"cuda": "H100"})

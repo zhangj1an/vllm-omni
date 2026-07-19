@@ -955,6 +955,15 @@ class MossTTSRealtimeTalkerForGeneration(nn.Module):
         logits = hidden_states.new_full((B, V), float("-inf"))
 
         states = self._batch_state or []
+        # ``logits`` starts all -inf and ``_iter_state_row_spans`` yields nothing
+        # when there are no states, so without this the sampler would see an
+        # all -inf row. Reachable on the very first call (state is populated by
+        # make_omni_output, which has not run yet), so default to text_pad
+        # everywhere — "continue, emit nothing" — rather than returning garbage.
+        if not states:
+            logits[:, self.text_pad_id] = 0.0
+            return logits
+
         for state, r0, r1 in _iter_state_row_spans(
             states,
             getattr(self, "_batch_state_spans", None),

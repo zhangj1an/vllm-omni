@@ -18,6 +18,7 @@ import pytest
 import torch
 from vllm import SamplingParams
 
+from tests.helpers.audio_output import audio_from_mm, collect_audio_from_outputs
 from tests.helpers.mark import hardware_test
 from tests.helpers.runtime import OmniRunner
 from tests.helpers.stage_config import get_deploy_config_path, modify_stage_config
@@ -96,70 +97,17 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
-def _audio_from_mm(mm: dict | None) -> torch.Tensor | None:
-    """Return a 1-D CPU waveform from one output's multimodal_output, or None.
-
-    Audio arrives under ``audio`` or (pre-consolidation) ``model_outputs``, as a
-    tensor or a list of per-request tensors. Never use ``a or b`` on tensor
-    values — a multi-element tensor raises on truthiness; check ``is None``.
-    """
-    if not mm:
-        return None
-    audio = mm.get("audio")
-    if audio is None:
-        audio = mm.get("model_outputs")
-    if audio is None:
-        return None
-    if isinstance(audio, list):
-        parts = [t.reshape(-1) for t in audio if isinstance(t, torch.Tensor) and t.numel() > 0]
-        if not parts:
-            return None
-        audio = torch.cat(parts, dim=0)
-    if not isinstance(audio, torch.Tensor):
-        return None
-    return audio.reshape(-1).cpu()
-
-
-def _sr_from_mm(mm: dict | None) -> int | None:
-    """Return the integer sample rate from a multimodal_output, or None."""
-    if not mm:
-        return None
-    sr = mm.get("sr")
-    if isinstance(sr, list):
-        sr = sr[0] if sr else None
-    if sr is None:
-        return None
-    return int(sr.item()) if isinstance(sr, torch.Tensor) else int(sr)
-
-
 def _collect_audio(omni: Omni, request: dict, sampling: list | None = None) -> tuple[torch.Tensor, int]:
     """Run one request; return (waveform_cpu, sample_rate).
 
-    ``generate()`` returns a flat list of ``OmniRequestOutput`` (one or more
-    per request as audio streams); each exposes ``.multimodal_output`` directly
-    (``.request_output`` is a single inner ``RequestOutput``, not an iterable).
-    Concatenate every non-empty audio chunk in arrival order.
-
-    ``sampling`` is the PER-STAGE sampling-params list (length == num_stages);
-    when omitted, ``_DEFAULT_SAMPLING`` is replicated across stages.
+    ``sampling`` is the PER-STAGE sampling-params list (its length must equal
+    num_stages), not per request. MOSS-TTS is a two-stage pipeline (talker +
+    codec), so a single SamplingParams is rejected — when omitted,
+    ``_DEFAULT_SAMPLING`` is replicated across stages.
     """
-    chunks: list[torch.Tensor] = []
-    sr = SAMPLE_RATE
-    # sampling_params_list is PER STAGE (its length must equal num_stages),
-    # not per request. MOSS-TTS is a two-stage pipeline (talker + codec), so a
-    # single SamplingParams is rejected — replicate it across stages.
     if sampling is None:
         sampling = [_DEFAULT_SAMPLING] * omni.num_stages
-    for omni_out in omni.generate(request, sampling):
-        mm = omni_out.multimodal_output
-        sr_val = _sr_from_mm(mm)
-        if sr_val is not None:
-            sr = sr_val
-        chunk = _audio_from_mm(mm)
-        if chunk is not None and chunk.numel() > 0:
-            chunks.append(chunk)
-    assert chunks, "No audio received across generate() outputs"
-    return torch.cat(chunks, dim=0), sr
+    return collect_audio_from_outputs(omni.generate(request, sampling), SAMPLE_RATE)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +244,7 @@ def test_moss_tts_delay_batch(omni_runner: OmniRunner, delay_processor) -> None:
     chunks_by_req: dict[int, list[torch.Tensor]] = {}
     for omni_out in omni_runner.omni.generate(requests, sampling):
         idx = int(omni_out.request_id.split("_", 1)[0])
-        chunk = _audio_from_mm(omni_out.multimodal_output)
+        chunk = audio_from_mm(omni_out.multimodal_output)
         if chunk is not None and chunk.numel() > 0:
             chunks_by_req.setdefault(idx, []).append(chunk)
 
