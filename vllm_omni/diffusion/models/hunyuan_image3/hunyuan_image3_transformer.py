@@ -1099,6 +1099,12 @@ class ImageKVCacheManager:
 
         neg_kv = (key.reshape(-1, num_kv_heads, head_dim), value.reshape(-1, num_kv_heads, head_dim))
         self._injected_ar_kv = [self._injected_ar_kv[0], neg_kv]
+        logger.debug(
+            "[AR KV Reuse] neg branch: reused shared_prefix_len=%d, neg_kv_total_len=%d (q_len_actual=%d)",
+            shared_prefix_len,
+            key.shape[1],
+            q_len_actual,
+        )
         return key, value
 
     def __call__(
@@ -2235,13 +2241,8 @@ class HunyuanImage3Model(nn.Module):
             # processed with quantization, LoRA, fine-tuning, etc.
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
-            if self.quant_config is not None and (scale_name := self.quant_config.get_cache_scale(name)):
-                # Loading kv cache scales for compressed-tensors quantization
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                continue
+            # KV-cache scales are renamed via maybe_remap_kv_scale_name below;
+            # quant_config.get_cache_scale was removed in vLLM v0.23.0 (see #4810).
 
             is_found = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -2924,6 +2925,10 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
     ):
         ar_kv_data = model_kwargs.pop("ar_kv_data", None)
         if ar_kv_data is None:
+            logger.debug(
+                "[AR KV Reuse] cfg_rank=%s: no AR KV received, fallback to full recompute (reuse_len=0)",
+                cfg_rank,
+            )
             return input_ids, 0
 
         # 1. positive prefix len

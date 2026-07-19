@@ -6,6 +6,7 @@ import os
 import random
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import diffusers
@@ -663,6 +664,9 @@ class OmniDiffusionConfig:
     # STA_mode: STA_Mode = STA_Mode.STA_INFERENCE
     skip_time_steps: int = 15
 
+    # MoE kernel backend selection
+    moe_backend: str = "auto"
+
     # Compilation
     enforce_eager: bool = False
 
@@ -1197,8 +1201,10 @@ class DiffusionOutput:
     Final output (after pipeline completion)
     """
 
-    # Fields may be replaced with SHM handle dicts by ipc.pack_diffusion_output_shm
     output: torch.Tensor | tuple[Any, ...] | dict[str, Any] | None = None
+
+    # Legacy compatibility fields. New pipeline-specific payloads should be
+    # carried by output["payload"] instead.
     trajectory_timesteps: torch.Tensor | dict[str, Any] | None = None
     trajectory_latents: torch.Tensor | dict[str, Any] | None = None
     trajectory_log_probs: torch.Tensor | dict[str, Any] | None = None
@@ -1210,10 +1216,6 @@ class DiffusionOutput:
     abort_message: str | None = None
 
     post_process_func: Callable[..., Any] | None = None
-
-    # Extra custom output data (e.g. latent trajectories, prompt embeds)
-    # passed through to OmniRequestOutput.custom_output
-    custom_output: dict[str, Any] = field(default_factory=dict)
 
     # logged timings info, directly from Req.timings
     # timings: Optional["RequestTimings"] = None
@@ -1229,10 +1231,9 @@ class DiffusionOutput:
     # memory usage info
     peak_memory_mb: float = 0.0
 
-    # When True, move all tensor fields (including tensors inside
-    # ``custom_output``) to CPU at construction time. Useful when the output
-    # is shipped across process boundaries (e.g. step-execution mode) and the
-    # receiving side must not initialise a stray CUDA context.
+    # When True, move tensor fields to CPU at construction time. Useful when
+    # the output is shipped across process boundaries (e.g. step-execution
+    # mode) and the receiving side must not initialise a stray CUDA context.
     to_cpu: bool = False
 
     def __post_init__(self) -> None:
@@ -1242,14 +1243,18 @@ class DiffusionOutput:
         def _maybe_to_cpu(value: Any) -> Any:
             if isinstance(value, torch.Tensor):
                 return value.detach().cpu()
+            if isinstance(value, dict):
+                return {key: _maybe_to_cpu(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [_maybe_to_cpu(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(_maybe_to_cpu(item) for item in value)
             return value
 
         self.output = _maybe_to_cpu(self.output)
         self.trajectory_timesteps = _maybe_to_cpu(self.trajectory_timesteps)
         self.trajectory_latents = _maybe_to_cpu(self.trajectory_latents)
         self.trajectory_log_probs = _maybe_to_cpu(self.trajectory_log_probs)
-        if self.custom_output:
-            self.custom_output = {k: _maybe_to_cpu(v) for k, v in self.custom_output.items()}
 
     @classmethod
     def from_exception(cls, exc: BaseException) -> "DiffusionOutput":
@@ -1486,6 +1491,13 @@ class OmniWakeTask:
 
     task_id: str
     tags: list[str] | None = None
+
+
+class CuMemTag(str, Enum):
+    """Tags representing specific CuMem allocations for sleep/wake state tracking."""
+
+    WEIGHTS = "weights"
+    KV_CACHE = "kv_cache"
 
 
 # Special message broadcast via scheduler queues to signal worker shutdown.
