@@ -11,6 +11,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import DefaultModelLoader
@@ -795,20 +796,36 @@ class MossTTSCodecDecoder(nn.Module):
         # mirror that here.
         return {f"_codec.{name}" for name, _ in codec.named_parameters()}
 
-    def _build_codec(self, codec_path: str) -> tuple[Any, nn.Module]:
-        try:
-            codec_cfg = MossAudioTokenizerV2Config.from_pretrained(codec_path)
-            codec = MossAudioTokenizerV2Model(codec_cfg)
-            logger.info("Using vendored MOSS Audio Tokenizer v2 classes from %s", codec_path)
-            return codec_cfg, codec
-        except Exception:
-            logger.exception(
-                "Failed to instantiate vendored MOSS Audio Tokenizer v2; falling back to legacy vendored codec."
-            )
+    # Keys present only in v2 (dual-channel 48 kHz) tokenizer checkpoints. The
+    # legacy 24 kHz mono checkpoint (``OpenMOSS-Team/MOSS-Audio-Tokenizer``,
+    # used by MOSS-TTS-Realtime/v1) carries none of them.
+    _V2_CONFIG_MARKERS: tuple[str, ...] = (
+        "number_channels",
+        "enable_channel_interleave",
+        "attention_implementation",
+        "compute_dtype",
+    )
 
+    def _build_codec(self, codec_path: str) -> tuple[Any, nn.Module]:
+        """Pick the tokenizer implementation from the checkpoint, not by trial.
+
+        Selecting by try-v2-then-fall-back is wrong: a v1 checkpoint *does*
+        instantiate cleanly under the v2 config (the v2 class defaults every
+        v2-only field), so the legacy branch is never reached and the
+        Realtime/v1 path silently runs a v2 model over v1 weights. Decide
+        explicitly on the raw ``config.json`` instead.
+        """
+        config_dict, _ = PretrainedConfig.get_config_dict(codec_path)
+        is_v2 = any(key in config_dict for key in self._V2_CONFIG_MARKERS)
+
+        if is_v2:
+            logger.info("Using vendored MOSS Audio Tokenizer v2 classes from %s", codec_path)
+            codec_cfg = MossAudioTokenizerV2Config.from_pretrained(codec_path)
+            return codec_cfg, MossAudioTokenizerV2Model(codec_cfg)
+
+        logger.info("Using vendored legacy MOSS Audio Tokenizer classes from %s", codec_path)
         codec_cfg = MossAudioTokenizerConfig.from_pretrained(codec_path)
-        codec = MossAudioTokenizerModel(codec_cfg)
-        return codec_cfg, codec
+        return codec_cfg, MossAudioTokenizerModel(codec_cfg)
 
     def _configure_decoder_cudagraph(self, device: torch.device) -> None:
         """Select the codec CUDA Graph path.
