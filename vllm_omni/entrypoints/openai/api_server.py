@@ -718,6 +718,18 @@ async def build_async_omni_from_stage_config(
         kwargs = args.get_explicit_kwargs_dict()
         model = kwargs.pop("model", None) or args.model
         kwargs.setdefault("log_stats", not args.disable_log_stats)
+
+        # Thread vLLM-Omni specific args through to the engine/stage configs.
+        # These are consumed by AsyncOmniEngine → stage config → OmniDiffusionConfig
+        for attr in ("model_class_name", "no_guardrails", "lora_path", "lora_scale"):
+            val = getattr(args, attr, None)
+            if val is not None and val is not False:
+                kwargs[attr] = val
+
+        # init_timeout: AsyncOmni pops this from kwargs directly
+        if hasattr(args, "init_timeout") and args.init_timeout:
+            kwargs["init_timeout"] = args.init_timeout
+
         async_omni = AsyncOmni(model=model, **kwargs)
 
         # # Don't keep the dummy data in memory

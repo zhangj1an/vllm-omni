@@ -273,3 +273,107 @@ curl -sS -X POST http://localhost:8000/v1/videos/sync -H "Accept: video/mp4" \
 - **Performance (verified on 8× Ascend910):** T2I 256² / 2 steps / guidance 1.0 → ~1.5 s.
 - **Guardrails** are disabled with `--no-guardrails` (guards are on by default). The gated `nvidia/Cosmos-1.0-Guardrail` model and `cosmos-guardrail` package are not shipped. Add `guardrails: false` in `extra_params` for per-request overrides when the server has guardrails enabled.
 - **Known limitations:** FP8 quantization not yet validated on Ascend NPU. `--enable-layerwise-offload` is available but untested on NPU.
+
+## LoRA
+
+Cosmos3-Super supports PEFT LoRA adapters for fine-tuned style or concept
+generation. The `DiffusionLoRAManager` auto-discovers the `transformer`
+component and injects LoRA into every `ColumnParallelLinear` /
+`RowParallelLinear` layer — no model code changes needed.
+
+**Target modules** (Cosmos3 attention + MLP, both UND and GEN pathways):
+
+```
+to_q, to_k, to_v, to_out           # attention QKV + output
+add_q_proj, add_k_proj, add_v_proj, to_add_out  # framework attention additional projections
+gate_proj, up_proj, down_proj      # MLP
+```
+
+### Training a LoRA adapter
+
+Use `peft` >= 0.14 with `LoraConfig`. The saved adapter must contain
+`adapter_config.json` + `adapter_model.safetensors`:
+
+```python
+from peft import LoraConfig, get_peft_model
+
+lora_config = LoraConfig(
+    r=64,
+    lora_alpha=128,
+    target_modules=[
+        "to_q", "to_k", "to_v", "to_out",
+        "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    lora_dropout=0.0,
+    bias="none",
+)
+
+# Load Cosmos3-Super transformer, apply LoRA, train, save
+model = load_cosmos3_transformer(...)
+model = get_peft_model(model, lora_config)
+# ... train ...
+model.save_pretrained("./cosmos3-super-my-lora")
+```
+
+### Serving with LoRA — static adapter
+
+Load a single adapter at server start (applied to every request):
+
+```bash
+vllm serve nvidia/Cosmos3-Super \
+  --omni \
+  --host 0.0.0.0 --port 8000 \
+  --cfg-parallel-size 2 --use-hsdp --hsdp-shard-size 2 \
+  --lora-path ./cosmos3-super-my-lora --lora-scale 1.0 \
+  --no-guardrails --init-timeout 1800
+```
+
+### Serving with LoRA — per-request adapter
+
+Dynamic adapter switching via the `lora` request field (server must be started
+**without** `--lora-path`):
+
+```bash
+# T2I with per-request LoRA
+curl -sS -X POST http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nvidia/Cosmos3-Super",
+    "prompt": "A fox in the snow, cinematic lighting",
+    "size": "1024x1024",
+    "num_inference_steps": 50,
+    "guidance_scale": 7.0,
+    "seed": 42,
+    "lora": {"name": "mystyle", "path": "/path/to/cosmos3-super-my-lora", "scale": 1.0}
+  }' | python3 -c "import sys,json,base64; open('t2i_lora.png','wb').write(base64.b64decode(json.load(sys.stdin)['data'][0]['b64_json']))"
+
+# T2V with per-request LoRA
+curl -sS -X POST http://localhost:8000/v1/videos/sync -H "Accept: video/mp4" \
+  -F "model=nvidia/Cosmos3-Super" \
+  -F "prompt=A robot arm is cleaning a plate in the kitchen, watercolor painting style" \
+  -F "size=1280x720" -F "num_frames=189" -F "fps=24" \
+  -F "num_inference_steps=35" -F "guidance_scale=6.0" \
+  -F "max_sequence_length=4096" -F "flow_shift=10.0" \
+  -F 'extra_params={"use_resolution_template":false,"use_duration_template":false,"guardrails":false}' \
+  -F "seed=17" \
+  -F 'lora={"name": "mystyle", "path": "/path/to/cosmos3-super-my-lora", "scale": 1.0}' \
+  -o cosmos3_super_t2v_lora.mp4
+```
+
+#### Notes
+
+- **LoRA rank:** rank 32–128 is typical. Larger rank uses more VRAM (~r × hidden_size × 2
+  × target_modules per device).
+- **Adapter format:** Must be PEFT format (`adapter_config.json` +
+  `adapter_model.safetensors`). The `target_modules` in `adapter_config.json` must
+  match Cosmos3's linear layer names.
+- **Per-request `lora` field:** `name` is a user-chosen label, `path` can be local
+  or a HuggingFace repo id, `scale` controls adapter strength (0 = off, 1 = full).
+- **VRAM impact:** A rank-64 LoRA on Cosmos3-Super adds ~130 MB to the model
+  weights (negligible vs 128 GB base). Activations are unchanged.
+- **Cache:** The server caches up to `max_cpu_loras` adapters (default 1); LRU
+  eviction applies when more adapters are loaded.
+- **Known limitations:** LoRA is applied to the `transformer` only (not VAE, vision
+  encoder, or sound tokenizer). Style/trigger words in the prompt are recommended
+  for best results.
