@@ -25,6 +25,7 @@ Reference implementations:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from collections.abc import Iterable
@@ -491,6 +492,78 @@ class PaliGemmaWithActionExpertPi05(nn.Module):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Denoising-loop CUDA graph
+# ──────────────────────────────────────────────────────────────────────
+@dataclasses.dataclass(frozen=True)
+class _Pi05SuffixContext:
+    """Attention masks and position ids shared by every denoising step."""
+
+    attention_mask_4d: torch.Tensor
+    position_ids: torch.Tensor
+
+
+class _Pi05DenoiseGraph:
+    """A captured CUDA graph of one denoising step, replayed per Euler step.
+
+    The denoising loop runs `num_steps` iterations whose shapes never change:
+    only ``x_t`` and the scalar timestep differ. The prefix KV cache, the
+    attention mask and the position ids are fixed for the whole chunk. That
+    makes the step body capturable, which matters here because the step is
+    launch-bound — roughly 1.4k kernel launches for ~24 ms of work — so replay
+    removes host launch overhead that the GPU was otherwise waiting on.
+
+    Every tensor the graph reads must live at a fixed address, so the inputs and
+    the KV cache are copied into owned buffers. ``rebind`` refreshes those
+    buffers for a new request with the same shapes, rather than re-capturing.
+    """
+
+    def __init__(self, model: "Pi05ForActionPrediction", suffix_ctx, past_key_values, x_like, t_like):
+        self._model = model
+        self.x = torch.empty_like(x_like)
+        self.t = torch.empty_like(t_like)
+        self.attention_mask_4d = suffix_ctx.attention_mask_4d.clone()
+        self.position_ids = suffix_ctx.position_ids.clone()
+        self.past_key_values = [(k.clone(), v.clone()) for k, v in past_key_values]
+
+        self.x.copy_(x_like)
+        self.t.copy_(t_like)
+
+        # Capture requires the work to have run at least once on a side stream,
+        # so lazy initialisation (autotune, workspace allocation) happens before
+        # the recording starts rather than inside it.
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                self._run()
+        torch.cuda.current_stream().wait_stream(stream)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.out = self._run()
+
+    def _run(self) -> torch.Tensor:
+        return self._model._denoise_core(
+            self.x, self.t, self.attention_mask_4d, self.position_ids, self.past_key_values
+        )
+
+    def rebind(self, suffix_ctx, past_key_values) -> None:
+        """Point the captured graph at a new request's context, in place."""
+        self.attention_mask_4d.copy_(suffix_ctx.attention_mask_4d)
+        self.position_ids.copy_(suffix_ctx.position_ids)
+        for (k_static, v_static), (k, v) in zip(self.past_key_values, past_key_values, strict=True):
+            k_static.copy_(k)
+            v_static.copy_(v)
+
+    def __call__(self, x_t: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+        self.x.copy_(x_t)
+        self.t.copy_(timestep)
+        self.graph.replay()
+        # The caller consumes this before the next replay overwrites it.
+        return self.out
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Main π0.5 Model
 # ──────────────────────────────────────────────────────────────────────
 class Pi05ForActionPrediction(nn.Module):
@@ -541,6 +614,12 @@ class Pi05ForActionPrediction(nn.Module):
         # π0-only continuous-state path.
         self.time_mlp_in = nn.Linear(self.expert_width, self.expert_width)
         self.time_mlp_out = nn.Linear(self.expert_width, self.expert_width)
+
+        # Denoising-loop CUDA graphs, keyed by shape. Bounded by the declared
+        # shape set (view count x batch x dtype), not by request history: a
+        # repeat request with the same shapes rebinds the existing capture.
+        self.use_cuda_graph = bool(getattr(config, "use_cuda_graph", True))
+        self._denoise_graphs: dict[tuple, _Pi05DenoiseGraph] = {}
 
     # ── Prefix embedding ─────────────────────────────────────────────
     def embed_prefix(
@@ -652,36 +731,20 @@ class Pi05ForActionPrediction(nn.Module):
         """Apply one flow-matching denoising step: predict ``v_t`` from ``x_t``.
 
         Signature differs from π0's by exactly one argument: no ``state``.
+
+        Kept as the standalone entry point (tests and any caller outside
+        ``sample_actions`` use it). It builds the loop-invariant suffix context
+        and defers to :meth:`_denoise_core`, which is also what the captured
+        CUDA graph runs — one body, so the eager and graphed paths cannot drift.
         """
-        suffix_embs, suffix_pad_masks, suffix_att_masks, time_cond = self.embed_suffix(x_t, timestep)
-
-        batch_size = prefix_pad_masks.shape[0]
-        suffix_len = suffix_pad_masks.shape[1]
-        prefix_len = prefix_pad_masks.shape[1]
-
-        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
-        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
-        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
-
-        # Position IDs continue from where the prefix's last valid token left off.
-        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
-        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
-
-        full_att_2d_masks_4d = prepare_attention_masks_4d(full_att_2d_masks)
-
-        outputs_embeds, _ = self.paligemma_with_expert.forward(
-            attention_mask=full_att_2d_masks_4d,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=[None, suffix_embs],
-            use_cache=False,
-            adarms_cond=time_cond,
+        suffix_ctx = self._build_suffix_context(prefix_pad_masks)
+        return self._denoise_core(
+            x_t,
+            timestep,
+            suffix_ctx.attention_mask_4d,
+            suffix_ctx.position_ids,
+            past_key_values,
         )
-
-        # Every suffix token is an action token in π0.5 (no state token to drop).
-        suffix_out = outputs_embeds[1][:, -self.action_horizon :]
-        suffix_out = suffix_out.to(dtype=self.action_out_proj.weight.dtype)
-        return self.action_out_proj(suffix_out)
 
     # ── Full action generation ───────────────────────────────────────
     @torch.no_grad()
@@ -732,20 +795,116 @@ class Pi05ForActionPrediction(nn.Module):
             use_cache=True,
         )
 
-        # 3. Euler-integrated denoising from t=1 down to t=0.
+        # 3. Suffix attention context. Every denoising step sees the same action
+        # tokens against the same frozen prefix, so the masks and position ids
+        # below are identical on all `num_steps` iterations. Building them once
+        # here instead of per step also keeps the step body free of the
+        # host-to-device copy in `torch.tensor([1] + [0] * (H - 1))`, which is
+        # not capturable into a CUDA graph.
+        suffix_ctx = self._build_suffix_context(prefix_pad_masks)
+
+        # 4. Euler-integrated denoising from t=1 down to t=0.
         dt = -1.0 / num_steps
         x_t = noise
+        time_tensor = torch.empty(bsize, dtype=torch.float32, device=device)
+
+        runner = self._denoise_runner(prefix_pad_masks, past_key_values, suffix_ctx, x_t, time_tensor)
+
         for step in range(num_steps):
-            t = 1.0 + step * dt
-            time_tensor = torch.full((bsize,), t, dtype=torch.float32, device=device)
-            v_t = self.denoise_step(
-                prefix_pad_masks=prefix_pad_masks,
-                past_key_values=past_key_values,
-                x_t=x_t,
-                timestep=time_tensor,
-            )
+            time_tensor.fill_(1.0 + step * dt)
+            v_t = runner(x_t, time_tensor)
             x_t = x_t + dt * v_t
         return x_t
+
+    # ── Denoising step: shared body, graphed and eager ────────────────
+    def _build_suffix_context(self, prefix_pad_masks: torch.Tensor) -> "_Pi05SuffixContext":
+        """Loop-invariant attention masks and position ids for the suffix."""
+        batch_size, prefix_len = prefix_pad_masks.shape
+        suffix_len = self.action_horizon
+        device = prefix_pad_masks.device
+
+        suffix_pad_masks = torch.ones(batch_size, suffix_len, dtype=torch.bool, device=device)
+        # The first action token opens a causal block; the rest attend
+        # bidirectionally within it.
+        suffix_att_masks = torch.zeros(batch_size, suffix_len, dtype=torch.float32, device=device)
+        suffix_att_masks[:, 0] = 1.0
+
+        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
+        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+
+        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+
+        return _Pi05SuffixContext(
+            attention_mask_4d=prepare_attention_masks_4d(full_att_2d_masks),
+            position_ids=position_ids,
+        )
+
+    def _denoise_core(
+        self,
+        x_t: torch.Tensor,
+        timestep: torch.Tensor,
+        attention_mask_4d: torch.Tensor,
+        position_ids: torch.Tensor,
+        past_key_values,
+    ) -> torch.Tensor:
+        """One denoising step, given a prebuilt suffix context.
+
+        Body of :meth:`denoise_step` with every loop-invariant tensor lifted to
+        arguments, so the region is shape-stable and free of host-to-device
+        copies — the two things CUDA graph capture requires.
+        """
+        model_dtype = self.action_in_proj.weight.dtype
+        time_cond = self.embed_timestep(timestep)
+        action_emb = self.action_in_proj(x_t.to(dtype=model_dtype))
+
+        outputs_embeds, _ = self.paligemma_with_expert.forward(
+            attention_mask=attention_mask_4d,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=[None, action_emb],
+            use_cache=False,
+            adarms_cond=time_cond,
+        )
+        suffix_out = outputs_embeds[1][:, -self.action_horizon :]
+        suffix_out = suffix_out.to(dtype=self.action_out_proj.weight.dtype)
+        return self.action_out_proj(suffix_out)
+
+    def _denoise_runner(self, prefix_pad_masks, past_key_values, suffix_ctx, x_like, t_like):
+        """Return a callable ``(x_t, timestep) -> v_t`` for the denoising loop.
+
+        On CUDA this captures the step into a graph once and replays it, which
+        turns ~1.4k kernel launches per step into one graph launch. The loop runs
+        `num_steps` identical-shape iterations, so a single capture covers them
+        all. Falls back to the eager body when graphs are unavailable or capture
+        fails; the numerical result is the same either way.
+        """
+        if not self.use_cuda_graph or x_like.device.type != "cuda":
+            return lambda x_t, t: self._denoise_core(
+                x_t, t, suffix_ctx.attention_mask_4d, suffix_ctx.position_ids, past_key_values
+            )
+
+        key = (tuple(prefix_pad_masks.shape), tuple(x_like.shape), str(x_like.dtype))
+        runner = self._denoise_graphs.get(key)
+        if runner is None:
+            try:
+                runner = _Pi05DenoiseGraph(self, suffix_ctx, past_key_values, x_like, t_like)
+            except Exception as exc:  # capture is best-effort, never a hard failure
+                logger.warning(
+                    "Pi05: CUDA graph capture failed (%s: %s); falling back to eager denoising.",
+                    type(exc).__name__,
+                    exc,
+                )
+                self.use_cuda_graph = False
+                return lambda x_t, t: self._denoise_core(
+                    x_t, t, suffix_ctx.attention_mask_4d, suffix_ctx.position_ids, past_key_values
+                )
+            self._denoise_graphs[key] = runner
+        else:
+            # Same shapes, new request: refresh the captured buffers in place.
+            runner.rebind(suffix_ctx, past_key_values)
+        return runner
 
     # ── Weight loading ───────────────────────────────────────────────
     def load_weights(
