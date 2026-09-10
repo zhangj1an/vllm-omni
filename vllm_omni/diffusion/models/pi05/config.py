@@ -133,6 +133,20 @@ class Pi05Config:
     # Weight dtype the checkpoint was saved in.
     dtype: str = "float32"
 
+    # ── Runtime optimizations ─────────────────────────────────────────
+    # Capture the denoising step into a CUDA graph and replay it per Euler
+    # step. Output is bitwise identical to the eager path; this only removes
+    # host launch overhead. Falls back to eager automatically if capture fails.
+    use_cuda_graph: bool = True
+    # Project the AdaRMS timestep conditioning for every step in one GEMM,
+    # instead of per step per norm. The projections are memory-bound on their
+    # ~466 MB of weights, so this reads them once per chunk rather than once per
+    # step. It reassociates the sums: results move by ~8e-3 on pi05_libero
+    # (0.36% of peak action magnitude), well inside the bfloat16-vs-float32 gap
+    # this model already carries, but it is not bit-exact. Set false to keep the
+    # original arithmetic.
+    fuse_adarms: bool = True
+
     # ── Relative actions ──────────────────────────────────────────────
     # True when the checkpoint was trained on actions relative to the current
     # state. Its ``norm_stats`` are then in relative space, so serving it without

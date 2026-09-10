@@ -43,6 +43,8 @@ from transformers.models.paligemma.modeling_paligemma import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from . import triton_adarms
+
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────
@@ -139,6 +141,27 @@ def prepare_attention_masks_4d(att_2d_masks: torch.Tensor) -> torch.Tensor:
     return torch.where(att_2d_masks_4d, 0.0, OPENPI_ATTENTION_MASK_VALUE)
 
 
+class _FusedAdaRMSModulation:
+    """One chunk's worth of AdaRMS modulations, computed in a single GEMM.
+
+    The action expert has 37 conditioned norms (2 per layer x 18, plus the final
+    norm). Each projects the identical timestep vector through its own
+    ``dense``, which as separate calls is 37 ``(B, 1024) @ (1024, 3072)``
+    matrix-vector products per denoising step — 370 per chunk, each ~26us and
+    latency-bound rather than compute-bound. Concatenating the projections lets
+    one GEMM produce all of them.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: torch.Tensor):
+        self.value = value
+
+    def slice_for(self, norm: "Pi05AdaRMSNorm") -> torch.Tensor:
+        start = norm._fused_offset
+        return self.value[..., start : start + 3 * norm.dim]
+
+
 class Pi05AdaRMSNorm(nn.Module):
     """Adaptive RMSNorm conditioned on the flow-matching timestep.
 
@@ -168,6 +191,12 @@ class Pi05AdaRMSNorm(nn.Module):
             nn.init.zeros_(self.dense.weight)
             nn.init.zeros_(self.dense.bias)
             self.weight = None
+            # Column offset into the fused projection; set when the expert fuses
+            # its conditioned norms. None means "not fused, use self.dense".
+            self._fused_offset: int | None = None
+            # Fused Triton normalization; disabled by config or when Triton is
+            # unavailable, in which case the eager chain runs.
+            self.use_fused_kernel = True
         else:
             self.weight = nn.Parameter(torch.zeros(dim))
             self.dense = None
@@ -183,9 +212,8 @@ class Pi05AdaRMSNorm(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Return ``(normed, gate)``; ``gate`` is ``None`` in the unconditioned case."""
         dtype = x.dtype
-        normed = self._norm(x)
         if self.dense is None:
-            normed = normed * (1.0 + self.weight.float())
+            normed = self._norm(x) * (1.0 + self.weight.float())
             return normed.to(dtype), None
 
         if cond is None:
@@ -197,16 +225,27 @@ class Pi05AdaRMSNorm(nn.Module):
                 f"{self.cond_dim} but called without an AdaRMS conditioning vector."
             )
 
-        if cond.shape[-1] != self.cond_dim:
-            raise ValueError(f"Expected AdaRMS cond dim {self.cond_dim}, got {cond.shape[-1]}")
-
-        modulation = self.dense(cond.to(self.dense.weight.dtype))
+        if isinstance(cond, _FusedAdaRMSModulation):
+            # Every conditioned norm in the expert projects the *same* timestep
+            # vector, so they are computed as one GEMM before the layer loop and
+            # this norm just reads its slice. Same weights, same arithmetic —
+            # see PaliGemmaWithActionExpertPi05._fuse_adarms_projections.
+            modulation = cond.slice_for(self)
+        else:
+            if cond.shape[-1] != self.cond_dim:
+                raise ValueError(f"Expected AdaRMS cond dim {self.cond_dim}, got {cond.shape[-1]}")
+            modulation = self.dense(cond.to(self.dense.weight.dtype))
         if x.ndim == 3:
             # (B, 3*dim) → (B, 1, 3*dim), broadcast across the token axis: the
             # timestep is a per-sample scalar, identical for every action token.
             modulation = modulation.unsqueeze(1)
         scale, shift, gate = modulation.chunk(3, dim=-1)
-        normed = normed * (1.0 + scale.float()) + shift.float()
+
+        if self.use_fused_kernel and triton_adarms.can_fuse(x, scale, shift):
+            # Same arithmetic as the two lines below, in one pass over x.
+            return triton_adarms.adarms_modulate(x, scale, shift, self.eps), gate.to(dtype)
+
+        normed = self._norm(x) * (1.0 + scale.float()) + shift.float()
         return normed.to(dtype), gate.to(dtype)
 
 
@@ -477,6 +516,8 @@ class PaliGemmaWithActionExpertPi05(nn.Module):
                 f"got {type(past_key_values)}"
             )
         hidden_states = inputs_embeds[1]
+        if adarms_cond is not None:
+            adarms_cond = self._project_adarms(adarms_cond)
         for layer_idx in range(num_layers):
             hidden_states = _compute_layer_suffix_only(
                 layer_idx,
@@ -489,6 +530,67 @@ class PaliGemmaWithActionExpertPi05(nn.Module):
             )
         hidden_states, _ = expert_lm.norm(hidden_states, adarms_cond)
         return [None, hidden_states], None
+
+    # ── AdaRMS projection fusion ─────────────────────────────────────
+    def _conditioned_adarms_norms(self) -> list["Pi05AdaRMSNorm"]:
+        """Every conditioned norm the expert applies, in application order."""
+        norms: list[Pi05AdaRMSNorm] = []
+        for layer in self.gemma_expert.model.layers:
+            norms.append(layer.input_layernorm)
+            norms.append(layer.post_attention_layernorm)
+        norms.append(self.gemma_expert.model.norm)
+        return [n for n in norms if getattr(n, "dense", None) is not None]
+
+    def _fuse_adarms_projections(self) -> None:
+        """Concatenate the per-norm AdaRMS projections into one weight.
+
+        Each norm's ``dense`` is then re-pointed at its slice of the fused
+        buffer, so this costs no extra memory — the originals are aliased, not
+        copied — and the unfused path keeps working unchanged.
+        """
+        self._adarms_fused = True
+        self._fused_adarms_weight = None
+        norms = self._conditioned_adarms_norms()
+        if not norms:
+            return
+
+        ref = norms[0].dense.weight
+        if any(
+            n.dense.weight.dtype != ref.dtype
+            or n.dense.weight.device != ref.device
+            or n.cond_dim != norms[0].cond_dim
+            for n in norms
+        ):
+            # Mixed layouts would need per-group GEMMs; not worth it, and the
+            # unfused path is correct.
+            logger.debug("π0.5: AdaRMS projections not uniform; skipping fusion.")
+            return
+
+        weight = torch.cat([n.dense.weight.data for n in norms], dim=0)
+        bias = torch.cat([n.dense.bias.data for n in norms], dim=0)
+
+        offset = 0
+        for n in norms:
+            width = 3 * n.dim
+            n._fused_offset = offset
+            n.dense.weight.data = weight[offset : offset + width]
+            n.dense.bias.data = bias[offset : offset + width]
+            offset += width
+
+        self._fused_adarms_weight = weight
+        self._fused_adarms_bias = bias
+        logger.debug("π0.5: fused %d AdaRMS projections into one %s GEMM.", len(norms), tuple(weight.shape))
+
+    def _project_adarms(self, cond):
+        """Timestep vector → all AdaRMS modulations, in one GEMM."""
+        if isinstance(cond, _FusedAdaRMSModulation):
+            return cond  # already projected for the whole chunk
+        if not getattr(self, "_adarms_fused", False):
+            self._fuse_adarms_projections()
+        weight = self._fused_adarms_weight
+        if weight is None:
+            return cond
+        return _FusedAdaRMSModulation(F.linear(cond.to(weight.dtype), weight, self._fused_adarms_bias))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -517,16 +619,24 @@ class _Pi05DenoiseGraph:
     buffers for a new request with the same shapes, rather than re-capturing.
     """
 
-    def __init__(self, model: "Pi05ForActionPrediction", suffix_ctx, past_key_values, x_like, t_like):
+    def __init__(self, model: "Pi05ForActionPrediction", suffix_ctx, past_key_values, x_like, cond_like):
         self._model = model
         self.x = torch.empty_like(x_like)
-        self.t = torch.empty_like(t_like)
+
+        # The conditioning is either a raw timestep vector or a precomputed
+        # AdaRMS modulation row; both are just a tensor to the graph, which only
+        # needs it at a fixed address.
+        self._cond_is_fused = isinstance(cond_like, _FusedAdaRMSModulation)
+        cond_tensor = cond_like.value if self._cond_is_fused else cond_like
+        self.cond_buf = torch.empty_like(cond_tensor)
+        self.cond = _FusedAdaRMSModulation(self.cond_buf) if self._cond_is_fused else self.cond_buf
+
         self.attention_mask_4d = suffix_ctx.attention_mask_4d.clone()
         self.position_ids = suffix_ctx.position_ids.clone()
         self.past_key_values = [(k.clone(), v.clone()) for k, v in past_key_values]
 
         self.x.copy_(x_like)
-        self.t.copy_(t_like)
+        self.cond_buf.copy_(cond_tensor)
 
         # Capture requires the work to have run at least once on a side stream,
         # so lazy initialisation (autotune, workspace allocation) happens before
@@ -544,7 +654,7 @@ class _Pi05DenoiseGraph:
 
     def _run(self) -> torch.Tensor:
         return self._model._denoise_core(
-            self.x, self.t, self.attention_mask_4d, self.position_ids, self.past_key_values
+            self.x, self.cond, self.attention_mask_4d, self.position_ids, self.past_key_values
         )
 
     def rebind(self, suffix_ctx, past_key_values) -> None:
@@ -555,9 +665,9 @@ class _Pi05DenoiseGraph:
             k_static.copy_(k)
             v_static.copy_(v)
 
-    def __call__(self, x_t: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x_t: torch.Tensor, cond) -> torch.Tensor:
         self.x.copy_(x_t)
-        self.t.copy_(timestep)
+        self.cond_buf.copy_(cond.value if isinstance(cond, _FusedAdaRMSModulation) else cond)
         self.graph.replay()
         # The caller consumes this before the next replay overwrites it.
         return self.out
@@ -619,6 +729,12 @@ class Pi05ForActionPrediction(nn.Module):
         # shape set (view count x batch x dtype), not by request history: a
         # repeat request with the same shapes rebinds the existing capture.
         self.use_cuda_graph = bool(getattr(config, "use_cuda_graph", True))
+        # Batch the AdaRMS timestep projections for the whole chunk into one
+        # GEMM. Reads ~466 MB of projection weights once instead of per step,
+        # but reassociates the sums, so results shift by ~8e-3 on this
+        # checkpoint (0.36% of peak action magnitude) against the per-step path.
+        # Set false to keep the original arithmetic exactly.
+        self.fuse_adarms = bool(getattr(config, "fuse_adarms", True))
         self._denoise_graphs: dict[tuple, _Pi05DenoiseGraph] = {}
 
     # ── Prefix embedding ─────────────────────────────────────────────
@@ -778,22 +894,9 @@ class Pi05ForActionPrediction(nn.Module):
                 device=device,
             )
 
-        # 1. Prefix embeddings + mask building.
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, image_masks, lang_tokens, lang_masks
-        )
-        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-        prefix_att_2d_masks_4d = prepare_attention_masks_4d(prefix_att_2d_masks)
-
-        # 2. Forward prefix through PaliGemma LM, producing a list[(k, v)] cache.
-        _, past_key_values = self.paligemma_with_expert.forward(
-            attention_mask=prefix_att_2d_masks_4d,
-            position_ids=prefix_position_ids,
-            past_key_values=None,
-            inputs_embeds=[prefix_embs, None],
-            use_cache=True,
-        )
+        # 1-2. Prefix: embeddings, masks, and the PaliGemma forward that produces
+        # the layer-wise KV cache. Runs once per chunk.
+        prefix_pad_masks, past_key_values = self._prefix_core(images, image_masks, lang_tokens, lang_masks)
 
         # 3. Suffix attention context. Every denoising step sees the same action
         # tokens against the same frozen prefix, so the masks and position ids
@@ -806,13 +909,29 @@ class Pi05ForActionPrediction(nn.Module):
         # 4. Euler-integrated denoising from t=1 down to t=0.
         dt = -1.0 / num_steps
         x_t = noise
-        time_tensor = torch.empty(bsize, dtype=torch.float32, device=device)
 
-        runner = self._denoise_runner(prefix_pad_masks, past_key_values, suffix_ctx, x_t, time_tensor)
+        # The Euler schedule is known before the loop runs, so every step's
+        # AdaRMS conditioning can be projected in one GEMM instead of re-reading
+        # ~466 MB of projection weights on each of the `num_steps` iterations.
+        modulations = None
+        if bsize == 1:
+            timesteps = 1.0 + dt * torch.arange(num_steps, device=device, dtype=torch.float32)
+            modulations = self._precompute_adarms(timesteps)
+
+        if modulations is not None:
+            cond_like = _FusedAdaRMSModulation(modulations[0:1])
+        else:
+            cond_like = torch.empty(bsize, dtype=torch.float32, device=device)
+
+        runner = self._denoise_runner(prefix_pad_masks, past_key_values, suffix_ctx, x_t, cond_like)
 
         for step in range(num_steps):
-            time_tensor.fill_(1.0 + step * dt)
-            v_t = runner(x_t, time_tensor)
+            if modulations is not None:
+                cond = _FusedAdaRMSModulation(modulations[step : step + 1])
+            else:
+                cond_like.fill_(1.0 + step * dt)
+                cond = cond_like
+            v_t = runner(x_t, cond)
             x_t = x_t + dt * v_t
         return x_t
 
@@ -841,10 +960,53 @@ class Pi05ForActionPrediction(nn.Module):
             position_ids=position_ids,
         )
 
+    def _prefix_core(self, images, image_masks, lang_tokens, lang_masks):
+        """Prefix embeddings + PaliGemma forward → ``(pad_masks, kv_cache)``."""
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, image_masks, lang_tokens, lang_masks
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        prefix_att_2d_masks_4d = prepare_attention_masks_4d(prefix_att_2d_masks)
+
+        _, past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=prefix_att_2d_masks_4d,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+        )
+        return prefix_pad_masks, past_key_values
+
+    def _precompute_adarms(self, timesteps: torch.Tensor):
+        """All AdaRMS modulations for a whole chunk, in one GEMM.
+
+        The modulation depends only on the timestep, and the Euler schedule is
+        fixed before the loop starts, so every step's conditioning can be
+        computed up front. That matters because these projections are
+        memory-bound, not launch-bound: the 37 conditioned norms hold ~466 MB of
+        float32 weights, and computing them per step re-reads all of it on every
+        one of the 10 iterations (~4.7 GB per chunk). Batching the timesteps
+        into a single GEMM reads the weights once.
+
+        Returns ``None`` when the expert cannot fuse (mixed dtypes) or the batch
+        is not 1, in which case the caller keeps the per-step path.
+        """
+        if not self.fuse_adarms:
+            return None
+        expert = self.paligemma_with_expert
+        if not getattr(expert, "_adarms_fused", False):
+            expert._fuse_adarms_projections()
+        if expert._fused_adarms_weight is None:
+            return None
+        time_cond = self.embed_timestep(timesteps)  # (num_steps, expert_width)
+        weight = expert._fused_adarms_weight
+        return F.linear(time_cond.to(weight.dtype), weight, expert._fused_adarms_bias)
+
     def _denoise_core(
         self,
         x_t: torch.Tensor,
-        timestep: torch.Tensor,
+        adarms_cond,
         attention_mask_4d: torch.Tensor,
         position_ids: torch.Tensor,
         past_key_values,
@@ -854,9 +1016,12 @@ class Pi05ForActionPrediction(nn.Module):
         Body of :meth:`denoise_step` with every loop-invariant tensor lifted to
         arguments, so the region is shape-stable and free of host-to-device
         copies — the two things CUDA graph capture requires.
+
+        ``adarms_cond`` is either a raw timestep tensor (per-step path) or a
+        precomputed modulation row (see :meth:`_precompute_adarms`).
         """
         model_dtype = self.action_in_proj.weight.dtype
-        time_cond = self.embed_timestep(timestep)
+        time_cond = adarms_cond if isinstance(adarms_cond, _FusedAdaRMSModulation) else self.embed_timestep(adarms_cond)
         action_emb = self.action_in_proj(x_t.to(dtype=model_dtype))
 
         outputs_embeds, _ = self.paligemma_with_expert.forward(
@@ -885,7 +1050,13 @@ class Pi05ForActionPrediction(nn.Module):
                 x_t, t, suffix_ctx.attention_mask_4d, suffix_ctx.position_ids, past_key_values
             )
 
-        key = (tuple(prefix_pad_masks.shape), tuple(x_like.shape), str(x_like.dtype))
+        cond_tensor = t_like.value if isinstance(t_like, _FusedAdaRMSModulation) else t_like
+        key = (
+            tuple(prefix_pad_masks.shape),
+            tuple(x_like.shape),
+            str(x_like.dtype),
+            tuple(cond_tensor.shape),
+        )
         runner = self._denoise_graphs.get(key)
         if runner is None:
             try:
