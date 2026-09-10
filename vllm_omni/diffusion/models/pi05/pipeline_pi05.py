@@ -212,7 +212,26 @@ class Pi05Pipeline(nn.Module):
         if not self.has_real_checkpoint():
             expected = os.path.join(self.model_dir or "<missing-model-dir>", "model.safetensors")
             raise FileNotFoundError(f"π0.5 serving requires checkpoint weights at {expected}.")
-        model = Pi05ForActionPrediction(self.config)
+
+        # Build the module directly on the target device in the target dtype.
+        #
+        # Constructing under the ambient defaults materialises 3.62B parameters
+        # in float32 CPU memory (~14.5 GB) before the cast below ever runs, and
+        # `_load_checkpoint` then adds the 7.47 GB state dict on top. On a host
+        # with less RAM than that sum the loader thrashes into swap and the
+        # machine stops responding. Allocating in place keeps the float32
+        # intermediate from existing at all; the `.to()` below stays as the
+        # authority on the final placement and is a no-op when it already
+        # matches. Weights are unchanged -- only where and in which order they
+        # are allocated.
+        default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(self._torch_dtype)
+        try:
+            with torch.device(self._device):
+                model = Pi05ForActionPrediction(self.config)
+        finally:
+            torch.set_default_dtype(default_dtype)
+
         self._load_checkpoint(model)
         model.to(device=self._device, dtype=self._torch_dtype)
         if self._torch_dtype is torch.bfloat16:

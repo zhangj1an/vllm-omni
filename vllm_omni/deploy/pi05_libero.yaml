@@ -1,0 +1,45 @@
+# π0.5 LIBERO fine-tune (lerobot/pi05_libero_finetuned_v044), bfloat16.
+#
+# Differs from pi05.yaml in two ways, both forced by the checkpoint:
+#
+#  * dtype is bfloat16, not float32. This checkpoint is stored in bf16
+#    (690 BF16 + 122 F32 tensors, 7.47 GB) and float32 would need ~14.5 GB of
+#    weights alone -- more VRAM than a 16 GB card has once the desktop and
+#    activations are accounted for.
+#
+#  * The camera slots are the LIBERO ones. This checkpoint declares
+#    `empty_cameras: 1`, which this loader rejects because it mutates the input
+#    schema; the checkpoint dir used here instead declares the three slots
+#    explicitly in config.json, exactly as that error message prescribes. The
+#    third slot is the padding camera -- π0.5 was trained on 3-camera rigs and
+#    LIBERO has two, so the last slot carries an empty image and a false mask.
+#
+# Everything else (chunk_size, num_inference_steps, action/state widths, norm
+# stats) is read from the checkpoint's own config.json and processor sidecar.
+
+pipeline: pi05
+async_chunk: false
+distributed_executor_backend: mp
+dtype: bfloat16
+
+stages:
+  - stage_id: 0
+    devices: "0"
+    max_num_seqs: 1
+    enforce_eager: true
+    model_class_name: Pi05Pipeline
+    model_config:
+      # OpenPI handshake metadata advertised to the robot client. These must
+      # agree with the checkpoint's derived widths or Pi05Config raises:
+      # action_dim 7 (LIBERO's 6 arm joints + gripper), padded to 32 on the wire.
+      policy_server_config:
+        image_resolution: [224, 224]
+        n_external_cameras: 1
+        needs_wrist_camera: true
+        needs_stereo_camera: false
+        needs_session_id: false
+        action_space: joint_position
+        action_horizon: 50
+        action_dim: 7
+        max_action_dim: 32
+        max_cameras: 3
