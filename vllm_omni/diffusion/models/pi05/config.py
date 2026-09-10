@@ -146,6 +146,14 @@ class Pi05Config:
     # this model already carries, but it is not bit-exact. Set false to keep the
     # original arithmetic.
     fuse_adarms: bool = True
+    # FP8 (e4m3) for the prefix stack: the PaliGemma LM, and optionally the
+    # vision tower. Not the action expert -- at batch 1 its GEMMs are M=50,
+    # where FP8 measures ~4x slower than bfloat16 because quantizing the
+    # activation costs more than the GEMM. Off by default: this is a genuine
+    # precision reduction and must be validated against task success, not just
+    # tensor deltas.
+    fp8_prefix: bool = False
+    fp8_vision: bool = False
 
     # ── Relative actions ──────────────────────────────────────────────
     # True when the checkpoint was trained on actions relative to the current

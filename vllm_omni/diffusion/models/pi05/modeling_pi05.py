@@ -43,7 +43,7 @@ from transformers.models.paligemma.modeling_paligemma import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from . import triton_adarms
+from . import fp8_linear, triton_adarms
 
 logger = logging.getLogger(__name__)
 
@@ -735,6 +735,10 @@ class Pi05ForActionPrediction(nn.Module):
         # checkpoint (0.36% of peak action magnitude) against the per-step path.
         # Set false to keep the original arithmetic exactly.
         self.fuse_adarms = bool(getattr(config, "fuse_adarms", True))
+        # FP8 for the prefix stack only. Off by default: it is a real precision
+        # reduction and must be validated per checkpoint against task success.
+        self.fp8_prefix = bool(getattr(config, "fp8_prefix", False))
+        self.fp8_vision = bool(getattr(config, "fp8_vision", False))
         self._denoise_graphs: dict[tuple, _Pi05DenoiseGraph] = {}
 
     # ── Prefix embedding ─────────────────────────────────────────────
@@ -960,8 +964,31 @@ class Pi05ForActionPrediction(nn.Module):
             position_ids=position_ids,
         )
 
+    def _maybe_convert_prefix_to_fp8(self) -> None:
+        """Convert the PaliGemma prefix stack to FP8 linears, once.
+
+        Only the prefix: at batch 1 the action expert's GEMMs are M=50, where
+        FP8 measures ~4x slower than bfloat16 because activation quantization
+        costs more than the GEMM it accelerates. See fp8_linear for the numbers.
+        """
+        self._fp8_converted = True
+        if not self.fp8_prefix:
+            return
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 8:
+            logger.info("π0.5: FP8 requires compute capability 8.9+; keeping the prefix in its load dtype.")
+            return
+        lm = self.paligemma_with_expert.paligemma.model.language_model
+        n = fp8_linear.convert_linears_to_fp8(lm)
+        if self.fp8_vision:
+            n += fp8_linear.convert_linears_to_fp8(
+                self.paligemma_with_expert.paligemma.model.vision_tower
+            )
+        logger.info("π0.5: converted %d prefix linear layers to FP8.", n)
+
     def _prefix_core(self, images, image_masks, lang_tokens, lang_masks):
         """Prefix embeddings + PaliGemma forward → ``(pad_masks, kv_cache)``."""
+        if not getattr(self, "_fp8_converted", False):
+            self._maybe_convert_prefix_to_fp8()
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, image_masks, lang_tokens, lang_masks
         )
